@@ -69,6 +69,10 @@ jobs:
             echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
             apt install -y sudo dialog apt-utils git curl zip clang make ocl-icd-opencl-dev libwayland-client0 libwayland-dev
             export RUNLEVEL=1
+            export CC=clang
+            export CXX=clang++
+            export CC_x86_64_unknown_linux_gnu=clang
+            export CXX_x86_64_unknown_linux_gnu=clang++
             curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
             source \$HOME/.cargo/env
             cargo install just
