@@ -79,7 +79,6 @@ deploy:
 deploy:
     #!/bin/bash
     set -e
-
     cargo build --profile deploy
     cd "{{TargetDir}}"
     rm -Rf gyroflow-ofx-linux Gyroflow-OpenFX-linux.zip

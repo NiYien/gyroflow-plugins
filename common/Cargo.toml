@@ -21,7 +21,7 @@ lazy_static = "1.5.0"
 fastrand = "2.4"
 simplelog = "0.12.2"
 win_dbg_logger = "0.1"
-mimalloc = { version = "0.1.50", default-features = false }
+mimalloc = { version = "=0.1.47", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 oslog = "0.2"
