@@ -1,5 +1,16 @@
-on: [push, pull_request]
-name: Release
+name: NiYien Plugins Release
+
+run-name: Plugins ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_label || github.ref_name || github.sha }}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      build_label:
+        description: Optional label for a manual plugin build run
+        required: false
+        type: string
 
 jobs:
   build:

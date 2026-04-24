@@ -1,6 +1,6 @@
 [package]
 name = "gyroflow-ofx"
-version = "2.1.1"
+version.workspace = true
 authors = ["Adrian <adrian.eddy@gmail.com>", "Ilya Epifanov <elijah.epifanov@gmail.com>"]
 license = "GPL-3.0-or-later"
 edition = "2024"
@@ -18,15 +18,3 @@ regex = "1.12"
 
 [build-dependencies]
 winres = "0.1"
-
-[patch.crates-io]
-ofx = { git = "https://github.com/AdrianEddy/ofx-rs.git", rev = "0b15219" }
-ofx_sys = { git = "https://github.com/AdrianEddy/ofx-rs.git", rev = "0b15219" }
-#ofx = { path = "../../ofx-rs/ofx" }
-#ofx_sys = { path = "../../ofx-rs/ofx-sys" }
-
-[profile.deploy]
-inherits = "release"
-codegen-units = 1
-lto = true
-strip = true

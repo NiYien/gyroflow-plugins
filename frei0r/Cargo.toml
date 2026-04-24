@@ -1,6 +1,6 @@
 [package]
 name = "gyroflow-frei0r"
-version = "2.1.1"
+version.workspace = true
 authors = ["Adrian <adrian.eddy@gmail.com>"]
 edition = "2021"
 description = "Gyroflow frei0r plugin"
@@ -12,9 +12,3 @@ crate-type = ["cdylib"]
 gyroflow-plugin-base = { path = "../common" }
 log = "0.4"
 cstr = "0.2"
-
-[profile.deploy]
-inherits = "release"
-codegen-units = 1
-lto = true
-strip = true

@@ -1,6 +1,6 @@
 [package]
 name = "gyroflow_adobe"
-version = "2.1.1"
+version.workspace = true
 authors = ["Adrian <adrian.eddy@gmail.com>"]
 edition = "2024"
 
@@ -26,12 +26,3 @@ log-panics = { version = "2.1", features = ["with-backtrace"]}
 [build-dependencies]
 #pipl = { path = "../../after-effects/pipl" }
 pipl = "0.1"
-
-#[profile.release]
-#debug = true
-
-[profile.deploy]
-inherits = "release"
-codegen-units = 1
-lto = true
-strip = true

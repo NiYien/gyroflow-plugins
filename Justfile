@@ -35,9 +35,7 @@ publish version:
     #!/bin/bash
     git clone --depth 1 git@github.com:gyroflow/gyroflow-plugins.git __publish
     pushd __publish
-    sed -i'' -E "0,/version = \"[0-9\.a-z-]+\"/s//version = \"{{version}}\"/" adobe/Cargo.toml
-    sed -i'' -E "0,/version = \"[0-9\.a-z-]+\"/s//version = \"{{version}}\"/" openfx/Cargo.toml
-    sed -i'' -E "0,/version = \"[0-9\.a-z-]+\"/s//version = \"{{version}}\"/" frei0r/Cargo.toml
+    sed -i'' -E "0,/version = \"[0-9\.a-z-]+\"/s//version = \"{{version}}\"/" Cargo.toml
     just update
     git commit -a -m "Release v{{version}}"
     git tag -a "v{{version}}" -m "Release v{{version}}"
