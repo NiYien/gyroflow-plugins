@@ -4,6 +4,8 @@ run-name: Plugins ${{ github.event_name == 'workflow_dispatch' && github.event.i
 
 on:
   push:
+    tags:
+      - 'v*'
   pull_request:
   workflow_dispatch:
     inputs:
