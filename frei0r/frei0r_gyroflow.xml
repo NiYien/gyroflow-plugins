@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <!DOCTYPE kpartgui>
-<effect tag="frei0r.gyroflow" id="frei0r.gyroflow" type="video">
-    <name>Gyroflow</name>
-    <description>Gyroflow video stabilization</description>
+<effect tag="frei0r.gyroflow_niyien" id="frei0r.gyroflow_niyien" type="video">
+    <name>Gyroflow(Niyien)</name>
+    <description>Gyroflow(Niyien) video stabilization</description>
     <author>AdrianEddy</author>
     <parameter type="url" name="Project" filter="Project or video (*.gyroflow *.mp4 *.mov)">
         <name>Project file</name>

@@ -33,7 +33,7 @@ update:
 
 publish version:
     #!/bin/bash
-    git clone --depth 1 git@github.com:gyroflow/gyroflow-plugins.git __publish
+    git clone --depth 1 git@github.com:NiYien/gyroflow-plugins.git __publish
     pushd __publish
     sed -i'' -E "0,/version = \"[0-9\.a-z-]+\"/s//version = \"{{version}}\"/" Cargo.toml
     just update

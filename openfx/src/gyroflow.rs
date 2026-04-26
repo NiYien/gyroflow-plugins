@@ -8,7 +8,7 @@ use gyroflow_plugin_base::parking_lot::{ Mutex, RwLock };
 use gyroflow_plugin_base::lru::LruCache;
 
 plugin_module!(
-    "xyz.gyroflow",
+    "xyz.niyien.gyroflow",
     ApiVersion(1),
     PluginVersion(1, 2),
     GyroflowPlugin::default
@@ -228,7 +228,7 @@ impl Execute for GyroflowPlugin {
                 if (src_fps - fps).abs() > 0.01 {
                     instance_data.plugin.set_status(&mut instance_data.params, "Timeline fps mismatch!", "Timeline frame rate doesn't match the clip frame rate! Use the plugin in Fusion instead", false);
                 } else if !has_accurate_timestamps && !has_offsets {
-                    instance_data.plugin.set_status(&mut instance_data.params, "Not synced. Open in Gyroflow", "Gyro data is not synced with the video, open the video in Gyroflow and add sync points (eg. by doing autosync)", false);
+                    instance_data.plugin.set_status(&mut instance_data.params, "Not synced. Open in Gyroflow(Niyien)", "Gyro data is not synced with the video, open the video in Gyroflow(Niyien) and add sync points (eg. by doing autosync)", false);
                 } else {
                     instance_data.plugin.set_status(&mut instance_data.params, "OK", "OK", true);
                 }
@@ -695,9 +695,9 @@ impl Execute for GyroflowPlugin {
                 let mut effect_properties: EffectDescriptor = effect.properties()?;
                 effect_properties.set_grouping("Warp")?;
 
-                effect_properties.set_label("Gyroflow")?;
-                effect_properties.set_short_label("Gyroflow")?;
-                effect_properties.set_long_label("Gyroflow")?;
+                effect_properties.set_label("Gyroflow(Niyien)")?;
+                effect_properties.set_short_label("Gyroflow(Niyien)")?;
+                effect_properties.set_long_label("Gyroflow(Niyien)")?;
 
                 effect_properties.set_supported_pixel_depths(&[BitDepth::Byte, BitDepth::Short, BitDepth::Float])?;
                 effect_properties.set_supported_contexts(&[ImageEffectContext::Filter])?;

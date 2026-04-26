@@ -21,8 +21,8 @@ fn main() {
 
     pipl::plugin_build(vec![
         Property::Kind(PIPLType::AEEffect),
-        Property::Name("Gyroflow"),
-        Property::Category("Gyroflow"),
+        Property::Name("Gyroflow(Niyien)"),
+        Property::Category("Gyroflow(Niyien)"),
 
         #[cfg(target_os = "windows")]
         Property::CodeWin64X86("EffectMain"),
@@ -58,7 +58,7 @@ fn main() {
 			OutFlags2::SupportsGpuRenderF32 |
             OutFlags2::ParamGroupStartCollapsedFlag
 		),
-        Property::AE_Effect_Match_Name("Gyroflow"),
+        Property::AE_Effect_Match_Name("GyroflowNiyien"),
         Property::AE_Reserved_Info(0),
         Property::AE_Effect_Support_URL("https://docs.gyroflow.xyz"),
     ])

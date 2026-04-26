@@ -6,13 +6,13 @@ TargetDir := env_var_or_default("CARGO_TARGET_DIR", "target")
 [windows]
 release:
     cargo build --release
-    Copy-Item -Force '{{TargetDir}}\release\gyroflow_adobe.dll' '{{TargetDir}}\release\Gyroflow.aex'
-    Start-Process PowerShell -Verb runAs -ArgumentList "-command Copy-Item -Force '{{TargetDir}}\release\gyroflow_adobe.dll' 'C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\Gyroflow-Adobe-windows.aex'"
+    Copy-Item -Force '{{TargetDir}}\release\gyroflow_adobe.dll' '{{TargetDir}}\release\GyroflowNiyien.aex'
+    Start-Process PowerShell -Verb runAs -ArgumentList "-command Copy-Item -Force '{{TargetDir}}\release\gyroflow_adobe.dll' 'C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\GyroflowNiyien-Adobe-windows.aex'"
 
 [windows]
 build:
     cargo build
-    Start-Process PowerShell -Verb runAs -ArgumentList "-command Copy-Item -Force '{{TargetDir}}\debug\gyroflow_adobe.dll' 'C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\Gyroflow-Adobe-windows.aex'"
+    Start-Process PowerShell -Verb runAs -ArgumentList "-command Copy-Item -Force '{{TargetDir}}\debug\gyroflow_adobe.dll' 'C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore\GyroflowNiyien-Adobe-windows.aex'"
 
 [windows]
 deploy:
@@ -21,7 +21,7 @@ deploy:
 
     cargo build --profile deploy
     cd "{{TargetDir}}"
-    Copy-Item -Force "deploy\gyroflow_adobe.dll" "Gyroflow-Adobe-windows.aex"
+    Copy-Item -Force "deploy\gyroflow_adobe.dll" "GyroflowNiyien-Adobe-windows.aex"
 
 [macos]
 deploy:
@@ -51,34 +51,35 @@ deploy:
     fi
 
     cd "{{TargetDir}}"
-    rm -Rf gyroflow-adobe-macos Gyroflow-Adobe-macos.dmg
-    mkdir -p gyroflow-adobe-macos/Gyroflow.plugin/Contents/Resources
-    mkdir -p gyroflow-adobe-macos/Gyroflow.plugin/Contents/MacOS
+    rm -Rf gyroflow-niyien-adobe-macos GyroflowNiyien-Adobe-macos.dmg
+    mkdir -p gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Resources
+    mkdir -p gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS
 
-    echo "eFKTFXTC" >> gyroflow-adobe-macos/Gyroflow.plugin/Contents/PkgInfo
-    /usr/libexec/PlistBuddy -c 'add CFBundlePackageType string eFKT' gyroflow-adobe-macos/Gyroflow.plugin/Contents/Info.plist
-    /usr/libexec/PlistBuddy -c 'add CFBundleSignature string FXTC' gyroflow-adobe-macos/Gyroflow.plugin/Contents/Info.plist
-    /usr/libexec/PlistBuddy -c 'add CFBundleIdentifier string xyz.gyroflow.adobe' gyroflow-adobe-macos/Gyroflow.plugin/Contents/Info.plist
-    /usr/libexec/PlistBuddy -c "add CFBundleVersion string $version_short" gyroflow-adobe-macos/Gyroflow.plugin/Contents/Info.plist
-    /usr/libexec/PlistBuddy -c "add CFBundleShortVersionString string $version" gyroflow-adobe-macos/Gyroflow.plugin/Contents/Info.plist
+    echo "eFKTFXTC" >> gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/PkgInfo
+    /usr/libexec/PlistBuddy -c 'add CFBundlePackageType string eFKT' gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c 'add CFBundleSignature string FXTC' gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c 'add CFBundleIdentifier string com.niyien.gyroflow.adobe' gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c 'add CFBundleExecutable string GyroflowNiyien' gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c "add CFBundleVersion string $version_short" gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Info.plist
+    /usr/libexec/PlistBuddy -c "add CFBundleShortVersionString string $version" gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Info.plist
 
-    cp x86_64-apple-darwin/deploy/gyroflow_adobe.rsrc gyroflow-adobe-macos/Gyroflow.plugin/Contents/Resources/Gyroflow.rsrc
+    cp x86_64-apple-darwin/deploy/gyroflow_adobe.rsrc gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Resources/GyroflowNiyien.rsrc
 
-    lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_adobe.dylib -create -output gyroflow-adobe-macos/Gyroflow.plugin/Contents/MacOS/Gyroflow.dylib
-    mv gyroflow-adobe-macos/Gyroflow.plugin/Contents/MacOS/Gyroflow.dylib gyroflow-adobe-macos/Gyroflow.plugin/Contents/MacOS/Gyroflow
+    lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_adobe.dylib -create -output gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS/GyroflowNiyien.dylib
+    mv gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS/GyroflowNiyien.dylib gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS/GyroflowNiyien
 
-    codesign -vvvv --deep --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} gyroflow-adobe-macos/Gyroflow.plugin
-    codesign -vvvv --deep --verify gyroflow-adobe-macos/Gyroflow.plugin
+    codesign -vvvv --deep --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin
+    codesign -vvvv --deep --verify gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin
 
-    pushd gyroflow-adobe-macos
-        zip -r ../Gyroflow-Adobe-macos.zip Gyroflow.plugin
+    pushd gyroflow-niyien-adobe-macos
+        zip -r ../GyroflowNiyien-Adobe-macos.zip GyroflowNiyien.plugin
     popd
 
-    ln -sf "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/" "gyroflow-adobe-macos/"
-    hdiutil create "Gyroflow-Adobe-macos.dmg" -volname "Gyroflow Adobe plugin" -fs HFS+ -srcfolder "gyroflow-adobe-macos/" -ov -format UDZO -imagekey zlib-level=9
+    ln -sf "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/" "gyroflow-niyien-adobe-macos/"
+    hdiutil create "GyroflowNiyien-Adobe-macos.dmg" -volname "Gyroflow(Niyien) Adobe plugin" -fs HFS+ -srcfolder "gyroflow-niyien-adobe-macos/" -ov -format UDZO -imagekey zlib-level=9
 
-    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} "Gyroflow-Adobe-macos.dmg"
-    codesign -vvvv --deep --verify "Gyroflow-Adobe-macos.dmg"
+    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} "GyroflowNiyien-Adobe-macos.dmg"
+    codesign -vvvv --deep --verify "GyroflowNiyien-Adobe-macos.dmg"
 
 [linux]
 deploy:

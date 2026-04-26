@@ -9,7 +9,7 @@ deploy:
     cargo build --profile deploy
     cd "{{TargetDir}}"
 
-    cp "deploy/gyroflow_frei0r.dll" "libgyroflow_frei0r.dll"
+    cp "deploy/gyroflow_frei0r.dll" "libgyroflow_niyien_frei0r.dll"
 
 [macos]
 deploy:
@@ -23,8 +23,8 @@ deploy:
     cargo build --profile deploy --target aarch64-apple-darwin
     cd "{{TargetDir}}"
 
-    lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_frei0r.dylib -create -output libgyroflow_frei0r.dylib
-    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} libgyroflow_frei0r.dylib
+    lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_frei0r.dylib -create -output libgyroflow_niyien_frei0r.dylib
+    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} libgyroflow_niyien_frei0r.dylib
 
 [linux]
 deploy:
@@ -32,4 +32,4 @@ deploy:
     set -e
     cargo build --profile deploy
     cd "{{TargetDir}}"
-    cp deploy/libgyroflow_frei0r.so libgyroflow_frei0r.so
+    cp deploy/libgyroflow_frei0r.so libgyroflow_niyien_frei0r.so

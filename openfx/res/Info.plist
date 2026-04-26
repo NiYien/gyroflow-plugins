@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>xyz.gyroflow.ofx</string>
+    <string>com.niyien.gyroflow.ofx</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
 	<key>CFBundleExecutable</key>
-	<string>Gyroflow.ofx</string>
+	<string>GyroflowNiyien.ofx</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundlePackageType</key>

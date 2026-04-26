@@ -331,7 +331,7 @@ impl AdobePluginGlobal for Plugin {
 
         match cmd {
             ae::Command::About => {
-                out_data.set_return_msg(concat!("Gyroflow, v", env!("CARGO_PKG_VERSION"), "\nCopyright 2024 AdrianEddy\rGyroflow plugin."));
+                out_data.set_return_msg(concat!("Gyroflow(Niyien), v", env!("CARGO_PKG_VERSION"), "\nCopyright 2024 AdrianEddy\rGyroflow(Niyien) plugin."));
             }
             ae::Command::GlobalSetup => {
                 gyroflow_core::gpu::initialize_contexts();
@@ -358,11 +358,11 @@ impl AdobePluginGlobal for Plugin {
                     out_data.set_out_flag2(ae::OutFlags2::SupportsGpuRenderF32, true);
 
                     if let Ok(util) = ae::aegp::suites::Utility::new() {
-                        unsafe { AEGP_PLUGIN_ID = util.register_with_aegp("Gyroflow")?; }
+                        unsafe { AEGP_PLUGIN_ID = util.register_with_aegp("GyroflowNiyien")?; }
                     }
                 }
 
-                let _ = in_data.effect().set_options_button_name("Open Gyroflow");
+                let _ = in_data.effect().set_options_button_name("Open Gyroflow(Niyien)");
             },
             ae::Command::ArbitraryCallback { mut extra } => {
                 if let Err(e) = extra.dispatch::<ArbString, Params>(Params::InstanceId) {

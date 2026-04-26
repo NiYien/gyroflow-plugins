@@ -17,6 +17,27 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub type PluginResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GyroflowLaunchCommand {
+    program: String,
+    args: Vec<String>,
+    hide_window: bool,
+}
+
+impl GyroflowLaunchCommand {
+    fn spawn(self) -> std::io::Result<std::process::Child> {
+        let mut cmd = std::process::Command::new(&self.program);
+        #[cfg(target_os = "windows")]
+        {
+            if self.hide_window {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            }
+        }
+        cmd.args(&self.args).spawn()
+    }
+}
+
 #[derive(Debug, Copy, Clone, Hash, PartialEq, PartialOrd, Eq, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Params {
     Logo,
@@ -203,7 +224,9 @@ impl GyroflowPluginBase {
                 Some(v)
             },
             _ => {
-                if cfg!(target_os = "macos") && std::path::Path::new("/Applications/Gyroflow.app/Contents/MacOS/gyroflow").exists() {
+                if cfg!(target_os = "macos") && std::path::Path::new("/Applications/GyroflowNiYien.app").exists() {
+                    Some("/Applications/GyroflowNiYien.app".into())
+                } else if cfg!(target_os = "macos") && std::path::Path::new("/Applications/Gyroflow.app/Contents/MacOS/gyroflow").exists() {
                     Some("/Applications/Gyroflow.app".into())
                 } else {
                     None
@@ -212,52 +235,47 @@ impl GyroflowPluginBase {
         }
     }
 
-    pub fn open_gyroflow(project_path: Option<&str>) {
-        if cfg!(target_os = "macos") {
-            let mut cmd = std::process::Command::new("osascript");
-            if let Some(project) = project_path {
-                if !project.is_empty() {
-                    cmd.args(&["-e", &format!("tell application \"Gyroflow\" to open file \"{}\"", project.replace("/", ":").trim_start_matches(':'))]);
-                } else {
-                    cmd.args(&["-e", "tell application \"Gyroflow\" to activate"]);
-                }
-            }
-            let _ = cmd.output();
-        } else {
-            if let Some(v) = Self::get_gyroflow_location() {
-                if !v.is_empty() {
-                    if let Some(project) = project_path {
-                        let result = if !project.is_empty() {
-                            if cfg!(target_os = "macos") {
-                                std::process::Command::new("open").args(["-a", &v, "--args", "--open", &project]).spawn()
-                            } else if cfg!(target_os = "windows") && v.starts_with("shell:") {
-                                let mut cmd = std::process::Command::new("cmd.exe");
-                                #[cfg(target_os = "windows")]
-                                { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); } // CREATE_NO_WINDOW
-                                cmd.args(["/c", "start", "", &v, "--open", &project]).spawn()
-                            } else {
-                                std::process::Command::new(v).args(["--open", &project]).spawn()
-                            }
-                        } else {
-                            if cfg!(target_os = "macos") {
-                                std::process::Command::new("open").args(["-a", &v]).spawn()
-                            } else if cfg!(target_os = "windows") && v.starts_with("shell:") {
-                                let mut cmd = std::process::Command::new("cmd.exe");
-                                #[cfg(target_os = "windows")]
-                                { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); } // CREATE_NO_WINDOW
-                                cmd.args(["/c", "start", "", &v]).spawn()
-                            } else {
-                                std::process::Command::new(v).spawn()
-                            }
-                        };
-                        if let Err(e) = result {
-                            rfd::MessageDialog::new().set_description(format!("Unable to start Gyroflow: {e:?}")).show();
-                        }
-                    }
-                }
+    fn gyroflow_launch_command(location: &str, project_path: Option<&str>, target_os: &str) -> Option<GyroflowLaunchCommand> {
+        if location.is_empty() {
+            return None;
+        }
+
+        let project = project_path.unwrap_or_default();
+        let (program, args, hide_window) = if !project.is_empty() {
+            if target_os == "macos" {
+                // Keep this as a file argument so LaunchServices delivers an open-file event to a running app.
+                ("open", vec!["-a", location, project], false)
+            } else if target_os == "windows" && location.starts_with("shell:") {
+                ("cmd.exe", vec!["/c", "start", "", location, "--open", project], true)
             } else {
-                rfd::MessageDialog::new().set_description("Unable to find Gyroflow app path. Make sure to run Gyroflow app at least once and that version is at least v1.6.0").show();
+                (location, vec!["--open", project], false)
             }
+        } else {
+            if target_os == "macos" {
+                ("open", vec!["-a", location], false)
+            } else if target_os == "windows" && location.starts_with("shell:") {
+                ("cmd.exe", vec!["/c", "start", "", location], true)
+            } else {
+                (location, Vec::new(), false)
+            }
+        };
+
+        Some(GyroflowLaunchCommand {
+            program: program.to_string(),
+            args: args.into_iter().map(ToString::to_string).collect(),
+            hide_window,
+        })
+    }
+
+    pub fn open_gyroflow(project_path: Option<&str>) {
+        if let Some(v) = Self::get_gyroflow_location() {
+            if let Some(command) = Self::gyroflow_launch_command(&v, project_path, std::env::consts::OS) {
+                if let Err(e) = command.spawn() {
+                    rfd::MessageDialog::new().set_description(format!("Unable to start Gyroflow(Niyien): {e:?}")).show();
+                }
+            }
+        } else {
+            rfd::MessageDialog::new().set_description("Unable to find Gyroflow(Niyien) app path. Make sure to run Gyroflow(Niyien) app at least once.").show();
         }
     }
 
@@ -268,14 +286,14 @@ impl GyroflowPluginBase {
             ParameterType::HiddenString { id: "ProjectData" },
             ParameterType::HiddenString { id: "EmbeddedLensProfile" },
             ParameterType::HiddenString { id: "EmbeddedPreset" },
-            ParameterType::Group { id: "ProjectGroup", label: "Gyroflow project", opened: true, parameters: vec![
+            ParameterType::Group { id: "ProjectGroup", label: "Gyroflow(Niyien) project", opened: true, parameters: vec![
                 ParameterType::Text    { id: "Status",            label: "Status",                   hint: "Status" },
                 ParameterType::Button  { id: "LoadCurrent",       label: "Load for current file",    hint: "Try to load project file for current video file, or try to stabilize that video file directly" },
-                ParameterType::Button  { id: "Browse",            label: "Browse",                   hint: "Browse for the Gyroflow project file" },
+                ParameterType::Button  { id: "Browse",            label: "Browse",                   hint: "Browse for the Gyroflow(Niyien) project file" },
                 ParameterType::Button  { id: "LoadLens",          label: "Load preset/lens profile", hint: "Browse for the lens profile or a preset" },
-                ParameterType::Button  { id: "OpenGyroflow",      label: "Open Gyroflow",            hint: "Open project in Gyroflow" },
+                ParameterType::Button  { id: "OpenGyroflow",      label: "Open Gyroflow(Niyien)",    hint: "Open project in Gyroflow(Niyien)" },
                 ParameterType::Button  { id: "ReloadProject",     label: "Reload project",           hint: "Reload currently loaded project" },
-                ParameterType::Button  { id: "OpenRecentProject", label: "Last saved project",       hint: "Load most recently saved project in the Gyroflow app" },
+                ParameterType::Button  { id: "OpenRecentProject", label: "Last saved project",       hint: "Load most recently saved project in the Gyroflow(Niyien) app" },
             ] },
             ParameterType::Group { id: "AdjustGroup", label: "Adjust parameters", opened: true, parameters: vec![
                 ParameterType::Slider   { id: "Smoothness",             label: "Smoothness",           hint: "Smoothness",                   min: 1.0,    max: 300.0, default: 50.0 },
@@ -291,12 +309,12 @@ impl GyroflowPluginBase {
                 ParameterType::Slider   { id: "InputRotation",          label: "Input rotation",       hint: "Input rotation",               min: -360.0, max: 360.0, default: 0.0 },
                 ParameterType::Slider   { id: "Fov",                    label: "FOV",                  hint: "FOV",                          min: 0.1,    max: 3.0,   default: 1.0 },
                 ParameterType::Slider   { id: "VideoSpeed",             label: "Video speed",          hint: "Use this slider to change video speed or keyframe it, instead of built-in speed changes in the editor", min: 0.0001, max: 1000.0, default: 100.0 },
-                ParameterType::Checkbox { id: "DisableStretch",         label: "Disable Gyroflow's stretch", hint: "If you used Input stretch in the lens profile in Gyroflow, and you de-stretched the video separately in your editor (by setting anamorphic squeeze factor), check this to disable Gyroflow's internal stretching.", default: false },
+                ParameterType::Checkbox { id: "DisableStretch",         label: "Disable Gyroflow(Niyien)'s stretch", hint: "If you used Input stretch in the lens profile in Gyroflow(Niyien), and you de-stretched the video separately in your editor (by setting anamorphic squeeze factor), check this to disable Gyroflow(Niyien)'s internal stretching.", default: false },
                 ParameterType::Select   { id: "IntegrationMethod",      label: "Integration method",   hint: "IMU integration method", options: vec!["None", "Complementary", "VQF", "Simple gyro", "Simple gyro + accel", "Mahony", "Madgwick"], default: "VQF" },
                 //ParameterType::Slider   { id: "FusionStartFrame",       label: "Fusion Start Frame",   hint: "Fusion Start Frame (from Project Settings)", min: 0.0, max: 100000.0, default: 0.0 },
             ] },
             ParameterType::Group { id: "KeyframesGroup", label: "Keyframes", opened: false, parameters: vec![
-                ParameterType::Checkbox { id: "UseGyroflowsKeyframes", label: "Use Gyroflow's keyframes", hint: "Use internal Gyroflow's keyframes, instead of the editor ones.", default: false },
+                ParameterType::Checkbox { id: "UseGyroflowsKeyframes", label: "Use Gyroflow(Niyien)'s keyframes", hint: "Use internal Gyroflow(Niyien)'s keyframes, instead of the editor ones.", default: false },
                 ParameterType::Checkbox { id: "StabilizationSpeedRamp",label: "Adjust stabilization to speed", hint: "When you speed ramp the clip, let Gyroflow adjust the stabilization amount to the video speed.", default: true },
                 ParameterType::Button   { id: "RecalculateKeyframes",  label: "Recalculate keyframes",         hint: "Recalculate keyframes after adjusting the splines (in Fusion mode)" },
                 ParameterType::Button   { id: "CreateCamera",  label: "Create camera", hint: "Create camera layer" },
@@ -460,7 +478,7 @@ impl GyroflowPluginBaseInstance {
         let _ = params.set_enabled(Params::OutputSizeToTimeline, loaded);
         let _ = params.set_enabled(Params::OutputSizeSwap, loaded);
         let _ = params.set_string(Params::Status, if loaded { "OK" } else { "Project not loaded" });
-        let _ = params.set_label(Params::OpenGyroflow, if loaded { "Open in Gyroflow" } else { "Open Gyroflow" });
+        let _ = params.set_label(Params::OpenGyroflow, if loaded { "Open in Gyroflow(Niyien)" } else { "Open Gyroflow(Niyien)" });
     }
 
     pub fn initialize_instance_id(&mut self, instance_id: &mut String) {
@@ -1055,6 +1073,40 @@ impl std::str::FromStr for Params {
 impl ToString for Params {
     fn to_string(&self) -> String {
         format!("{:?}", self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_project_open_uses_file_open_event() {
+        let command = GyroflowPluginBase::gyroflow_launch_command(
+            "/Applications/GyroflowNiYien.app",
+            Some("/Users/jhe/project.gyroflow"),
+            "macos",
+        ).unwrap();
+
+        assert_eq!(command.program, "open");
+        assert_eq!(command.args, vec![
+            "-a",
+            "/Applications/GyroflowNiYien.app",
+            "/Users/jhe/project.gyroflow",
+        ]);
+        assert!(!command.args.iter().any(|arg| arg == "--args" || arg == "--open"));
+    }
+
+    #[test]
+    fn macos_without_project_activates_app() {
+        let command = GyroflowPluginBase::gyroflow_launch_command(
+            "/Applications/GyroflowNiYien.app",
+            None,
+            "macos",
+        ).unwrap();
+
+        assert_eq!(command.program, "open");
+        assert_eq!(command.args, vec!["-a", "/Applications/GyroflowNiYien.app"]);
     }
 }
 

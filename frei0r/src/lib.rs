@@ -29,7 +29,7 @@ struct Instance {
 #[no_mangle]
 extern "C" fn f0r_get_plugin_info(info: *mut f0r_plugin_info) {
     unsafe {
-        (*info).name = cstr!("Gyroflow").as_ptr();
+        (*info).name = cstr!("Gyroflow(Niyien)").as_ptr();
         (*info).author = cstr!("AdrianEddy").as_ptr();
         (*info).plugin_type = F0R_PLUGIN_TYPE_FILTER;
         (*info).color_model = F0R_COLOR_MODEL_PACKED32;
@@ -37,7 +37,7 @@ extern "C" fn f0r_get_plugin_info(info: *mut f0r_plugin_info) {
         (*info).major_version = 0;
         (*info).minor_version = 1;
         (*info).num_params = 4;
-        (*info).explanation = cstr!("Gyroflow video stabilization").as_ptr();
+        (*info).explanation = cstr!("Gyroflow(Niyien) video stabilization").as_ptr();
     }
 }
 #[no_mangle]

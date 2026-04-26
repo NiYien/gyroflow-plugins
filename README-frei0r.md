@@ -1,5 +1,5 @@
 
-# Gyroflow frei0r plugin
+# Gyroflow(Niyien) frei0r plugin
 
 * Works with project files exported from [Gyroflow](http://gyroflow.xyz/)
 * Allows you to apply the stabilization right in your frei0r-capable video editor
@@ -21,26 +21,26 @@ Some applications using frei0r, in which you can use this plugin:
 
 # Downloads
 
-## https://github.com/gyroflow/gyroflow-frei0r/releases
+## https://github.com/NiYien/gyroflow-plugins/releases
 
 # Installation
 
 ### Kdenlive:
 1. Copy the plugin binary to `kdenlive/lib/frei0r-1/`
-2. Copy [`frei0r_gyroflow.xml`](https://raw.githubusercontent.com/gyroflow/gyroflow-frei0r/main/frei0r_gyroflow.xml) to `kdenlive/bin/data/kdenlive/effects/`
+2. Copy `frei0r_gyroflow.xml` to `kdenlive/bin/data/kdenlive/effects/`
 
 # Usage
 
 ### FFmpeg:
 1. Create a folder somewhere, copy the plugin binary to it, and set environment variable `FREI0R_PATH` to that dir. For example on Windows: `set FREI0R_PATH=C:\effects\`
-2. Run ffmpeg: `ffmpeg -i input_video.mp4 -vf "frei0r=gyroflow:C_DRIVE_SEP_projects_DIR_SEP_my_project.gyroflow|0.5|n|0.001" result.mp4`
+2. Run ffmpeg: `ffmpeg -i input_video.mp4 -vf "frei0r=gyroflow_niyien:C_DRIVE_SEP_projects_DIR_SEP_my_project.gyroflow|0.5|n|0.001" result.mp4`
 3. Parameters are: `project_file_path|smoothness|stabilization_overview|timestamp_scale`.
 4. Because ffmpeg can't accept `:` or `/` in parameters, plugin will replace `_DRIVE_SEP_` with `:\` and `_DIR_SEP_` with `/`, so you can use parameter: `E_DRIVE_SEP_some_folder_DIR_SEP_my_project.gyroflow` for `E:\some_folder\my_project.gyroflow`
 
 
 # Building from source
 1. Get latest stable Rust language from: https://rustup.rs/
-2. Clone the repo: `git clone https://github.com/gyroflow/gyroflow-frei0r.git`
+2. Clone the repo: `git clone https://github.com/NiYien/gyroflow-plugins.git`
 3. Build the binary: `cargo build --release`
 4. Resulting file will be in `target/release/` directory
 

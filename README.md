@@ -1,9 +1,9 @@
 <p align="center">
   <h1 align="center">
-    <a href="https://github.com/gyroflow/gyroflow-plugins#gh-light-mode-only">
+    <a href="https://github.com/NiYien/gyroflow-plugins#gh-light-mode-only">
       <img src="https://raw.githubusercontent.com/gyroflow/gyroflow/master/resources/logo_black.svg" alt="Gyroflow logo" height="100">
     </a>
-    <a href="https://github.com/gyroflow/gyroflow-plugins#gh-dark-mode-only">
+    <a href="https://github.com/NiYien/gyroflow-plugins#gh-dark-mode-only">
       <img src="https://raw.githubusercontent.com/gyroflow/gyroflow/master/resources/logo_white.svg" alt="Gyroflow logo" height="100">
     </a>
   </h1>
@@ -13,24 +13,24 @@
     <br/>
     <br/>
     <a href="https://gyroflow.xyz">Homepage</a> •
-    <a href="https://github.com/gyroflow/gyroflow-plugins/releases">Download</a> •
+    <a href="https://github.com/NiYien/gyroflow-plugins/releases">Download</a> •
     <a href="https://docs.gyroflow.xyz">Documentation</a> •
     <a href="https://discord.gg/WfxZZXjpke">Discord</a> •
-    <a href="https://github.com/gyroflow/gyroflow-plugins/issues">Report bug</a> •
-    <a href="https://github.com/gyroflow/gyroflow-plugins/issues">Request feature</a>
+    <a href="https://github.com/NiYien/gyroflow-plugins/issues">Report bug</a> •
+    <a href="https://github.com/NiYien/gyroflow-plugins/issues">Request feature</a>
   </p>
   <p align="center">
-    <a href="https://github.com/gyroflow/gyroflow-plugins/releases">
-      <img src="https://img.shields.io/github/downloads/gyroflow/gyroflow-plugins/total" alt="Downloads">
+    <a href="https://github.com/NiYien/gyroflow-plugins/releases">
+      <img src="https://img.shields.io/github/downloads/NiYien/gyroflow-plugins/total" alt="Downloads">
     </a>
-    <a href="https://github.com/gyroflow/gyroflow-plugins/graphs/contributors">
-      <img src="https://img.shields.io/github/contributors/gyroflow/gyroflow-plugins?color=dark-green" alt="Contributors">
+    <a href="https://github.com/NiYien/gyroflow-plugins/graphs/contributors">
+      <img src="https://img.shields.io/github/contributors/NiYien/gyroflow-plugins?color=dark-green" alt="Contributors">
     </a>
-    <a href="https://github.com/gyroflow/gyroflow-plugins/issues/">
-      <img src="https://img.shields.io/github/issues/gyroflow/gyroflow-plugins" alt="Issues">
+    <a href="https://github.com/NiYien/gyroflow-plugins/issues/">
+      <img src="https://img.shields.io/github/issues/NiYien/gyroflow-plugins" alt="Issues">
     </a>
-    <a href="https://github.com/gyroflow/gyroflow-plugins/blob/master/LICENSE">
-      <img src="https://img.shields.io/github/license/gyroflow/gyroflow-plugins" alt="License">
+    <a href="https://github.com/NiYien/gyroflow-plugins/blob/master/LICENSE">
+      <img src="https://img.shields.io/github/license/NiYien/gyroflow-plugins" alt="License">
     </a>
   </p>
 </p>
@@ -50,16 +50,16 @@ This is especially important when working with RAW files (like BRAW or R3D), whe
 
 ---
 
-This repository contains the source code of [Gyroflow](https://github.com/gyroflow/gyroflow) video editor plugins. This includes OpenFX, Adobe and frei0r.<br>
+This repository contains the source code of [Gyroflow(Niyien)](https://github.com/NiYien/gyroflow) video editor plugins. This includes OpenFX, Adobe and frei0r.<br>
 Final Cut Pro plugin is hosted in an [external repository](https://github.com/latenitefilms/GyroflowToolbox/).
 
 ## Supported applications:
 | Applications | Plugin type | Download | Nightly |
 | ------------- | ------------- | ------------- | ------------- |
-| <ul><li>[DaVinci Resolve](https://www.blackmagicdesign.com/products/davinciresolve)</li><li>[Assimilate SCRATCH](https://www.assimilateinc.com/products/)</li><li>[The Foundry Nuke](https://www.foundry.com/products/nuke-family/nuke)</li><li>[MAGIX Vegas](https://www.vegascreativesoftware.com/us/vegas-pro/)</li></ul> | **OpenFX** | [Download](https://github.com/gyroflow/gyroflow-plugins/releases) | [Windows](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-OpenFX-windows.zip)<br>[macOS](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-OpenFX-macos.zip)<br>[Linux](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-OpenFX-linux.zip) |
-| <ul><li>[Adobe After Effects](https://www.adobe.com/products/aftereffects.html)</li><li>[Adobe Premiere](https://www.adobe.com/products/premiere.html)</li></ul> | **Adobe**  | [Download](https://github.com/gyroflow/gyroflow-plugins/releases) | [Windows](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-Adobe-windows.zip)<br>[macOS](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-Adobe-macos.zip) |
+| <ul><li>[DaVinci Resolve](https://www.blackmagicdesign.com/products/davinciresolve)</li><li>[Assimilate SCRATCH](https://www.assimilateinc.com/products/)</li><li>[The Foundry Nuke](https://www.foundry.com/products/nuke-family/nuke)</li><li>[MAGIX Vegas](https://www.vegascreativesoftware.com/us/vegas-pro/)</li></ul> | **OpenFX** | [Download](https://github.com/NiYien/gyroflow-plugins/releases) | [Windows](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-OpenFX-windows.zip)<br>[macOS](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-OpenFX-macos.zip)<br>[Linux](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-OpenFX-linux.zip) |
+| <ul><li>[Adobe After Effects](https://www.adobe.com/products/aftereffects.html)</li><li>[Adobe Premiere](https://www.adobe.com/products/premiere.html)</li></ul> | **Adobe**  | [Download](https://github.com/NiYien/gyroflow-plugins/releases) | [Windows](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-Adobe-windows.zip)<br>[macOS](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-Adobe-macos.zip) |
 | <ul><li>[Final Cut Pro](https://www.apple.com/final-cut-pro/)</li></ul> | **FxPlug4**  | [Download](https://gyroflowtoolbox.io/) | --- |
-| <ul><li>[Kdenlive](https://www.kdenlive.org/)</li><li>[Shotcut](https://www.shotcut.org/)</li><li>[FFmpeg](https://ffmpeg.org)</li><li>[MLT](https://www.mltframework.org/)</li><li>[LiquidSoap](https://www.liquidsoap.info/)</li><li>[PureData](https://puredata.info/)</li><li>[Open Movie Editor](http://www.openmovieeditor.org/)</li><li>[Gephex](https://gephex.org/)</li><li>[LiVES](http://lives.sf.net)</li><li>[FreeJ](https://freej.dyne.org)</li><li>[VeeJay](http://veejayhq.net)</li><li>[Flowblade](https://jliljebl.github.io/flowblade/)</li></ul> | **frei0r**  | [Download](https://github.com/gyroflow/gyroflow-plugins/releases) | [Windows](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-frei0r-windows.zip)<br>[macOS](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-frei0r-macos.zip)<br>[Linux](https://nightly.link/gyroflow/gyroflow-plugins/workflows/release/main/Gyroflow-frei0r-linux.zip) |
+| <ul><li>[Kdenlive](https://www.kdenlive.org/)</li><li>[Shotcut](https://www.shotcut.org/)</li><li>[FFmpeg](https://ffmpeg.org)</li><li>[MLT](https://www.mltframework.org/)</li><li>[LiquidSoap](https://www.liquidsoap.info/)</li><li>[PureData](https://puredata.info/)</li><li>[Open Movie Editor](http://www.openmovieeditor.org/)</li><li>[Gephex](https://gephex.org/)</li><li>[LiVES](http://lives.sf.net)</li><li>[FreeJ](https://freej.dyne.org)</li><li>[VeeJay](http://veejayhq.net)</li><li>[Flowblade](https://jliljebl.github.io/flowblade/)</li></ul> | **frei0r**  | [Download](https://github.com/NiYien/gyroflow-plugins/releases) | [Windows](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-frei0r-windows.zip)<br>[macOS](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-frei0r-macos.zip)<br>[Linux](https://nightly.link/NiYien/gyroflow-plugins/workflows/release/main/GyroflowNiyien-frei0r-linux.zip) |
 
 ---
 
@@ -74,4 +74,4 @@ For manual installation steps and more details, refer to [the documentation](htt
 
 ## License
 
-Distributed under the GPLv3 License with App Store Exception. See [LICENSE](https://github.com/gyroflow/gyroflow-plugins/blob/main/LICENSE) for more information.
+Distributed under the GPLv3 License with App Store Exception. See [LICENSE](https://github.com/NiYien/gyroflow-plugins/blob/main/LICENSE) for more information.
