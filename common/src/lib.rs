@@ -754,6 +754,23 @@ impl GyroflowPluginBaseInstance {
                     }
                     params.set_string(Params::LoadedLens, &stab.lens.read().get_display_name())?;
 
+                    // Auto-enable DisableStretch if the loaded lens has anamorphic stretch != 1.
+                    // Gated by reload_values_from_project (true only on first load / project reload / new lens),
+                    // so the user can manually un-check afterwards without it being re-applied each frame.
+                    if !disable_stretch {
+                        let (xs, ys) = {
+                            let lens = stab.lens.read();
+                            (lens.input_horizontal_stretch, lens.input_vertical_stretch)
+                        };
+                        let lens_has_stretch =
+                            (xs > 0.01 && (xs - 1.0).abs() > 1e-6)
+                            || (ys > 0.01 && (ys - 1.0).abs() > 1e-6);
+                        if lens_has_stretch {
+                            params.set_bool(Params::DisableStretch, true)?;
+                            disable_stretch = true;
+                        }
+                    }
+
                     for k in all_keys {
                         if let Some(keys) = keyframes.get_keyframes(k) {
                             if !keys.is_empty() {
@@ -839,6 +856,11 @@ impl GyroflowPluginBaseInstance {
             stab.params.write().calculate_ramped_timestamps(&stab.keyframes.read(), inverse, inverse);
 
             let stab = Arc::new(stab);
+            // Recompute cache key in case disable_stretch was auto-flipped (lens-stretch detection
+            // above or plugin_disable_stretch JSON flag). Caching under the original false-key
+            // would otherwise pin the disabled stab manager (lens permanently stretched=1.0) under
+            // the disable=false key, making toggling DisableStretch off look identical to on.
+            let key = format!("{path}{disable_stretch}{instance_id}");
             // Insert to static global cache
             manager_cache.lock().put(key.to_owned(), stab.clone());
             // Cache it in this instance as well
