@@ -331,9 +331,15 @@ impl AdobePluginGlobal for Plugin {
 
         match cmd {
             ae::Command::About => {
-                out_data.set_return_msg(concat!("Gyroflow(Niyien), v", env!("CARGO_PKG_VERSION"), "\nCopyright 2024 AdrianEddy\rGyroflow(Niyien) plugin."));
+                let about_msg = format!(
+                    "Gyroflow(Niyien), v{}\nCopyright 2024 AdrianEddy\r{}",
+                    env!("CARGO_PKG_VERSION"),
+                    gyroflow_plugin_base::t!("ae.msg.about_suffix"),
+                );
+                out_data.set_return_msg(&about_msg);
             }
             ae::Command::GlobalSetup => {
+                gyroflow_plugin_base::i18n::init();
                 gyroflow_core::gpu::initialize_contexts();
 
                 if in_data.is_premiere() {
@@ -362,7 +368,7 @@ impl AdobePluginGlobal for Plugin {
                     }
                 }
 
-                let _ = in_data.effect().set_options_button_name("Open Gyroflow(Niyien)");
+                let _ = in_data.effect().set_options_button_name(gyroflow_plugin_base::t!("ae.button.open_gyroflow"));
             },
             ae::Command::ArbitraryCallback { mut extra } => {
                 if let Err(e) = extra.dispatch::<ArbString, Params>(Params::InstanceId) {
@@ -537,7 +543,10 @@ impl CrossThreadInstance {
 
             if let Ok(stab) = inst.stab_manager(&mut params, &plugin.global.gyroflow.manager_cache, (0, 0), false) {
                 if plugin.in_data.is_after_effects() && param == Params::CreateCamera {
-                    for (org_cam, smooth_cam, name) in [(true, false, "Original camera"), (false, true, "Smoothed camera")] {
+                    for (org_cam, smooth_cam, name) in [
+                        (true, false, gyroflow_plugin_base::t!("ae.layer.original_camera")),
+                        (false, true, gyroflow_plugin_base::t!("ae.layer.smoothed_camera")),
+                    ] {
                         let fields = format!("{{ \"original\": {{ \"euler_angles\": {org_cam} }}, \"stabilized\": {{ \"euler_angles\": {smooth_cam} }}, \"zooming\": {{ }} }}");
                         let script = gyroflow_core::gyro_export::export_gyro_data("camera.jsx", &fields, &stab);
 
@@ -675,7 +684,7 @@ impl AdobePluginInstance for CrossThreadInstance {
                     stored.pending_params_str.insert(Params::ProjectPath, GyroflowPluginBase::get_project_path(&footage_path).unwrap_or(footage_path.to_owned()));
                     stored.media_file_path = footage_path;
                 } else if in_data.is_after_effects() {
-                    plugin.out_data.set_return_msg("Unable to find the footage path.\nUse the \"Browse\" button and load the project file or a video file.");
+                    plugin.out_data.set_return_msg(gyroflow_plugin_base::t!("ae.msg.footage_not_found"));
                 }
             }
             ae::Command::SmartPreRender { mut extra } => {

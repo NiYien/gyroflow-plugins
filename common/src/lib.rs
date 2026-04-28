@@ -1,3 +1,4 @@
+pub mod i18n;
 
 use lru::LruCache;
 use parking_lot::{ Mutex, RwLock };
@@ -271,68 +272,80 @@ impl GyroflowPluginBase {
         if let Some(v) = Self::get_gyroflow_location() {
             if let Some(command) = Self::gyroflow_launch_command(&v, project_path, std::env::consts::OS) {
                 if let Err(e) = command.spawn() {
-                    rfd::MessageDialog::new().set_description(format!("Unable to start Gyroflow(Niyien): {e:?}")).show();
+                    rfd::MessageDialog::new()
+                        .set_description(crate::i18n::tf("dialog.unable_start_gyroflow", &[("error", &format!("{e:?}"))]))
+                        .show();
                 }
             }
         } else {
-            rfd::MessageDialog::new().set_description("Unable to find Gyroflow(Niyien) app path. Make sure to run Gyroflow(Niyien) app at least once.").show();
+            rfd::MessageDialog::new()
+                .set_description(t!("dialog.gyroflow_not_found"))
+                .show();
         }
     }
 
-    pub fn get_param_definitions() -> [ParameterType; 13] {
+    pub fn get_param_definitions() -> [ParameterType; 12] {
         [
             ParameterType::HiddenString { id: "InstanceId" },
             ParameterType::HiddenString { id: "ProjectPath" },
             ParameterType::HiddenString { id: "ProjectData" },
             ParameterType::HiddenString { id: "EmbeddedLensProfile" },
             ParameterType::HiddenString { id: "EmbeddedPreset" },
-            ParameterType::Group { id: "ProjectGroup", label: "Gyroflow(Niyien) project", opened: true, parameters: vec![
-                ParameterType::Text    { id: "Status",            label: "Status",                   hint: "Status" },
-                ParameterType::Button  { id: "LoadCurrent",       label: "Load for current file",    hint: "Try to load project file for current video file, or try to stabilize that video file directly" },
-                ParameterType::Button  { id: "Browse",            label: "Browse",                   hint: "Browse for the Gyroflow(Niyien) project file" },
-                ParameterType::Button  { id: "LoadLens",          label: "Load preset/lens profile", hint: "Browse for the lens profile or a preset" },
-                ParameterType::Button  { id: "OpenGyroflow",      label: "Open Gyroflow(Niyien)",    hint: "Open project in Gyroflow(Niyien)" },
-                ParameterType::Button  { id: "ReloadProject",     label: "Reload project",           hint: "Reload currently loaded project" },
-                ParameterType::Button  { id: "OpenRecentProject", label: "Last saved project",       hint: "Load most recently saved project in the Gyroflow(Niyien) app" },
+            ParameterType::Group { id: "ProjectGroup", label: t!("group.project"), opened: true, hidden: false, parameters: vec![
+                ParameterType::Text    { id: "Status",            label: t!("label.status"),            hint: t!("hint.status"),                  hidden: false },
+                ParameterType::Text    { id: "LoadedProject",     label: t!("label.loaded_project"),    hint: t!("hint.loaded_project"),          hidden: false },
+                ParameterType::Button  { id: "LoadCurrent",       label: t!("label.load_current"),      hint: t!("hint.load_current"),            hidden: false },
+                ParameterType::Button  { id: "Browse",            label: t!("label.browse"),            hint: t!("hint.browse"),                  hidden: false },
+                ParameterType::Button  { id: "LoadLens",          label: t!("label.load_lens"),         hint: t!("hint.load_lens"),               hidden: true },
+                ParameterType::Button  { id: "OpenGyroflow",      label: t!("label.open_gyroflow"),     hint: t!("hint.open_gyroflow"),           hidden: false },
+                ParameterType::Button  { id: "ReloadProject",     label: t!("label.reload_project"),    hint: t!("hint.reload_project"),          hidden: true },
+                ParameterType::Button  { id: "OpenRecentProject", label: t!("label.open_recent_project"), hint: t!("hint.open_recent_project"),   hidden: true },
             ] },
-            ParameterType::Group { id: "AdjustGroup", label: "Adjust parameters", opened: true, parameters: vec![
-                ParameterType::Slider   { id: "Smoothness",             label: "Smoothness",           hint: "Smoothness",                   min: 1.0,    max: 300.0, default: 50.0 },
-                ParameterType::Slider   { id: "ZoomLimit",              label: "Zoom limit",           hint: "Zoom limit",                   min: 51.0,   max: 300.0, default: 130.0 },
-                ParameterType::Slider   { id: "LensCorrectionStrength", label: "Lens correction",      hint: "Lens correction",              min: 0.0,    max: 100.0, default: 100.0 },
-                ParameterType::Slider   { id: "HorizonLockAmount",      label: "Horizon lock",         hint: "Horizon lock amount",          min: 0.0,    max: 100.0, default: 0.0 },
-                ParameterType::Slider   { id: "HorizonLockRoll",        label: "Horizon roll",         hint: "Horizon lock roll adjustment", min: -100.0, max: 100.0, default: 0.0 },
-                //ParameterType::Slider   { id: "PositionX",              label: "Position offset X",    hint: "Position offset X",            min: -100.0, max: 100.0, default: 0.0 },
-                //ParameterType::Slider   { id: "PositionY",              label: "Position offset Y",    hint: "Position offset Y",            min: -100.0, max: 100.0, default: 0.0 },
-                ParameterType::Slider   { id: "AdditionalPitch",        label: "Additional pitch",     hint: "Additional pitch rotation",    min: -180.0, max: 180.0, default: 0.0 },
-                ParameterType::Slider   { id: "AdditionalYaw",          label: "Additional yaw",       hint: "Additional yaw rotation",      min: -180.0, max: 180.0, default: 0.0 },
-                ParameterType::Slider   { id: "Rotation",               label: "Video rotation",       hint: "Video rotation",               min: -360.0, max: 360.0, default: 0.0 },
-                ParameterType::Slider   { id: "InputRotation",          label: "Input rotation",       hint: "Input rotation",               min: -360.0, max: 360.0, default: 0.0 },
-                ParameterType::Slider   { id: "Fov",                    label: "FOV",                  hint: "FOV",                          min: 0.1,    max: 3.0,   default: 1.0 },
-                ParameterType::Slider   { id: "VideoSpeed",             label: "Video speed",          hint: "Use this slider to change video speed or keyframe it, instead of built-in speed changes in the editor", min: 0.0001, max: 1000.0, default: 100.0 },
-                ParameterType::Checkbox { id: "DisableStretch",         label: "Disable Gyroflow(Niyien)'s stretch", hint: "If you used Input stretch in the lens profile in Gyroflow(Niyien), and you de-stretched the video separately in your editor (by setting anamorphic squeeze factor), check this to disable Gyroflow(Niyien)'s internal stretching.", default: false },
-                ParameterType::Select   { id: "IntegrationMethod",      label: "Integration method",   hint: "IMU integration method", options: vec!["None", "Complementary", "VQF", "Simple gyro", "Simple gyro + accel", "Mahony", "Madgwick"], default: "VQF" },
-                //ParameterType::Slider   { id: "FusionStartFrame",       label: "Fusion Start Frame",   hint: "Fusion Start Frame (from Project Settings)", min: 0.0, max: 100000.0, default: 0.0 },
+            ParameterType::Group { id: "AdjustGroup", label: t!("group.adjust"), opened: true, hidden: false, parameters: vec![
+                ParameterType::Slider   { id: "Smoothness",             label: t!("label.smoothness"),               hint: t!("hint.smoothness"),                   min: 1.0,    max: 300.0, default: 50.0,    hidden: false },
+                ParameterType::Slider   { id: "ZoomLimit",              label: t!("label.zoom_limit"),               hint: t!("hint.zoom_limit"),                   min: 51.0,   max: 300.0, default: 130.0,   hidden: true },
+                ParameterType::Slider   { id: "LensCorrectionStrength", label: t!("label.lens_correction_strength"), hint: t!("hint.lens_correction_strength"),     min: 0.0,    max: 100.0, default: 100.0,   hidden: false },
+                ParameterType::Slider   { id: "HorizonLockAmount",      label: t!("label.horizon_lock_amount"),      hint: t!("hint.horizon_lock_amount"),          min: 0.0,    max: 100.0, default: 0.0,     hidden: false },
+                ParameterType::Slider   { id: "HorizonLockRoll",        label: t!("label.horizon_lock_roll"),        hint: t!("hint.horizon_lock_roll"),            min: -100.0, max: 100.0, default: 0.0,     hidden: true },
+                ParameterType::Slider   { id: "AdditionalPitch",        label: t!("label.additional_pitch"),         hint: t!("hint.additional_pitch"),             min: -180.0, max: 180.0, default: 0.0,     hidden: true },
+                ParameterType::Slider   { id: "AdditionalYaw",          label: t!("label.additional_yaw"),           hint: t!("hint.additional_yaw"),               min: -180.0, max: 180.0, default: 0.0,     hidden: true },
+                ParameterType::Slider   { id: "Rotation",               label: t!("label.rotation"),                 hint: t!("hint.rotation"),                     min: -360.0, max: 360.0, default: 0.0,     hidden: true },
+                ParameterType::Slider   { id: "InputRotation",          label: t!("label.input_rotation"),           hint: t!("hint.input_rotation"),               min: -360.0, max: 360.0, default: 0.0,     hidden: true },
+                ParameterType::Slider   { id: "Fov",                    label: t!("label.fov"),                      hint: t!("hint.fov"),                          min: 0.1,    max: 3.0,   default: 1.0,     hidden: true },
+                ParameterType::Slider   { id: "VideoSpeed",             label: t!("label.video_speed"),              hint: t!("hint.video_speed"),                  min: 0.0001, max: 1000.0, default: 100.0,  hidden: true },
+                ParameterType::Checkbox { id: "DisableStretch",         label: t!("label.disable_stretch"),          hint: t!("hint.disable_stretch"),              default: false, hidden: true },
+                ParameterType::Select   { id: "IntegrationMethod",      label: t!("label.integration_method"),       hint: t!("hint.integration_method"),
+                    options: vec![
+                        t!("option.integration_none"),
+                        t!("option.integration_complementary"),
+                        "VQF",
+                        t!("option.integration_simple_gyro"),
+                        t!("option.integration_simple_gyro_accel"),
+                        "Mahony",
+                        "Madgwick",
+                    ],
+                    default: "VQF", hidden: true },
+                ParameterType::Checkbox { id: "ToggleOverview",         label: t!("label.toggle_overview"),          hint: t!("hint.toggle_overview"),              default: false, hidden: false },
             ] },
-            ParameterType::Group { id: "KeyframesGroup", label: "Keyframes", opened: false, parameters: vec![
-                ParameterType::Checkbox { id: "UseGyroflowsKeyframes", label: "Use Gyroflow(Niyien)'s keyframes", hint: "Use internal Gyroflow(Niyien)'s keyframes, instead of the editor ones.", default: false },
-                ParameterType::Checkbox { id: "StabilizationSpeedRamp",label: "Adjust stabilization to speed", hint: "When you speed ramp the clip, let Gyroflow adjust the stabilization amount to the video speed.", default: true },
-                ParameterType::Button   { id: "RecalculateKeyframes",  label: "Recalculate keyframes",         hint: "Recalculate keyframes after adjusting the splines (in Fusion mode)" },
-                ParameterType::Button   { id: "CreateCamera",  label: "Create camera", hint: "Create camera layer" },
+            ParameterType::Group { id: "KeyframesGroup", label: t!("group.keyframes"), opened: false, hidden: true, parameters: vec![
+                ParameterType::Checkbox { id: "UseGyroflowsKeyframes",   label: t!("label.use_gyroflows_keyframes"),   hint: t!("hint.use_gyroflows_keyframes"),   default: false, hidden: true },
+                ParameterType::Checkbox { id: "StabilizationSpeedRamp",  label: t!("label.stabilization_speed_ramp"),  hint: t!("hint.stabilization_speed_ramp"),  default: true,  hidden: true },
+                ParameterType::Button   { id: "RecalculateKeyframes",    label: t!("label.recalculate_keyframes"),     hint: t!("hint.recalculate_keyframes"),       hidden: true },
+                ParameterType::Button   { id: "CreateCamera",            label: t!("label.create_camera"),             hint: t!("hint.create_camera"),               hidden: true },
             ] },
-            ParameterType::Group { id: "OutputSizeGroup", label: "Output size", opened: false, parameters: vec![
-                ParameterType::Slider   { id: "OutputWidth",    label: "Width",  hint: "Width",  min: 1.0, max: 16384.0, default: 3840.0 },
-                ParameterType::Slider   { id: "OutputHeight",   label: "Height", hint: "Height", min: 1.0, max: 16384.0, default: 2160.0 },
-                ParameterType::Button   { id: "OutputSizeToTimeline", label: "Fit to timeline", hint: "Set the output size to the timeline dimensions" },
-                ParameterType::Button   { id: "OutputSizeSwap",  label: "Swap", hint: "Swap width and height" },
-                ParameterType::Select   { id: "Interpolation",   label: "Interpolation", hint: "Scaling interpolation method", options: vec!["Lanczos4", "RobidouxSharp", "Bilinear", "Bicubic", "Robidoux", "Mitchell", "CatmullRom"], default: "Lanczos4" },
+            ParameterType::Group { id: "OutputSizeGroup", label: t!("group.output_size"), opened: false, hidden: true, parameters: vec![
+                ParameterType::Slider   { id: "OutputWidth",          label: t!("label.output_width"),           hint: t!("hint.output_width"),           min: 1.0, max: 16384.0, default: 3840.0, hidden: true },
+                ParameterType::Slider   { id: "OutputHeight",         label: t!("label.output_height"),          hint: t!("hint.output_height"),          min: 1.0, max: 16384.0, default: 2160.0, hidden: true },
+                ParameterType::Button   { id: "OutputSizeToTimeline", label: t!("label.output_size_to_timeline"), hint: t!("hint.output_size_to_timeline"), hidden: true },
+                ParameterType::Button   { id: "OutputSizeSwap",       label: t!("label.output_size_swap"),       hint: t!("hint.output_size_swap"),       hidden: true },
+                ParameterType::Select   { id: "Interpolation",        label: t!("label.interpolation"),          hint: t!("hint.interpolation"),
+                    options: vec!["Lanczos4", "RobidouxSharp", "Bilinear", "Bicubic", "Robidoux", "Mitchell", "CatmullRom"], default: "Lanczos4", hidden: true },
             ] },
-            ParameterType::Checkbox { id: "ToggleOverview",     label: "Stabilization overview",         hint: "Zooms out the view to see the stabilization results. Disable this before rendering.", default: false },
-            ParameterType::Checkbox { id: "DontDrawOutside",    label: "Don't draw outside source clip", hint: "When clip and timeline aspect ratio don't match, draw the final image inside the source clip, instead of drawing outside it.", default: false },
-            ParameterType::Checkbox { id: "IncludeProjectData", label: "Embed .gyroflow data in plugin", hint: "If you intend to share the project to someone else, the plugin can embed the Gyroflow project data including gyro data inside the video editor project. This way you don't have to share .gyroflow project files. Enabling this option will make the project bigger.", default: false },
-            ParameterType::Group { id: "InfoGroup", label: "Info", opened: true, parameters: vec![
-                ParameterType::Text { id: "LoadedProject",      label: "Loaded project",      hint: "Loaded project or video file" },
-                ParameterType::Text { id: "LoadedPreset",       label: "Loaded preset",       hint: "Loaded preset" },
-                ParameterType::Text { id: "LoadedLens",         label: "Loaded lens profile", hint: "Loaded lens profile" },
+            ParameterType::Checkbox { id: "DontDrawOutside",      label: t!("label.dont_draw_outside"),   hint: t!("hint.dont_draw_outside"),     default: false, hidden: true },
+            ParameterType::Checkbox { id: "IncludeProjectData",   label: t!("label.include_project_data"),hint: t!("hint.include_project_data"),  default: false, hidden: true },
+            ParameterType::Group { id: "InfoGroup", label: t!("group.info"), opened: true, hidden: true, parameters: vec![
+                ParameterType::Text { id: "LoadedPreset",  label: t!("label.loaded_preset"),  hint: t!("hint.loaded_preset"),  hidden: true },
+                ParameterType::Text { id: "LoadedLens",   label: t!("label.loaded_lens"),    hint: t!("hint.loaded_lens"),     hidden: true },
             ] },
         ]
     }
@@ -340,13 +353,13 @@ impl GyroflowPluginBase {
 
 pub enum ParameterType {
     HiddenString { id: &'static str },
-    TextBox      { id: &'static str, label: &'static str, hint: &'static str },
-    Text         { id: &'static str, label: &'static str, hint: &'static str },
-    Slider       { id: &'static str, label: &'static str, hint: &'static str, min: f64, max: f64, default: f64 },
-    Checkbox     { id: &'static str, label: &'static str, hint: &'static str, default: bool },
-    Button       { id: &'static str, label: &'static str, hint: &'static str },
-    Group        { id: &'static str, label: &'static str, opened: bool, parameters: Vec<ParameterType> },
-    Select       { id: &'static str, label: &'static str, hint: &'static str, options: Vec<&'static str>, default: &'static str },
+    TextBox      { id: &'static str, label: &'static str, hint: &'static str, hidden: bool },
+    Text         { id: &'static str, label: &'static str, hint: &'static str, hidden: bool },
+    Slider       { id: &'static str, label: &'static str, hint: &'static str, min: f64, max: f64, default: f64, hidden: bool },
+    Checkbox     { id: &'static str, label: &'static str, hint: &'static str, default: bool, hidden: bool },
+    Button       { id: &'static str, label: &'static str, hint: &'static str, hidden: bool },
+    Group        { id: &'static str, label: &'static str, opened: bool, parameters: Vec<ParameterType>, hidden: bool },
+    Select       { id: &'static str, label: &'static str, hint: &'static str, options: Vec<&'static str>, default: &'static str, hidden: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -477,8 +490,8 @@ impl GyroflowPluginBaseInstance {
         let _ = params.set_enabled(Params::OutputHeight, loaded);
         let _ = params.set_enabled(Params::OutputSizeToTimeline, loaded);
         let _ = params.set_enabled(Params::OutputSizeSwap, loaded);
-        let _ = params.set_string(Params::Status, if loaded { "OK" } else { "Project not loaded" });
-        let _ = params.set_label(Params::OpenGyroflow, if loaded { "Open in Gyroflow(Niyien)" } else { "Open Gyroflow(Niyien)" });
+        let _ = params.set_string(Params::Status, if loaded { t!("status.ok") } else { t!("status.project_not_loaded") });
+        let _ = params.set_label(Params::OpenGyroflow, if loaded { t!("label.open_gyroflow_loaded") } else { t!("label.open_gyroflow") });
     }
 
     pub fn initialize_instance_id(&mut self, instance_id: &mut String) {
@@ -620,7 +633,7 @@ impl GyroflowPluginBaseInstance {
                             if !d.is_empty() {
                                 if let Err(e) = stab.load_lens_profile(&d) {
                                     rfd::MessageDialog::new()
-                                        .set_description(&format!("Failed to load lens profile: {e:?}"))
+                                        .set_description(crate::i18n::tf("dialog.failed_load_lens", &[("error", &format!("{e:?}"))]))
                                         .show();
                                 }
                             }
@@ -630,7 +643,7 @@ impl GyroflowPluginBaseInstance {
                                 let mut is_preset = false;
                                 if let Err(e) = stab.import_gyroflow_data(d.as_bytes(), true, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, true) {
                                     rfd::MessageDialog::new()
-                                        .set_description(&format!("Failed to load preset: {e:?}"))
+                                        .set_description(crate::i18n::tf("dialog.failed_load_preset", &[("error", &format!("{e:?}"))]))
                                         .show();
                                 }
                             }
@@ -662,8 +675,8 @@ impl GyroflowPluginBaseInstance {
                         } else {
                             log::error!("An error occured: {e:?}");
                             self.update_loaded_state(params, false);
-                            params.set_string(Params::Status, "Failed to load file info!")?;
-                            params.set_hint(Params::Status, &format!("Error loading {path}: {e:?}."))?;
+                            params.set_string(Params::Status, t!("status.failed_load_info"))?;
+                            params.set_hint(Params::Status, &crate::i18n::tf("status.error_loading", &[("path", &path), ("error", &format!("{e:?}"))]))?;
                             if open_gyroflow_if_no_data {
                                 GyroflowPluginBase::open_gyroflow(params.get_string(Params::ProjectPath).ok().as_deref());
                             }
@@ -957,8 +970,8 @@ impl GyroflowPluginBaseInstance {
                 params.set_string(Params::ProjectPath, &last_project)?;
             }
         }
-        if param == Params::ProjectPath || param == Params::ReloadProject || param == Params::DontDrawOutside {
-            if param == Params::ProjectPath || param == Params::ReloadProject {
+        if param == Params::ProjectPath || param == Params::ReloadProject || param == Params::LoadCurrent || param == Params::DontDrawOutside {
+            if param == Params::ProjectPath || param == Params::ReloadProject || param == Params::LoadCurrent {
                 self.reload_values_from_project = true;
             }
             self.clear_stab(&manager_cache);
@@ -1019,7 +1032,7 @@ impl GyroflowPluginBaseInstance {
                 Params::Rotation | Params::InputRotation | Params::VideoSpeed | Params::IntegrationMethod |
                 Params::UseGyroflowsKeyframes | Params::RecalculateKeyframes => {
 
-                    params.set_string(Params::Status, "Calculating...")?;
+                    params.set_string(Params::Status, t!("status.calculating"))?;
                     if !self.ever_changed {
                         self.ever_changed = true;
                         params.set_string(Params::InstanceId, &format!("{}", fastrand::u64(..)))?;
@@ -1058,7 +1071,7 @@ impl GyroflowPluginBaseInstance {
                             _ => { }
                         }
                     }
-                    params.set_string(Params::Status, "OK")?;
+                    params.set_string(Params::Status, t!("status.ok"))?;
                 },
                 _ => { }
             }

@@ -15,6 +15,7 @@ gyroflow-core = { git = "https://github.com/NiYien/gyroflow.git", default-featur
 log-panics = "2.1"
 serde = "1"
 serde_json = "1"
+sys-locale = "0.3"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 parking_lot = "0.12"
 lazy_static = "1.5.0"
@@ -25,3 +26,6 @@ mimalloc = { version = "0.1.50", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 oslog = "0.2"
+
+[build-dependencies]
+serde_json = "1"

@@ -225,12 +225,10 @@ impl Execute for GyroflowPlugin {
                     speed_stretch = 1.0;
                 }
 
-                if (src_fps - fps).abs() > 0.01 {
-                    instance_data.plugin.set_status(&mut instance_data.params, "Timeline fps mismatch!", "Timeline frame rate doesn't match the clip frame rate! Use the plugin in Fusion instead", false);
-                } else if !has_accurate_timestamps && !has_offsets {
-                    instance_data.plugin.set_status(&mut instance_data.params, "Not synced. Open in Gyroflow(Niyien)", "Gyro data is not synced with the video, open the video in Gyroflow(Niyien) and add sync points (eg. by doing autosync)", false);
+                if !has_accurate_timestamps && !has_offsets {
+                    instance_data.plugin.set_status(&mut instance_data.params, gyroflow_plugin_base::t!("status.not_synced"), gyroflow_plugin_base::t!("status.not_synced_hint"), false);
                 } else {
-                    instance_data.plugin.set_status(&mut instance_data.params, "OK", "OK", true);
+                    instance_data.plugin.set_status(&mut instance_data.params, gyroflow_plugin_base::t!("status.ok"), gyroflow_plugin_base::t!("status.ok"), true);
                 }
 
                 let mut time = time;
@@ -585,7 +583,7 @@ impl Execute for GyroflowPlugin {
                             param.set_secret(true)?;
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::Button { id, label, hint } => {
+                        ParameterType::Button { id, label, hint, hidden } => {
                             if id == "CreateCamera" { return OK; }
                             if id == "LoadCurrent" && !CurrentFileInfo::is_available() {
                                 return OK;
@@ -594,25 +592,28 @@ impl Execute for GyroflowPlugin {
                             let _ = param.set_script_name(id);
                             param.set_label(label)?;
                             param.set_hint(hint)?;
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::TextBox { id, label, hint } => {
+                        ParameterType::TextBox { id, label, hint, hidden } => {
                             let mut param = param_set.param_define_string(id)?;
                             let _ = param.set_script_name(id);
                             param.set_string_type(ParamStringType::SingleLine)?;
                             param.set_label(label)?;
                             param.set_hint(hint)?;
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::Text { id, label, hint } => {
+                        ParameterType::Text { id, label, hint, hidden } => {
                             let mut param = param_set.param_define_string(id)?;
                             param.set_string_type(ParamStringType::SingleLine)?;
                             param.set_label(label)?;
                             param.set_hint(hint)?;
                             //param.set_enabled(false)?;
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::Slider { id, label, hint, min, max, default } => {
+                        ParameterType::Slider { id, label, hint, min, max, default, hidden } => {
                             let mut param = param_set.param_define_double(id)?;
                             param.set_default(default)?;
                             param.set_display_min(min)?;
@@ -620,30 +621,34 @@ impl Execute for GyroflowPlugin {
                             param.set_label(label)?;
                             param.set_hint(hint)?;
                             let _ = param.set_script_name(id);
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::Checkbox { id, label, hint, default } => {
+                        ParameterType::Checkbox { id, label, hint, default, hidden } => {
                             if id == "StabilizationSpeedRamp" { return OK; }
                             let mut param = param_set.param_define_boolean(id)?;
                             param.set_label(label)?;
                             param.set_hint(hint)?;
                             param.set_default(default)?;
                             let _ = param.set_script_name(id);
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::Select { id, label, hint, options, default } => {
+                        ParameterType::Select { id, label, hint, options, default, hidden } => {
                             let mut param = param_set.param_define_choice(id)?;
                             param.set_label(label)?;
                             param.set_hint(hint)?;
                             param.set_default(options.iter().position(|x| *x == default).unwrap_or(0) as i32)?;
                             param.set_choices(&options)?;
                             let _ = param.set_script_name(id);
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
                         }
-                        ParameterType::Group { id, label, parameters, opened } => {
+                        ParameterType::Group { id, label, parameters, opened, hidden } => {
                             let mut param = param_set.param_define_group(id)?;
                             param.set_label(label)?;
                             param.set_group_open(opened)?;
+                            if hidden { param.set_secret(true)?; }
                             if let Some(group) = group { param.set_parent(group)?; }
 
                             for x in parameters {
@@ -674,6 +679,7 @@ impl Execute for GyroflowPlugin {
             OpenGLContextDetached(ref mut _effect) => { self.gyroflow_plugin.deinitialize_gpu_context(); OK },
 
             Describe(ref mut effect) => {
+                gyroflow_plugin_base::i18n::init();
                 let supports_opencl = _plugin_context.get_host().get_opencl_render_supported().unwrap_or_default() == "true";
                 let supports_opengl = _plugin_context.get_host().get_opengl_render_supported().unwrap_or_default() == "true";
                 let supports_cuda   = _plugin_context.get_host().get_cuda_render_supported().unwrap_or_default() == "true";
@@ -695,9 +701,9 @@ impl Execute for GyroflowPlugin {
                 let mut effect_properties: EffectDescriptor = effect.properties()?;
                 effect_properties.set_grouping("Warp")?;
 
-                effect_properties.set_label("Gyroflow(Niyien)")?;
-                effect_properties.set_short_label("Gyroflow(Niyien)")?;
-                effect_properties.set_long_label("Gyroflow(Niyien)")?;
+                effect_properties.set_label(gyroflow_plugin_base::t!("ofx.plugin.label"))?;
+                effect_properties.set_short_label(gyroflow_plugin_base::t!("ofx.plugin.short_label"))?;
+                effect_properties.set_long_label(gyroflow_plugin_base::t!("ofx.plugin.long_label"))?;
 
                 effect_properties.set_supported_pixel_depths(&[BitDepth::Byte, BitDepth::Short, BitDepth::Float])?;
                 effect_properties.set_supported_contexts(&[ImageEffectContext::Filter])?;

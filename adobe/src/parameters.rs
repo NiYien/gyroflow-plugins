@@ -65,41 +65,47 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
                 -1
             }).unwrap();
         }
-        ParameterType::TextBox { id, label, .. } => {
+        ParameterType::TextBox { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
             params.add_customized(p, label, ae::ArbitraryDef::setup(|f| {
                 f.set_default::<ArbString>(ArbString::default()).unwrap();
             }), |param| {
                 param.set_flags(ae::ParamFlag::CANNOT_TIME_VARY);
-                param.set_ui_flags(ae::ParamUIFlags::CONTROL);
+                let mut ui = ae::ParamUIFlags::CONTROL;
+                if hidden { ui |= ae::ParamUIFlags::NO_ECW_UI; }
+                param.set_ui_flags(ui);
                 param.set_ui_width(250);
                 param.set_ui_height(15);
                 -1
             }).unwrap();
         }
 
-        ParameterType::Button { id, label, .. } => {
+        ParameterType::Button { id, label, hidden, .. } => {
             if id == "CreateCamera" && !params.in_data().is_after_effects() { return; }
             let p = Params::from_str(id).unwrap();
             if p == Params::LoadCurrent { return; }
-            params.add_with_flags(p, "", ae::ButtonDef::setup(|f| { f.set_label(label); }), ParamFlag::SUPERVISE | ParamFlag::CANNOT_TIME_VARY, ParamUIFlags::empty()).unwrap();
+            let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
+            params.add_with_flags(p, "", ae::ButtonDef::setup(|f| { f.set_label(label); }), ParamFlag::SUPERVISE | ParamFlag::CANNOT_TIME_VARY, ui).unwrap();
         }
-        ParameterType::Text { id, label, .. } => {
+        ParameterType::Text { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
             params.add_customized(p, label, ae::ArbitraryDef::setup(|f| {
                 f.set_default::<ArbString>(ArbString::default()).unwrap();
             }), |param| {
                 param.set_flags(ae::ParamFlag::CANNOT_TIME_VARY);
-                param.set_ui_flags(ae::ParamUIFlags::CONTROL | ae::ParamUIFlags::DO_NOT_ERASE_CONTROL);
+                let mut ui = ae::ParamUIFlags::CONTROL | ae::ParamUIFlags::DO_NOT_ERASE_CONTROL;
+                if hidden { ui |= ae::ParamUIFlags::NO_ECW_UI; }
+                param.set_ui_flags(ui);
                 param.set_ui_width(250);
                 param.set_ui_height(15*4);
                 -1
             }).unwrap();
         }
-        ParameterType::Slider { id, label, min, max, default, .. } => {
+        ParameterType::Slider { id, label, min, max, default, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
             if p == Params::VideoSpeed { return; }
             if p == Params::FusionStartFrame { return; }
+            let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
             params.add_with_flags(p, label, ae::FloatSliderDef::setup(|f| {
                 f.set_valid_min(min as f32);
                 f.set_slider_min(min as f32);
@@ -109,25 +115,35 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
                 f.set_default(default);
                 f.set_precision(1);
                 f.set_display_flags(ValueDisplayFlag::NONE);
-            }), ParamFlag::SUPERVISE, ParamUIFlags::empty()).unwrap();
+            }), ParamFlag::SUPERVISE, ui).unwrap();
         }
-        ParameterType::Checkbox { id, label, default, .. } => {
+        ParameterType::Checkbox { id, label, default, hidden, .. } => {
             if id == "DontDrawOutside" { return; }
+            let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
             params.add_with_flags(Params::from_str(id).unwrap(), label, ae::CheckBoxDef::setup(|f| {
                 f.set_default(default);
                 f.set_value(default);
                 f.set_label("");
-            }), ParamFlag::SUPERVISE, ParamUIFlags::empty()).unwrap();
+            }), ParamFlag::SUPERVISE, ui).unwrap();
         }
-        ParameterType::Select { id, label, options, default, .. } => {
+        ParameterType::Select { id, label, options, default, hidden, .. } => {
+            let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
             params.add_with_flags(Params::from_str(id).unwrap(), label, ae::PopupDef::setup(|f| {
                 f.set_options(&options);
                 f.set_default(options.iter().position(|x| *x == default).unwrap_or(0) as i32);
                 f.set_value(f.default());
-            }), ParamFlag::SUPERVISE, ParamUIFlags::empty()).unwrap();
+            }), ParamFlag::SUPERVISE, ui).unwrap();
         }
-        ParameterType::Group { id, label, parameters, opened } => {
+        ParameterType::Group { id, label, parameters, opened, hidden } => {
             if id == "InfoGroup" { return; }
+            // If the whole group is hidden, register each child at the top level (still hidden via its own flag)
+            // so that param queries keep working without showing an empty group header.
+            if hidden {
+                for x in parameters {
+                    define_param(params, x, None);
+                }
+                return;
+            }
             params.add_group(Params::from_str(id).unwrap(), Params::from_str(&format!("{id}End")).unwrap(), label, !opened, |params| {
                 for x in parameters {
                     define_param(params, x, Some(id));

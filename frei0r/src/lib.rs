@@ -5,6 +5,34 @@ mod frei0r;
 use frei0r::*;
 
 use cstr::cstr;
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::os::raw::c_char;
+use std::sync::{OnceLock, RwLock};
+
+struct PtrWrapper(*const c_char);
+unsafe impl Send for PtrWrapper {}
+unsafe impl Sync for PtrWrapper {}
+
+static C_STR_CACHE: OnceLock<RwLock<HashMap<&'static str, PtrWrapper>>> = OnceLock::new();
+
+/// Convert a translated `&'static str` to a NUL-terminated C string pointer
+/// stable for the lifetime of the process. The result is cached per rust_str
+/// so each unique key only allocates once.
+fn t_cstr(rust_str: &'static str) -> *const c_char {
+    let cache = C_STR_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    {
+        let read = cache.read().unwrap();
+        if let Some(p) = read.get(rust_str) {
+            return p.0;
+        }
+    }
+    let cstring = CString::new(rust_str).unwrap_or_else(|_| CString::new("").unwrap());
+    let ptr = cstring.into_raw() as *const c_char;
+    cache.write().unwrap().insert(rust_str, PtrWrapper(ptr));
+    ptr
+}
+
 use std::sync::{ Arc, atomic::AtomicBool };
 
 use gyroflow_plugin_base::gyroflow_core::{ StabilizationManager, filesystem, stabilization::RGBA8, stabilization::Interpolation };
@@ -23,7 +51,10 @@ struct Instance {
     time_scale: f64,
 }
 
-#[no_mangle] extern "C" fn f0r_init() -> ::std::os::raw::c_int { 1 }
+#[no_mangle] extern "C" fn f0r_init() -> ::std::os::raw::c_int {
+    gyroflow_plugin_base::i18n::init();
+    1
+}
 #[no_mangle] extern "C" fn f0r_deinit() { }
 
 #[no_mangle]
@@ -37,7 +68,7 @@ extern "C" fn f0r_get_plugin_info(info: *mut f0r_plugin_info) {
         (*info).major_version = 0;
         (*info).minor_version = 1;
         (*info).num_params = 4;
-        (*info).explanation = cstr!("Gyroflow(Niyien) video stabilization").as_ptr();
+        (*info).explanation = t_cstr(gyroflow_plugin_base::t!("frei0r.plugin.explanation"));
     }
 }
 #[no_mangle]
@@ -47,22 +78,22 @@ extern "C" fn f0r_get_param_info(info: *mut f0r_param_info, index: ::std::os::ra
             0 => {
                 (*info).name = cstr!("Project").as_ptr();
                 (*info).type_ = F0R_PARAM_STRING;
-                (*info).explanation = cstr!("Project file or video").as_ptr();
+                (*info).explanation = t_cstr(gyroflow_plugin_base::t!("hint.loaded_project"));
             },
             1 => {
                 (*info).name = cstr!("Smoothness").as_ptr();
                 (*info).type_ = F0R_PARAM_DOUBLE;
-                (*info).explanation = cstr!("Smoothness").as_ptr();
+                (*info).explanation = t_cstr(gyroflow_plugin_base::t!("hint.smoothness"));
             },
             2 => {
                 (*info).name = cstr!("Overview").as_ptr();
                 (*info).type_ = F0R_PARAM_BOOL;
-                (*info).explanation = cstr!("Stabilization overview").as_ptr();
+                (*info).explanation = t_cstr(gyroflow_plugin_base::t!("label.toggle_overview"));
             },
             3 => {
                 (*info).name = cstr!("TimestampScale").as_ptr();
                 (*info).type_ = F0R_PARAM_DOUBLE;
-                (*info).explanation = cstr!("Scale for the input timestamp").as_ptr();
+                (*info).explanation = t_cstr(gyroflow_plugin_base::t!("frei0r.hint.timestamp_scale"));
             }
             _ => { }
         }
