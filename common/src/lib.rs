@@ -71,6 +71,7 @@ pub enum Params {
     VideoSpeed,
     DisableStretch,
     IntegrationMethod,
+    ZoomMode,
     KeyframesGroup, KeyframesGroupEnd,
     UseGyroflowsKeyframes,
     RecalculateKeyframes,
@@ -325,6 +326,13 @@ impl GyroflowPluginBase {
                         "Madgwick",
                     ],
                     default: "VQF", hidden: true },
+                ParameterType::Select   { id: "ZoomMode",               label: t!("label.zoom_mode"),                hint: t!("hint.zoom_mode"),
+                    options: vec![
+                        t!("option.zoom_mode_none"),
+                        t!("option.zoom_mode_dynamic"),
+                        t!("option.zoom_mode_static"),
+                    ],
+                    default: t!("option.zoom_mode_dynamic"), hidden: false },
                 ParameterType::Checkbox { id: "ToggleOverview",         label: t!("label.toggle_overview"),          hint: t!("hint.toggle_overview"),              default: false, hidden: false },
             ] },
             ParameterType::Group { id: "KeyframesGroup", label: t!("group.keyframes"), opened: false, hidden: true, parameters: vec![
@@ -468,6 +476,24 @@ impl Default for GyroflowPluginBaseInstance {
     }
 }
 
+/// Map ZoomMode dropdown index to gyroflow_core's `adaptive_zoom_window`:
+///   0 = No zoom    -> 0.0
+///   1 = Dynamic    -> 4.0   (gyroflow default, smoothing window in seconds)
+///   2 = Static     -> -1.0  (sentinel for static crop in core)
+pub fn zoom_window_from_mode_index(idx: i32) -> f64 {
+    match idx {
+        0 => 0.0,
+        2 => -1.0,
+        _ => 4.0,
+    }
+}
+/// Inverse mapping: derive the dropdown index from a project's `adaptive_zoom_window`.
+pub fn mode_index_from_zoom_window(window: f64) -> i32 {
+    if window <= -0.9 { 2 }
+    else if window < 0.0001 { 0 }
+    else { 1 }
+}
+
 impl GyroflowPluginBaseInstance {
     pub fn update_loaded_state(&mut self, params: &mut dyn GyroflowPluginParams, loaded: bool) {
         let _ = params.set_enabled(Params::Fov, loaded);
@@ -484,6 +510,7 @@ impl GyroflowPluginBaseInstance {
         let _ = params.set_enabled(Params::VideoSpeed, loaded);
         let _ = params.set_enabled(Params::DisableStretch, loaded);
         let _ = params.set_enabled(Params::IntegrationMethod, loaded);
+        let _ = params.set_enabled(Params::ZoomMode, loaded);
         let _ = params.set_enabled(Params::ToggleOverview, loaded);
         let _ = params.set_enabled(Params::ReloadProject, loaded);
         let _ = params.set_enabled(Params::OutputWidth, loaded);
@@ -745,6 +772,7 @@ impl GyroflowPluginBaseInstance {
                     params.set_f64(Params::AdditionalPitch,        gf_params.additional_rotation.1)?;
                     params.set_f64(Params::Rotation,               gf_params.video_rotation)?;
                     params.set_i32(Params::IntegrationMethod,      stab.gyro.read().integration_method as i32)?;
+                    params.set_i32(Params::ZoomMode,               mode_index_from_zoom_window(gf_params.adaptive_zoom_window))?;
 
                     params.set_f64(Params::OutputWidth,            self.original_output_size.0 as f64)?;
                     params.set_f64(Params::OutputHeight,           self.original_output_size.1 as f64)?;
@@ -861,6 +889,10 @@ impl GyroflowPluginBaseInstance {
                 let mut gyro = stab.gyro.write();
                 gyro.integration_method = im as usize;
                 gyro.apply_transforms();
+            }
+
+            if let Ok(zm) = params.get_i32(Params::ZoomMode) {
+                stab.params.write().adaptive_zoom_window = zoom_window_from_mode_index(zm);
             }
 
             stab.invalidate_smoothing();
@@ -1029,7 +1061,7 @@ impl GyroflowPluginBaseInstance {
                 Params::HorizonLockAmount | Params::HorizonLockRoll |
                 //Params::PositionX | Params::PositionY |
                 Params::AdditionalPitch | Params::AdditionalYaw |
-                Params::Rotation | Params::InputRotation | Params::VideoSpeed | Params::IntegrationMethod |
+                Params::Rotation | Params::InputRotation | Params::VideoSpeed | Params::IntegrationMethod | Params::ZoomMode |
                 Params::UseGyroflowsKeyframes | Params::RecalculateKeyframes => {
 
                     params.set_string(Params::Status, t!("status.calculating"))?;
@@ -1049,6 +1081,12 @@ impl GyroflowPluginBaseInstance {
                                     gyro.apply_transforms();
                                 }
                                 v.invalidate_blocking_smoothing();
+                                v.invalidate_blocking_zooming();
+                            }
+                            Params::ZoomMode => {
+                                if let Ok(zm) = params.get_i32(Params::ZoomMode) {
+                                    v.params.write().adaptive_zoom_window = zoom_window_from_mode_index(zm);
+                                }
                                 v.invalidate_blocking_zooming();
                             }
                             Params::Smoothness | Params::ZoomLimit | Params::HorizonLockAmount | Params::HorizonLockRoll |
