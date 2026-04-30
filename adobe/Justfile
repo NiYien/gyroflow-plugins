@@ -34,8 +34,8 @@ deploy:
     cargo build --profile deploy --target x86_64-apple-darwin
     cargo build --profile deploy --target aarch64-apple-darwin
 
-    version=$(grep '^version' Cargo.toml | sed -E 's/version = "(.+)".*/\1/')
-    version_short=$(echo $version | sed -E 's/-.*//')
+    version=$(cargo pkgid | sed -E 's/.*@([^@]+)$/\1/')
+    version_short=$(echo "$version" | sed -E 's/[-+].*//')
 
     if [[ "$GITHUB_REF" == *"tags"* ]]; then
         version="${version}.0"

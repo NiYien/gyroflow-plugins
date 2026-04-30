@@ -524,6 +524,7 @@ impl GyroflowPluginBaseInstance {
     pub fn initialize_instance_id(&mut self, instance_id: &mut String) {
         if instance_id.is_empty() {
             self.ever_changed = true;
+            self.reload_values_from_project = true;
             *instance_id = format!("{}", fastrand::u64(..));
         }
     }
@@ -1000,10 +1001,12 @@ impl GyroflowPluginBaseInstance {
             let last_project = gyroflow_core::settings::get_str("lastProject", "");
             if !last_project.is_empty() {
                 params.set_string(Params::ProjectPath, &last_project)?;
+                self.reload_values_from_project = true;
+                self.clear_stab(&manager_cache);
             }
         }
         if param == Params::ProjectPath || param == Params::ReloadProject || param == Params::LoadCurrent || param == Params::DontDrawOutside {
-            if param == Params::ProjectPath || param == Params::ReloadProject || param == Params::LoadCurrent {
+            if (param == Params::ProjectPath && user_edited) || param == Params::ReloadProject || param == Params::LoadCurrent {
                 self.reload_values_from_project = true;
             }
             self.clear_stab(&manager_cache);
@@ -1152,6 +1155,173 @@ impl ToString for Params {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct TestParams {
+        strings: BTreeMap<Params, String>,
+        bools: BTreeMap<Params, bool>,
+        f64s: BTreeMap<Params, f64>,
+        i32s: BTreeMap<Params, i32>,
+    }
+
+    impl GyroflowPluginParams for TestParams {
+        fn set_enabled(&mut self, _param: Params, _enabled: bool) -> PluginResult<()> { Ok(()) }
+        fn set_label(&mut self, _param: Params, _label: &str) -> PluginResult<()> { Ok(()) }
+        fn set_hint(&mut self, _param: Params, _hint: &str) -> PluginResult<()> { Ok(()) }
+
+        fn set_f64(&mut self, param: Params, value: f64) -> PluginResult<()> {
+            self.f64s.insert(param, value);
+            Ok(())
+        }
+        fn get_f64(&self, param: Params) -> PluginResult<f64> {
+            Ok(*self.f64s.get(&param).unwrap_or(&0.0))
+        }
+        fn get_f64_at_time(&self, param: Params, _time: TimeType) -> PluginResult<f64> {
+            self.get_f64(param)
+        }
+        fn set_bool(&mut self, param: Params, value: bool) -> PluginResult<()> {
+            self.bools.insert(param, value);
+            Ok(())
+        }
+        fn get_bool(&self, param: Params) -> PluginResult<bool> {
+            Ok(*self.bools.get(&param).unwrap_or(&false))
+        }
+        fn get_bool_at_time(&self, param: Params, _time: TimeType) -> PluginResult<bool> {
+            self.get_bool(param)
+        }
+        fn set_string(&mut self, param: Params, value: &str) -> PluginResult<()> {
+            self.strings.insert(param, value.to_owned());
+            Ok(())
+        }
+        fn get_string(&self, param: Params) -> PluginResult<String> {
+            Ok(self.strings.get(&param).cloned().unwrap_or_default())
+        }
+        fn set_i32(&mut self, param: Params, value: i32) -> PluginResult<()> {
+            self.i32s.insert(param, value);
+            Ok(())
+        }
+        fn get_i32(&self, param: Params) -> PluginResult<i32> {
+            Ok(*self.i32s.get(&param).unwrap_or(&0))
+        }
+
+        fn is_keyframed(&self, _param: Params) -> bool { false }
+        fn get_keyframes(&self, _param: Params) -> Vec<(TimeType, f64)> { Vec::new() }
+        fn clear_keyframes(&mut self, _param: Params) -> PluginResult<()> { Ok(()) }
+        fn set_f64_at_time(&mut self, param: Params, _time: TimeType, value: f64) -> PluginResult<()> {
+            self.set_f64(param, value)
+        }
+    }
+
+    fn cache_with_instance_manager(instance: &mut GyroflowPluginBaseInstance) -> Mutex<LruCache<String, Arc<StabilizationManager>>> {
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()));
+        let stab = Arc::new(StabilizationManager::default());
+        instance.managers.put("cached".to_owned(), stab.clone());
+        cache.lock().put("cached".to_owned(), stab);
+        cache
+    }
+
+    #[test]
+    fn fresh_instance_initialization_enables_project_value_reload() {
+        let mut instance = GyroflowPluginBaseInstance {
+            reload_values_from_project: false,
+            ever_changed: false,
+            ..Default::default()
+        };
+        let mut instance_id = String::new();
+
+        instance.initialize_instance_id(&mut instance_id);
+
+        assert!(!instance_id.is_empty());
+        assert!(instance.ever_changed);
+        assert!(instance.reload_values_from_project);
+    }
+
+    #[test]
+    fn copied_instance_initialization_preserves_reload_policy() {
+        let mut instance = GyroflowPluginBaseInstance {
+            reload_values_from_project: false,
+            ever_changed: false,
+            ..Default::default()
+        };
+        let mut instance_id = "copied-instance".to_owned();
+
+        instance.initialize_instance_id(&mut instance_id);
+
+        assert_eq!(instance_id, "copied-instance");
+        assert!(!instance.ever_changed);
+        assert!(!instance.reload_values_from_project);
+    }
+
+    #[test]
+    fn host_project_path_change_clears_cache_without_reloading_project_values() {
+        let mut instance = GyroflowPluginBaseInstance {
+            reload_values_from_project: false,
+            ..Default::default()
+        };
+        let cache = cache_with_instance_manager(&mut instance);
+        let mut params = TestParams::default();
+
+        instance.param_changed(&mut params, &cache, Params::ProjectPath, false).unwrap();
+
+        assert!(!instance.reload_values_from_project);
+        assert!(instance.managers.iter().next().is_none());
+        assert!(cache.lock().iter().next().is_none());
+    }
+
+    #[test]
+    fn user_project_path_change_reloads_project_values() {
+        let mut instance = GyroflowPluginBaseInstance {
+            reload_values_from_project: false,
+            ..Default::default()
+        };
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()));
+        let mut params = TestParams::default();
+
+        instance.param_changed(&mut params, &cache, Params::ProjectPath, true).unwrap();
+
+        assert!(instance.reload_values_from_project);
+    }
+
+    #[test]
+    fn explicit_reload_actions_reload_project_values() {
+        for param in [Params::ReloadProject, Params::LoadCurrent] {
+            let mut instance = GyroflowPluginBaseInstance {
+                reload_values_from_project: false,
+                ..Default::default()
+            };
+            let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()));
+            let mut params = TestParams::default();
+
+            instance.param_changed(&mut params, &cache, param, false).unwrap();
+
+            assert!(instance.reload_values_from_project);
+        }
+    }
+
+    #[test]
+    fn open_recent_project_reloads_project_values_and_clears_cache() {
+        let data_dir = std::env::temp_dir().join(format!("gyroflow-plugin-test-{}", fastrand::u64(..)));
+        unsafe {
+            std::env::set_var("GYROFLOW_DATA_DIR", data_dir);
+        }
+        let recent_project = "C:/projects/recent.gyroflow";
+        gyroflow_core::settings::set("lastProject", recent_project.into());
+
+        let mut instance = GyroflowPluginBaseInstance {
+            reload_values_from_project: false,
+            ..Default::default()
+        };
+        let cache = cache_with_instance_manager(&mut instance);
+        let mut params = TestParams::default();
+
+        instance.param_changed(&mut params, &cache, Params::OpenRecentProject, false).unwrap();
+
+        assert_eq!(params.get_string(Params::ProjectPath).unwrap(), recent_project);
+        assert!(instance.reload_values_from_project);
+        assert!(instance.managers.iter().next().is_none());
+        assert!(cache.lock().iter().next().is_none());
+    }
 
     #[test]
     fn macos_project_open_uses_file_open_event() {
