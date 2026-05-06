@@ -1,3 +1,6 @@
 target
 ext
 __dev
+/.claude
+/docs/superpowers
+/.codex

@@ -427,6 +427,7 @@ pub struct GyroflowPluginBaseInstance {
     pub framebuffer_inverted: bool,
     pub anamorphic_adjust_size: bool,
     pub always_set_input_rotation: bool,
+    pub auto_disable_stretch: bool,
 
     pub opencl_disabled: bool,
 }
@@ -447,6 +448,7 @@ impl Clone for GyroflowPluginBaseInstance {
             framebuffer_inverted:           self.framebuffer_inverted,
             anamorphic_adjust_size:         self.anamorphic_adjust_size,
             always_set_input_rotation:      self.always_set_input_rotation,
+            auto_disable_stretch:           self.auto_disable_stretch,
             keyframable_params:             Arc::new(RwLock::new(self.keyframable_params.read().clone())),
         }
     }
@@ -468,6 +470,7 @@ impl Default for GyroflowPluginBaseInstance {
             framebuffer_inverted:           false,
             anamorphic_adjust_size:         true,
             always_set_input_rotation:      false,
+            auto_disable_stretch:           true,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false, // TODO param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                 cached_keyframes:         KeyframeManager::default()
@@ -591,6 +594,52 @@ impl GyroflowPluginBaseInstance {
         let mut kparams = self.keyframable_params.write();
         kparams.use_gyroflows_keyframes = use_gyroflows_keyframes;
         kparams.cached_keyframes = mgr;
+    }
+
+    fn maybe_auto_disable_stretch_for_lens(
+        &self,
+        params: &mut dyn GyroflowPluginParams,
+        disable_stretch: &mut bool,
+        input_horizontal_stretch: f64,
+        input_vertical_stretch: f64,
+    ) -> PluginResult<()> {
+        if !self.auto_disable_stretch || *disable_stretch {
+            return Ok(());
+        }
+
+        let lens_has_stretch =
+            (input_horizontal_stretch > 0.01 && (input_horizontal_stretch - 1.0).abs() > 1e-6)
+            || (input_vertical_stretch > 0.01 && (input_vertical_stretch - 1.0).abs() > 1e-6);
+        if lens_has_stretch {
+            params.set_bool(Params::DisableStretch, true)?;
+            *disable_stretch = true;
+        }
+        Ok(())
+    }
+
+    fn maybe_auto_disable_stretch_from_embedded_data(
+        &self,
+        params: &mut dyn GyroflowPluginParams,
+        disable_stretch: &mut bool,
+    ) -> PluginResult<()> {
+        if !self.auto_disable_stretch || *disable_stretch {
+            return Ok(());
+        }
+
+        for param_id in [Params::EmbeddedLensProfile, Params::EmbeddedPreset, Params::ProjectData] {
+            if let Ok(d) = params.get_string(param_id) {
+                if !d.is_empty() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&d) {
+                        if v.get("plugin_disable_stretch").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            *disable_stretch = true;
+                            let _ = params.set_bool(Params::DisableStretch, true);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn stab_manager(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, out_size: (usize, usize), open_gyroflow_if_no_data: bool) -> PluginResult<Arc<StabilizationManager>> {
@@ -799,19 +848,11 @@ impl GyroflowPluginBaseInstance {
                     // Auto-enable DisableStretch if the loaded lens has anamorphic stretch != 1.
                     // Gated by reload_values_from_project (true only on first load / project reload / new lens),
                     // so the user can manually un-check afterwards without it being re-applied each frame.
-                    if !disable_stretch {
-                        let (xs, ys) = {
-                            let lens = stab.lens.read();
-                            (lens.input_horizontal_stretch, lens.input_vertical_stretch)
-                        };
-                        let lens_has_stretch =
-                            (xs > 0.01 && (xs - 1.0).abs() > 1e-6)
-                            || (ys > 0.01 && (ys - 1.0).abs() > 1e-6);
-                        if lens_has_stretch {
-                            params.set_bool(Params::DisableStretch, true)?;
-                            disable_stretch = true;
-                        }
-                    }
+                    let (xs, ys) = {
+                        let lens = stab.lens.read();
+                        (lens.input_horizontal_stretch, lens.input_vertical_stretch)
+                    };
+                    self.maybe_auto_disable_stretch_for_lens(params, &mut disable_stretch, xs, ys)?;
 
                     for k in all_keys {
                         if let Some(keys) = keyframes.get_keyframes(k) {
@@ -854,21 +895,7 @@ impl GyroflowPluginBaseInstance {
             self.update_loaded_state(params, loaded);
 
             // Check if loaded preset/project/lens data contains the plugin_disable_stretch flag
-            if !disable_stretch {
-                for param_id in [Params::EmbeddedLensProfile, Params::EmbeddedPreset, Params::ProjectData] {
-                    if let Ok(d) = params.get_string(param_id) {
-                        if !d.is_empty() {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&d) {
-                                if v.get("plugin_disable_stretch").and_then(|v| v.as_bool()).unwrap_or(false) {
-                                    disable_stretch = true;
-                                    let _ = params.set_bool(Params::DisableStretch, true);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            self.maybe_auto_disable_stretch_from_embedded_data(params, &mut disable_stretch)?;
 
             if disable_stretch {
                 stab.disable_lens_stretch(self.anamorphic_adjust_size);
@@ -1321,6 +1348,69 @@ mod tests {
         assert!(instance.reload_values_from_project);
         assert!(instance.managers.iter().next().is_none());
         assert!(cache.lock().iter().next().is_none());
+    }
+
+    #[test]
+    fn automatic_lens_stretch_disable_respects_instance_policy() {
+        let instance = GyroflowPluginBaseInstance {
+            auto_disable_stretch: false,
+            ..Default::default()
+        };
+        let mut params = TestParams::default();
+        let mut disable_stretch = false;
+
+        instance.maybe_auto_disable_stretch_for_lens(&mut params, &mut disable_stretch, 1.33, 1.0).unwrap();
+
+        assert!(!disable_stretch);
+        assert!(!params.get_bool(Params::DisableStretch).unwrap());
+    }
+
+    #[test]
+    fn automatic_lens_stretch_disable_remains_enabled_by_default() {
+        let instance = GyroflowPluginBaseInstance::default();
+        let mut params = TestParams::default();
+        let mut disable_stretch = false;
+
+        instance.maybe_auto_disable_stretch_for_lens(&mut params, &mut disable_stretch, 1.33, 1.0).unwrap();
+
+        assert!(disable_stretch);
+        assert!(params.get_bool(Params::DisableStretch).unwrap());
+    }
+
+    #[test]
+    fn embedded_disable_stretch_flag_respects_instance_policy() {
+        let instance = GyroflowPluginBaseInstance {
+            auto_disable_stretch: false,
+            ..Default::default()
+        };
+        let mut params = TestParams::default();
+        params.set_string(Params::ProjectData, r#"{"plugin_disable_stretch":true}"#).unwrap();
+        let mut disable_stretch = false;
+
+        instance.maybe_auto_disable_stretch_from_embedded_data(&mut params, &mut disable_stretch).unwrap();
+
+        assert!(!disable_stretch);
+        assert!(!params.get_bool(Params::DisableStretch).unwrap());
+    }
+
+    #[test]
+    fn embedded_disable_stretch_flag_remains_enabled_by_default() {
+        let instance = GyroflowPluginBaseInstance::default();
+        let mut params = TestParams::default();
+        params.set_string(Params::ProjectData, r#"{"plugin_disable_stretch":true}"#).unwrap();
+        let mut disable_stretch = false;
+
+        instance.maybe_auto_disable_stretch_from_embedded_data(&mut params, &mut disable_stretch).unwrap();
+
+        assert!(disable_stretch);
+        assert!(params.get_bool(Params::DisableStretch).unwrap());
+    }
+
+    #[test]
+    fn deserialized_legacy_instance_keeps_auto_disable_stretch_enabled() {
+        let instance: GyroflowPluginBaseInstance = serde_json::from_str("{}").unwrap();
+
+        assert!(instance.auto_disable_stretch);
     }
 
     #[test]

@@ -486,6 +486,7 @@ impl Execute for GyroflowPlugin {
                         framebuffer_inverted:        true,
                         anamorphic_adjust_size:      true,
                         always_set_input_rotation:   false,
+                        auto_disable_stretch:        true,
                         has_motion:                  false,
                         keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                             use_gyroflows_keyframes: param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
@@ -505,6 +506,7 @@ impl Execute for GyroflowPlugin {
                 }
                 if matches!(props.get_resolve_page().as_deref(), Ok("Fusion")) {
                     instance_data.is_fusion_page = true;
+                    instance_data.plugin.auto_disable_stretch = false;
                 }
                 if let Ok(path) = props.get_src_file_path() {
                     if !path.is_empty() {
