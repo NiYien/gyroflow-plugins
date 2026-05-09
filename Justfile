@@ -10,6 +10,7 @@ export PATH := LIBCLANG_PATH + (if os() == "windows" { ";" } else { ":" }) + env
 
 export CARGO_TARGET_DIR := justfile_directory() / "target"
 export RUSTFLAGS := "-L " + ExtDir + "/vcpkg/installed/x64-windows-release/lib/ -L " + ExtDir + "/vcpkg/installed/x64-linux-release/lib/"
+export SDK_BASE := env_var_or_default("SDK_BASE", "https://www.niyien.com/api/sdk")
 
 adobe *param:
     just -f adobe/Justfile {{param}}
@@ -76,7 +77,7 @@ install-deps:
 
     # Adobe SDK
     if (-not (Test-Path -Path ".\AfterEffects")) {
-        wget "https://api.gyroflow.xyz/sdk/AdobeSDK.zip" -outfile "AdobeSDK.zip"
+        wget "$Env:SDK_BASE/AdobeSDK.zip" -outfile "AdobeSDK.zip"
         7z x -y AdobeSDK.zip
         del "AdobeSDK.zip"
     }
@@ -103,7 +104,7 @@ install-deps:
 
     # Adobe SDK
     if [ ! -f "AfterEffects/Examples/Headers/AE_Effect.h" ]; then
-        curl -L https://api.gyroflow.xyz/sdk/AdobeSDK.zip -o AdobeSDK.zip
+        curl -L "$SDK_BASE/AdobeSDK.zip" -o AdobeSDK.zip
         7z x -aoa AdobeSDK.zip
         rm AdobeSDK.zip
     fi
@@ -133,7 +134,7 @@ install-deps:
 
     # Adobe SDK
     if [ ! -f "AfterEffects/Examples/Headers/AE_Effect.h" ]; then
-        curl -L https://api.gyroflow.xyz/sdk/AdobeSDK.zip -o AdobeSDK.zip
+        curl -L "$SDK_BASE/AdobeSDK.zip" -o AdobeSDK.zip
         7z x -aoa AdobeSDK.zip
         rm AdobeSDK.zip
     fi
