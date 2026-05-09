@@ -1310,8 +1310,8 @@ dependencies = [
 
 [[package]]
 name = "gyroflow-core"
-version = "1.6.3-niyien.1"
-source = "git+https://github.com/NiYien/gyroflow.git#0646d75c405777cb9a8ab0de03ed0900eddb120a"
+version = "1.6.3"
+source = "git+https://github.com/NiYien/gyroflow.git#e2ca4239c60f0ad602f42349fb35b30b84cdc652"
 dependencies = [
  "ahrs",
  "akaze",
@@ -2233,7 +2233,7 @@ dependencies = [
 [[package]]
 name = "neuflow-trace-shared"
 version = "0.1.0"
-source = "git+https://github.com/NiYien/gyroflow.git#0646d75c405777cb9a8ab0de03ed0900eddb120a"
+source = "git+https://github.com/NiYien/gyroflow.git#e2ca4239c60f0ad602f42349fb35b30b84cdc652"
 
 [[package]]
 name = "nodrop"
@@ -3474,7 +3474,7 @@ source = "git+https://github.com/Rust-GPU/rust-gpu?rev=854e9ba#854e9ba7da26d52ca
 [[package]]
 name = "stabilize_spirv"
 version = "0.0.0"
-source = "git+https://github.com/NiYien/gyroflow.git#0646d75c405777cb9a8ab0de03ed0900eddb120a"
+source = "git+https://github.com/NiYien/gyroflow.git#e2ca4239c60f0ad602f42349fb35b30b84cdc652"
 dependencies = [
  "spirv-std",
 ]
@@ -3565,7 +3565,7 @@ dependencies = [
 [[package]]
 name = "telemetry-parser"
 version = "0.3.0"
-source = "git+https://github.com/NiYien/telemetry-parser.git?branch=niyien#aed3e8d4451eaeec2dbfb71dbf0b0f7adde55e1e"
+source = "git+https://github.com/NiYien/telemetry-parser.git?branch=niyien#94dbffd5eae350597130a2b5dfbb422d340fcaf5"
 dependencies = [
  "argh",
  "byteorder",
