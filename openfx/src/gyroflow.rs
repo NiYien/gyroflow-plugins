@@ -203,6 +203,9 @@ impl Execute for GyroflowPlugin {
                 let fps = params.fps;
                 let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
                 let org_ratio = params.size.0 as f64 / params.size.1 as f64;
+                // Aspect ratio of the core's logical output frame (`StabilizationManager` `output_size`).
+                // Used to letterbox/pillarbox the stabilized output into a mismatched host buffer.
+                let output_aspect = params.output_size.0 as f64 / params.output_size.1.max(1) as f64;
                 let (has_accurate_timestamps, has_offsets) = {
                     let gyro = stab.gyro.read();
                     let md = gyro.file_metadata.read();
@@ -278,12 +281,25 @@ impl Execute for GyroflowPlugin {
 
                 let src_rect = GyroflowPluginBase::get_center_rect(src_size.0, src_size.1, org_ratio);
 
-                let mut out_rect = if instance_data.params.get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time)).unwrap() { // TODO: unwrap
+                let dont_draw_outside = instance_data.params.get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time)).unwrap(); // TODO: unwrap
+                // Aspect-fit (letterbox) the stabilized output only on the Edit/Color page, where the host
+                // buffers are sized to the timeline resolution and may not match the source aspect. The Fusion
+                // page processes the original video at native resolution, so there is no mismatch there, and
+                // `DontDrawOutside` has its own (narrower) output rect that must not be overridden.
+                let aspect_fit_output = !dont_draw_outside && !instance_data.is_fusion_page && output_aspect.is_finite() && output_aspect > 0.0;
+
+                let mut out_rect = if dont_draw_outside {
                     let output_ratio = out_size.0 as f64 / out_size.1 as f64;
                     let mut rect = GyroflowPluginBase::get_center_rect(src_rect.2, src_rect.3, output_ratio);
                     rect.0 += src_rect.0;
                     rect.1 += src_rect.1;
                     Some(rect)
+                } else if aspect_fit_output {
+                    // Largest centered sub-rect of the host buffer whose aspect ratio matches the core's
+                    // logical output. When the aspects already match this is `(0, 0, out_w, out_h)`, which
+                    // `StabilizationManager::get_rect` treats identically to `None` (full buffer) — so the
+                    // matching-aspect path is unchanged.
+                    Some(GyroflowPluginBase::get_center_rect(out_size.0, out_size.1, output_aspect))
                 } else {
                     None
                 };
@@ -293,12 +309,20 @@ impl Execute for GyroflowPlugin {
                     let w = (out_size.0 as f64 * out_scale.x as f64).round() as usize;
                     let h = (out_size.1 as f64 * out_scale.y as f64).round() as usize;
                     if out_size.1 > h {
-                        out_rect = Some((
-                            0,
-                            out_size.1 - h, // because the coordinates are inverted
-                            w,
-                            h
-                        ));
+                        if aspect_fit_output {
+                            // Compose the proxy/half-res shrink with the aspect-fit band: recompute the band
+                            // at the scaled dimensions, then translate it by the same amount the original
+                            // full-buffer logic used (`out_size.1 - h`, because the y coordinate is inverted).
+                            let (bx, by, bw, bh) = GyroflowPluginBase::get_center_rect(w, h, output_aspect);
+                            out_rect = Some((bx, by + (out_size.1 - h), bw, bh));
+                        } else {
+                            out_rect = Some((
+                                0,
+                                out_size.1 - h, // because the coordinates are inverted
+                                w,
+                                h
+                            ));
+                        }
                     }
                 }
 
@@ -307,6 +331,24 @@ impl Execute for GyroflowPlugin {
                 }
 
                 let input_rotation = instance_data.params.get_f64_at_time(Params::InputRotation, TimeType::Frame(time)).ok().map(|x| x as f32);
+
+                // [DIAG] aspect-ratio-mismatch investigation - TEMPORARY, remove once params are confirmed
+                {
+                    let gp = stab.params.read();
+                    let gpu_path = if in_args.get_opencl_enabled().unwrap_or_default() { "OpenCL" }
+                        else if in_args.get_metal_enabled().unwrap_or_default() { "Metal" }
+                        else if in_args.get_cuda_enabled().unwrap_or_default() { "CUDA/wgpu" }
+                        else if in_args.get_opengl_enabled().unwrap_or_default() { "OpenGL" }
+                        else { "CPU" };
+                    log::info!("[DIAG] page={} gpu={gpu_path} dont_draw_outside={:?} | src_size={:?} out_size={:?} | src_rect={:?} out_rect={:?} | org_ratio={:.4} out_buf_ratio={:.4} | gf.size={:?} gf.output_size={:?} | plugin.orig_video={:?} plugin.orig_output={:?} plugin.timeline={:?} | src_rod={:?} out_rod={:?}",
+                        if instance_data.is_fusion_page { "Fusion" } else { "Edit/Color" },
+                        instance_data.params.get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time)),
+                        src_size, out_size, src_rect, out_rect,
+                        org_ratio, out_size.0 as f64 / out_size.1.max(1) as f64,
+                        gp.size, gp.output_size,
+                        instance_data.plugin.original_video_size, instance_data.plugin.original_output_size, instance_data.plugin.timeline_size,
+                        source_rect, output_rect);
+                }
 
                 // log::debug!("src_size: {src_size:?} | src_rect: {src_rect:?}");
                 // log::debug!("out_size: {out_size:?} | out_rect: {out_rect:?}");
