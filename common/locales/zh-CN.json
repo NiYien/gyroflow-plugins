@@ -58,7 +58,7 @@
   "hint.additional_pitch": "附加俯仰旋转",
   "hint.additional_yaw": "附加偏航旋转",
   "hint.rotation": "视频旋转",
-  "hint.input_rotation": "输入旋转",
+  "hint.input_rotation": "视频旋转方向默认与片段属性一致",
   "hint.fov": "视场角",
   "hint.video_speed": "用此滑块或关键帧调整视频速度，而非编辑器内置的速度变化功能",
   "hint.disable_stretch": "如果你在 Gyroflow(Niyien) 的镜头配置中使用了输入拉伸，并在编辑器中单独对视频做了去拉伸（设置宽幅压缩比），勾选此项以禁用 Gyroflow(Niyien) 内部的拉伸。",

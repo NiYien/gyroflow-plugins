@@ -58,7 +58,7 @@
   "hint.additional_pitch": "Additional pitch rotation",
   "hint.additional_yaw": "Additional yaw rotation",
   "hint.rotation": "Video rotation",
-  "hint.input_rotation": "Input rotation",
+  "hint.input_rotation": "Video rotation direction defaults to match clip properties",
   "hint.fov": "FOV",
   "hint.video_speed": "Use this slider to change video speed or keyframe it, instead of built-in speed changes in the editor",
   "hint.disable_stretch": "If you used Input stretch in the lens profile in Gyroflow(Niyien), and you de-stretched the video separately in your editor (by setting anamorphic squeeze factor), check this to disable Gyroflow(Niyien)'s internal stretching.",

@@ -51,7 +51,6 @@ define_params!(ParamHandler {
         UseGyroflowsKeyframes => use_gyroflows_keyframes: ParamHandle<bool>,
     ],
     f64s: [
-        InputRotation         => input_rotation:           ParamHandle<Double>,
         Fov                   => fov:                      ParamHandle<Double>,
         Smoothness            => smoothness:               ParamHandle<Double>,
         ZoomLimit             => zoom_limit:               ParamHandle<Double>,
@@ -69,6 +68,7 @@ define_params!(ParamHandler {
         //FusionStartFrame      => fusion_start_frame:       ParamHandle<Double>,
     ],
     i32s: [
+        InputRotation         => input_rotation:           ParamHandle<Int>,
         Interpolation         => interpolation:            ParamHandle<Int>,
         IntegrationMethod     => integration_method:       ParamHandle<Int>,
         ZoomMode              => zoom_mode:                ParamHandle<Int>,
@@ -143,13 +143,16 @@ impl InstanceData {
             self.current_file_info_pending.store(false, SeqCst);
             let lock = self.current_file_info.lock();
             if let Some(ref current_file) = *lock {
-                if let Some(proj) = &current_file.project_path {
-                    self.params.set_string(Params::ProjectPath, &proj).unwrap(); // TODO: unwrap
-                } else {
-                    // Try to use the video directly
-                    self.params.set_string(Params::ProjectPath, &current_file.file_path).unwrap(); // TODO: unwrap
-                    return Ok(true);
+                let new_path = current_file.project_path.clone().unwrap_or_else(|| current_file.file_path.clone());
+                let old_path = self.params.get_string(Params::ProjectPath).unwrap_or_default();
+                if !old_path.is_empty() && old_path != new_path {
+                    // The clip under the effect changed (e.g. the effect was copy-pasted onto a different
+                    // clip) — re-derive the project-bound parameters (InputRotation, video rotation, output
+                    // size, …) from the new clip's project instead of carrying over the previous clip's values.
+                    self.plugin.reload_values_from_project = true;
                 }
+                self.params.set_string(Params::ProjectPath, &new_path).unwrap(); // TODO: unwrap
+                return Ok(current_file.project_path.is_none());
             }
         }
         Ok(false)
@@ -172,6 +175,11 @@ impl Execute for GyroflowPlugin {
                     let project_path = instance_data.params.get_string(Params::ProjectPath).unwrap_or_default();
                     let new_project_path = gyroflow_plugin_base::GyroflowPluginBase::get_project_path(&path).unwrap_or(path);
                     if project_path.is_empty() || project_path != new_project_path {
+                        if !project_path.is_empty() {
+                            // The clip under the effect changed (e.g. copy-pasted onto a different clip) —
+                            // re-derive project-bound parameters (InputRotation etc.) from the new clip's project.
+                            instance_data.plugin.reload_values_from_project = true;
+                        }
                         let _ = instance_data.params.set_string(Params::ProjectPath, &new_project_path);
                     }
                 }
@@ -199,10 +207,23 @@ impl Execute for GyroflowPlugin {
                     let _ = instance_data.params.fusion_start_frame.set_enabled(false);
                 }*/
 
+                // Rotation the host (e.g. DaVinci Resolve "Clip Attributes -> Rotate") applied to the clip
+                // before it reached the effect. `InputRotation` is a 4-choice dropdown; map the index to
+                // degrees. Defaulted from the loaded project's video_rotation in `stab_manager`. When it is
+                // 90 or 270 the host handed us the rotated/displayed frame, so the input ROI must use the
+                // rotated storage aspect (the full host buffer, or the correct band if the rotated frame is
+                // itself letterboxed) instead of a centered storage-aspect band.
+                let input_rotation_deg = input_rotation_deg_from_index(instance_data.params.get_i32(Params::InputRotation).unwrap_or(0));
+                let input_rotated_90_270 = matches!((input_rotation_deg.round().abs() as i64) % 180, 90);
+
                 let params = stab.params.read();
                 let fps = params.fps;
                 let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
-                let org_ratio = params.size.0 as f64 / params.size.1 as f64;
+                let org_ratio = if input_rotated_90_270 {
+                    params.size.1 as f64 / params.size.0.max(1) as f64
+                } else {
+                    params.size.0 as f64 / params.size.1.max(1) as f64
+                };
                 // Aspect ratio of the core's logical output frame (`StabilizationManager` `output_size`).
                 // Used to letterbox/pillarbox the stabilized output into a mismatched host buffer.
                 let output_aspect = params.output_size.0 as f64 / params.output_size.1.max(1) as f64;
@@ -330,25 +351,7 @@ impl Execute for GyroflowPlugin {
                     out_rect = None;
                 }
 
-                let input_rotation = instance_data.params.get_f64_at_time(Params::InputRotation, TimeType::Frame(time)).ok().map(|x| x as f32);
-
-                // [DIAG] aspect-ratio-mismatch investigation - TEMPORARY, remove once params are confirmed
-                {
-                    let gp = stab.params.read();
-                    let gpu_path = if in_args.get_opencl_enabled().unwrap_or_default() { "OpenCL" }
-                        else if in_args.get_metal_enabled().unwrap_or_default() { "Metal" }
-                        else if in_args.get_cuda_enabled().unwrap_or_default() { "CUDA/wgpu" }
-                        else if in_args.get_opengl_enabled().unwrap_or_default() { "OpenGL" }
-                        else { "CPU" };
-                    log::info!("[DIAG] page={} gpu={gpu_path} dont_draw_outside={:?} | src_size={:?} out_size={:?} | src_rect={:?} out_rect={:?} | org_ratio={:.4} out_buf_ratio={:.4} | gf.size={:?} gf.output_size={:?} | plugin.orig_video={:?} plugin.orig_output={:?} plugin.timeline={:?} | src_rod={:?} out_rod={:?}",
-                        if instance_data.is_fusion_page { "Fusion" } else { "Edit/Color" },
-                        instance_data.params.get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time)),
-                        src_size, out_size, src_rect, out_rect,
-                        org_ratio, out_size.0 as f64 / out_size.1.max(1) as f64,
-                        gp.size, gp.output_size,
-                        instance_data.plugin.original_video_size, instance_data.plugin.original_output_size, instance_data.plugin.timeline_size,
-                        source_rect, output_rect);
-                }
+                let input_rotation = Some(input_rotation_deg as f32);
 
                 // log::debug!("src_size: {src_size:?} | src_rect: {src_rect:?}");
                 // log::debug!("out_size: {out_size:?} | out_rect: {out_rect:?}");

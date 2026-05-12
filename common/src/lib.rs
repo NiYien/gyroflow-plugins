@@ -311,7 +311,13 @@ impl GyroflowPluginBase {
                 ParameterType::Slider   { id: "AdditionalPitch",        label: t!("label.additional_pitch"),         hint: t!("hint.additional_pitch"),             min: -180.0, max: 180.0, default: 0.0,     hidden: true },
                 ParameterType::Slider   { id: "AdditionalYaw",          label: t!("label.additional_yaw"),           hint: t!("hint.additional_yaw"),               min: -180.0, max: 180.0, default: 0.0,     hidden: true },
                 ParameterType::Slider   { id: "Rotation",               label: t!("label.rotation"),                 hint: t!("hint.rotation"),                     min: -360.0, max: 360.0, default: 0.0,     hidden: true },
-                ParameterType::Slider   { id: "InputRotation",          label: t!("label.input_rotation"),           hint: t!("hint.input_rotation"),               min: -360.0, max: 360.0, default: 0.0,     hidden: true },
+                // The rotation the host applied to the clip before it reached the effect (e.g. DaVinci Resolve
+                // "Clip Attributes -> Rotate"). A 4-choice dropdown mirroring Resolve's options; the index maps
+                // to degrees via `input_rotation_{deg_from_index,index_from_deg}`. Defaulted from the loaded
+                // project's video_rotation in `stab_manager`.
+                ParameterType::Select   { id: "InputRotation",          label: t!("label.input_rotation"),           hint: t!("hint.input_rotation"),
+                    options: vec![ "0°", "90° left", "90° right", "180°" ],
+                    default: "0°", hidden: false },
                 ParameterType::Slider   { id: "Fov",                    label: t!("label.fov"),                      hint: t!("hint.fov"),                          min: 0.1,    max: 3.0,   default: 1.0,     hidden: true },
                 ParameterType::Slider   { id: "VideoSpeed",             label: t!("label.video_speed"),              hint: t!("hint.video_speed"),                  min: 0.0001, max: 1000.0, default: 100.0,  hidden: true },
                 ParameterType::Checkbox { id: "DisableStretch",         label: t!("label.disable_stretch"),          hint: t!("hint.disable_stretch"),              default: false, hidden: true },
@@ -495,6 +501,30 @@ pub fn mode_index_from_zoom_window(window: f64) -> i32 {
     if window <= -0.9 { 2 }
     else if window < 0.0001 { 0 }
     else { 1 }
+}
+
+/// `InputRotation` is a 4-choice dropdown matching DaVinci Resolve's Clip-Attributes "Rotate" options:
+///   0 = 0°        -> 0
+///   1 = 90° left  -> 90
+///   2 = 90° right -> -90  (== 270°)
+///   3 = 180°      -> 180
+pub fn input_rotation_deg_from_index(index: i32) -> f64 {
+    match index {
+        1 => 90.0,
+        2 => -90.0,
+        3 => 180.0,
+        _ => 0.0,
+    }
+}
+/// Inverse mapping: derive the dropdown index from a rotation in degrees (accepts 0/90/180/270 and
+/// their negatives; anything that isn't a quarter turn falls back to 0°).
+pub fn input_rotation_index_from_deg(deg: f64) -> i32 {
+    match (((deg % 360.0) + 360.0) % 360.0).round() as i64 {
+        90 => 1,
+        270 => 2,
+        180 => 3,
+        _ => 0,
+    }
 }
 
 impl GyroflowPluginBaseInstance {
@@ -733,7 +763,7 @@ impl GyroflowPluginBaseInstance {
                         }
                         if md.rotation != 0 && self.reload_values_from_project {
                             let r = ((360 - md.rotation) % 360) as f64;
-                            params.set_f64(Params::InputRotation, r)?;
+                            params.set_i32(Params::InputRotation, input_rotation_index_from_deg(r))?;
                             stab.params.write().video_rotation = r;
                         }
                         params.set_string(Params::LoadedProject, &filesystem::get_filename(&filesystem::path_to_url(&path)))?;
@@ -790,7 +820,7 @@ impl GyroflowPluginBaseInstance {
                     if let Ok(video_md) = gyroflow_core::util::get_video_metadata(file.get_file(), filesize, &url) {
                         if video_md.rotation != 0 && self.reload_values_from_project {
                             let r = ((360 - video_md.rotation) % 360) as f64;
-                            params.set_f64(Params::InputRotation, r)?;
+                            params.set_i32(Params::InputRotation, input_rotation_index_from_deg(r))?;
                             stab.params.write().video_rotation = r;
                         }
                     }
@@ -821,6 +851,13 @@ impl GyroflowPluginBaseInstance {
                     params.set_f64(Params::AdditionalYaw,          gf_params.additional_rotation.0)?;
                     params.set_f64(Params::AdditionalPitch,        gf_params.additional_rotation.1)?;
                     params.set_f64(Params::Rotation,               gf_params.video_rotation)?;
+                    // Default the host-applied clip rotation to the project's video_rotation. The host (e.g.
+                    // Resolve Clip Attributes) derives its rotation from the same container metadata Gyroflow
+                    // derived video_rotation from, so for clips with rotation metadata this matches. Gated by
+                    // reload_values_from_project (first load / reload / new lens), so a user-set value is not
+                    // clobbered on subsequent renders. The bare-video path above already sets it to the same
+                    // (360 - md.rotation) % 360 value, so this is idempotent there. Stored as a dropdown index.
+                    params.set_i32(Params::InputRotation,          input_rotation_index_from_deg(gf_params.video_rotation))?;
                     params.set_i32(Params::IntegrationMethod,      stab.gyro.read().integration_method as i32)?;
                     params.set_i32(Params::ZoomMode,               mode_index_from_zoom_window(gf_params.adaptive_zoom_window))?;
 

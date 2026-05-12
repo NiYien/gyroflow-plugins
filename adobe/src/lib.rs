@@ -234,7 +234,8 @@ impl Instance {
 
                     let input_rotation = {
                         let params = ParamHandler { inner: ParamsInner::AeRO(plugin.params), stored: stored.clone() };
-                        -params.get_f64(Params::InputRotation).unwrap_or_default() as f32
+                        // `InputRotation` is a dropdown index; map it to degrees.
+                        -(input_rotation_deg_from_index(params.get_i32(Params::InputRotation).unwrap_or(0)) as f32)
                     };
 
                     let mut buffers = Buffers {

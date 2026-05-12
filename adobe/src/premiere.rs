@@ -221,7 +221,8 @@ impl pr::GpuFilter for PremiereGPU {
                         _ => panic!("Invalid GPU framework")
                     };
 
-                    let input_rotation = -params.get_f64(Params::InputRotation).unwrap() as f32;
+                    // `InputRotation` is a dropdown index; map it to degrees.
+                    let input_rotation = -(input_rotation_deg_from_index(params.get_i32(Params::InputRotation).unwrap_or(0)) as f32);
 
                     let mut buffers = Buffers {
                         input:  BufferDescription { size: src_size,  rect: None,           data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2 },

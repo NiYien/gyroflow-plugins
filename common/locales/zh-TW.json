@@ -58,7 +58,7 @@
   "hint.additional_pitch": "額外俯仰旋轉",
   "hint.additional_yaw": "額外偏航旋轉",
   "hint.rotation": "影片旋轉",
-  "hint.input_rotation": "輸入旋轉",
+  "hint.input_rotation": "影片旋轉方向預設與片段屬性一致",
   "hint.fov": "視場角",
   "hint.video_speed": "用此滑桿或關鍵畫格調整影片速度，而非編輯器內建的速度變化功能",
   "hint.disable_stretch": "如果你在 Gyroflow(Niyien) 的鏡頭設定檔中使用了輸入延展，並在編輯器中單獨對影片去延展（設定變形壓縮比），勾選此項以停用 Gyroflow(Niyien) 內部的延展。",

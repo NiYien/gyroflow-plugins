@@ -58,7 +58,7 @@
   "hint.additional_pitch": "追加ピッチ回転",
   "hint.additional_yaw": "追加ヨー回転",
   "hint.rotation": "動画回転",
-  "hint.input_rotation": "入力回転",
+  "hint.input_rotation": "動画の回転方向は既定でクリップ属性に一致します",
   "hint.fov": "FOV",
   "hint.video_speed": "エディタ内蔵の速度変更ではなく、このスライダーまたはキーフレームで動画速度を変更します",
   "hint.disable_stretch": "Gyroflow(Niyien) のレンズプロファイルで入力ストレッチを使用し、エディタ側で別途デストレッチ（アナモルフィック圧縮率の設定）を行った場合、これにチェックを入れて Gyroflow(Niyien) 内部のストレッチを無効化します。",

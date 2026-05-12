@@ -58,7 +58,7 @@
   "hint.additional_pitch": "추가 피치 회전",
   "hint.additional_yaw": "추가 요 회전",
   "hint.rotation": "영상 회전",
-  "hint.input_rotation": "입력 회전",
+  "hint.input_rotation": "영상 회전 방향은 기본적으로 클립 속성과 일치합니다",
   "hint.fov": "FOV",
   "hint.video_speed": "편집기 내장 속도 변경 대신 이 슬라이더 또는 키프레임으로 영상 속도를 조정합니다",
   "hint.disable_stretch": "Gyroflow(Niyien) 렌즈 프로필에서 입력 스트레치를 사용했고, 편집기에서 영상을 별도로 디스트레치(아나모픽 압축비 설정)했다면, 이 옵션을 켜서 Gyroflow(Niyien) 내부의 스트레치를 비활성화합니다.",
