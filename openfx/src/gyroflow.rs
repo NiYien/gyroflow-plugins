@@ -109,10 +109,12 @@ struct InstanceData {
     output_clip: ClipInstance,
 
     params: ParamHandler,
+    input_rotation_manually_edited: ParamHandle<bool>,
     plugin: GyroflowPluginBaseInstance,
     supports_output_size: bool,
     is_fusion_page: bool,
     project_video_rotation: Option<f64>,
+    preserved_input_rotation: Option<i32>,
     file_path: Option<String>,
 
     current_file_info_pending: Arc<AtomicBool>,
@@ -134,10 +136,21 @@ impl InstanceData {
         let in_size = ((source_rect.x2 - source_rect.x1) as usize, (source_rect.y2 - source_rect.y1) as usize);*/
         let out_size = ((output_rect.x2 - output_rect.x1) as usize, (output_rect.y2 - output_rect.y1) as usize);
 
-        self.plugin.stab_manager(&mut self.params, manager_cache, out_size, loading_pending_video_file).map_err(|e| {
+        let mut params = PreservedInputRotationParams {
+            inner: &mut self.params,
+            preserved_input_rotation: self.preserved_input_rotation,
+        };
+        let should_write_input_rotation_to_host = should_write_project_input_rotation_to_host(self.preserved_input_rotation);
+
+        let stab = self.plugin.stab_manager(&mut params, manager_cache, out_size, loading_pending_video_file).map_err(|e| {
             log::error!("plugin.stab_manager error: {e:?}");
             Error::UnknownError
-        })
+        })?;
+        if !should_write_input_rotation_to_host {
+            self.plugin.reload_values_from_project = false;
+            self.preserved_input_rotation = None;
+        }
+        Ok(stab)
     }
     pub fn check_pending_file_info(&mut self) -> Result<bool> { // -> is_video_file
         if self.current_file_info_pending.load(SeqCst) {
@@ -147,9 +160,13 @@ impl InstanceData {
                 let new_path = current_file.project_path.clone().unwrap_or_else(|| current_file.file_path.clone());
                 let old_path = self.params.get_string(Params::ProjectPath).unwrap_or_default();
                 if !old_path.is_empty() && old_path != new_path {
-                    // The clip under the effect changed (e.g. the effect was copy-pasted onto a different
-                    // clip) — re-derive the project-bound parameters (InputRotation, video rotation, output
-                    // size, …) from the new clip's project instead of carrying over the previous clip's values.
+                    // Re-derive project-bound parameters from the new clip. In OpenFX Edit/Color only, keep a
+                    // manually edited InputRotation as the user's copied host-rotation override.
+                    self.preserved_input_rotation = preserved_input_rotation_for_clip_change(
+                        self.is_fusion_page,
+                        self.input_rotation_manually_edited.get_value().unwrap_or(false),
+                        self.params.get_i32(Params::InputRotation).ok(),
+                    );
                     self.plugin.reload_values_from_project = true;
                     self.project_video_rotation = None;
                 }
@@ -158,6 +175,90 @@ impl InstanceData {
             }
         }
         Ok(false)
+    }
+}
+
+struct PreservedInputRotationParams<'a> {
+    inner: &'a mut ParamHandler,
+    preserved_input_rotation: Option<i32>,
+}
+
+impl GyroflowPluginParams for PreservedInputRotationParams<'_> {
+    fn set_enabled(&mut self, param: Params, enabled: bool) -> PluginResult<()> {
+        self.inner.set_enabled(param, enabled)
+    }
+
+    fn set_label(&mut self, param: Params, label: &str) -> PluginResult<()> {
+        self.inner.set_label(param, label)
+    }
+
+    fn set_hint(&mut self, param: Params, hint: &str) -> PluginResult<()> {
+        self.inner.set_hint(param, hint)
+    }
+
+    fn set_f64(&mut self, param: Params, value: f64) -> PluginResult<()> {
+        self.inner.set_f64(param, value)
+    }
+
+    fn get_f64(&self, param: Params) -> PluginResult<f64> {
+        self.inner.get_f64(param)
+    }
+
+    fn get_f64_at_time(&self, param: Params, time: TimeType) -> PluginResult<f64> {
+        self.inner.get_f64_at_time(param, time)
+    }
+
+    fn set_bool(&mut self, param: Params, value: bool) -> PluginResult<()> {
+        self.inner.set_bool(param, value)
+    }
+
+    fn get_bool(&self, param: Params) -> PluginResult<bool> {
+        self.inner.get_bool(param)
+    }
+
+    fn get_bool_at_time(&self, param: Params, time: TimeType) -> PluginResult<bool> {
+        self.inner.get_bool_at_time(param, time)
+    }
+
+    fn set_string(&mut self, param: Params, value: &str) -> PluginResult<()> {
+        self.inner.set_string(param, value)
+    }
+
+    fn get_string(&self, param: Params) -> PluginResult<String> {
+        self.inner.get_string(param)
+    }
+
+    fn set_i32(&mut self, param: Params, value: i32) -> PluginResult<()> {
+        if param == Params::InputRotation && !should_write_project_input_rotation_to_host(self.preserved_input_rotation) {
+            Ok(())
+        } else {
+            self.inner.set_i32(param, value)
+        }
+    }
+
+    fn get_i32(&self, param: Params) -> PluginResult<i32> {
+        let host_value = self.inner.get_i32(param)?;
+        Ok(if param == Params::InputRotation {
+            effective_input_rotation_value(host_value, self.preserved_input_rotation)
+        } else {
+            host_value
+        })
+    }
+
+    fn is_keyframed(&self, param: Params) -> bool {
+        self.inner.is_keyframed(param)
+    }
+
+    fn get_keyframes(&self, param: Params) -> Vec<(TimeType, f64)> {
+        self.inner.get_keyframes(param)
+    }
+
+    fn clear_keyframes(&mut self, param: Params) -> PluginResult<()> {
+        self.inner.clear_keyframes(param)
+    }
+
+    fn set_f64_at_time(&mut self, param: Params, time: TimeType, value: f64) -> PluginResult<()> {
+        self.inner.set_f64_at_time(param, time, value)
     }
 }
 
@@ -199,6 +300,30 @@ fn openfx_runtime_output_size(project_rotation: f64, target_rotation: f64, outpu
 
 fn openfx_project_rotation(project_video_rotation: &mut Option<f64>, rotation_param: f64) -> f64 {
     *project_video_rotation.get_or_insert(rotation_param)
+}
+
+fn preserved_input_rotation_for_clip_change(
+    is_fusion_page: bool,
+    input_rotation_manually_edited: bool,
+    input_rotation: Option<i32>,
+) -> Option<i32> {
+    if is_fusion_page || !input_rotation_manually_edited {
+        None
+    } else {
+        input_rotation
+    }
+}
+
+fn should_clear_input_rotation_manual_marker(param: Params) -> bool {
+    matches!(param, Params::ReloadProject | Params::LoadCurrent | Params::OpenRecentProject | Params::Browse)
+}
+
+fn effective_input_rotation_value(host_value: i32, preserved_input_rotation: Option<i32>) -> i32 {
+    preserved_input_rotation.unwrap_or(host_value)
+}
+
+fn should_write_project_input_rotation_to_host(preserved_input_rotation: Option<i32>) -> bool {
+    preserved_input_rotation.is_none()
 }
 
 fn apply_openfx_rotation_to_stab(
@@ -300,8 +425,13 @@ impl Execute for GyroflowPlugin {
                     let new_project_path = gyroflow_plugin_base::GyroflowPluginBase::get_project_path(&path).unwrap_or(path);
                     if project_path.is_empty() || project_path != new_project_path {
                         if !project_path.is_empty() {
-                            // The clip under the effect changed (e.g. copy-pasted onto a different clip) —
-                            // re-derive project-bound parameters (InputRotation etc.) from the new clip's project.
+                            // Re-derive project-bound parameters from the new clip. In OpenFX Edit/Color only,
+                            // keep a manually edited InputRotation as the user's copied host-rotation override.
+                            instance_data.preserved_input_rotation = preserved_input_rotation_for_clip_change(
+                                instance_data.is_fusion_page,
+                                instance_data.input_rotation_manually_edited.get_value().unwrap_or(false),
+                                instance_data.params.get_i32(Params::InputRotation).ok(),
+                            );
                             instance_data.plugin.reload_values_from_project = true;
                             instance_data.project_video_rotation = None;
                         }
@@ -614,7 +744,9 @@ impl Execute for GyroflowPlugin {
                     supports_output_size: true,
                     is_fusion_page: false,
                     project_video_rotation: None,
+                    preserved_input_rotation: None,
                     file_path: None,
+                    input_rotation_manually_edited: param_set.parameter("InputRotationManuallyEdited")?,
                     params: ParamHandler {
                         instance_id:              param_set.parameter("InstanceId")?,
                         project_data:             param_set.parameter("ProjectData")?,
@@ -719,8 +851,19 @@ impl Execute for GyroflowPlugin {
                         let rect = instance_data.source_clip.get_region_of_definition(0.0)?;
                         instance_data.plugin.timeline_size = ((rect.x2 - rect.x1) as usize, (rect.y2 - rect.y1) as usize);
                     }
-                    if matches!(param, Params::ProjectPath | Params::ReloadProject | Params::LoadCurrent) {
+                    if matches!(
+                        param,
+                        Params::ProjectPath | Params::ReloadProject | Params::LoadCurrent | Params::OpenRecentProject | Params::Browse
+                    ) {
                         instance_data.project_video_rotation = None;
+                    }
+                    if should_clear_input_rotation_manual_marker(param) {
+                        instance_data.preserved_input_rotation = None;
+                        let _ = instance_data.input_rotation_manually_edited.set_value(false);
+                    }
+
+                    if !instance_data.is_fusion_page && param == Params::InputRotation && in_args.get_change_reason()? == Change::UserEdited {
+                        instance_data.input_rotation_manually_edited.set_value(true)?;
                     }
 
                     instance_data.plugin.param_changed(&mut instance_data.params, &self.gyroflow_plugin.manager_cache, param, in_args.get_change_reason()? == Change::UserEdited).map_err(|e| {
@@ -875,6 +1018,17 @@ impl Execute for GyroflowPlugin {
                 for param in GyroflowPluginBase::get_param_definitions() {
                     define_param(&mut param_set, param, None)?;
                 }
+                define_param(
+                    &mut param_set,
+                    ParameterType::Checkbox {
+                        id: "InputRotationManuallyEdited",
+                        label: "Input rotation manually edited",
+                        hint: "",
+                        default: false,
+                        hidden: true,
+                    },
+                    None,
+                )?;
 
                 param_set
                     .param_define_page("Main")?
@@ -1030,5 +1184,39 @@ mod tests {
         });
 
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(true));
+    }
+
+    #[test]
+    fn non_fusion_clip_change_reloads_auto_derived_input_rotation() {
+        assert_eq!(preserved_input_rotation_for_clip_change(false, false, Some(1)), None);
+    }
+
+    #[test]
+    fn non_fusion_clip_change_preserves_manually_edited_input_rotation() {
+        assert_eq!(preserved_input_rotation_for_clip_change(false, true, Some(1)), Some(1));
+    }
+
+    #[test]
+    fn preserved_input_rotation_overrides_project_reload_without_host_write() {
+        assert_eq!(effective_input_rotation_value(0, Some(1)), 1);
+        assert!(!should_write_project_input_rotation_to_host(Some(1)));
+    }
+
+    #[test]
+    fn fusion_clip_change_does_not_preserve_manually_edited_input_rotation() {
+        assert_eq!(preserved_input_rotation_for_clip_change(true, true, Some(1)), None);
+    }
+
+    #[test]
+    fn pasted_project_path_change_does_not_clear_manual_input_rotation_marker() {
+        assert!(!should_clear_input_rotation_manual_marker(Params::ProjectPath));
+    }
+
+    #[test]
+    fn explicit_reload_clears_manual_input_rotation_marker() {
+        assert!(should_clear_input_rotation_manual_marker(Params::ReloadProject));
+        assert!(should_clear_input_rotation_manual_marker(Params::LoadCurrent));
+        assert!(should_clear_input_rotation_manual_marker(Params::Browse));
+        assert!(should_clear_input_rotation_manual_marker(Params::OpenRecentProject));
     }
 }
