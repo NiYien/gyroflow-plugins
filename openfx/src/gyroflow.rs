@@ -112,6 +112,7 @@ struct InstanceData {
     plugin: GyroflowPluginBaseInstance,
     supports_output_size: bool,
     is_fusion_page: bool,
+    project_video_rotation: Option<f64>,
     file_path: Option<String>,
 
     current_file_info_pending: Arc<AtomicBool>,
@@ -150,11 +151,134 @@ impl InstanceData {
                     // clip) — re-derive the project-bound parameters (InputRotation, video rotation, output
                     // size, …) from the new clip's project instead of carrying over the previous clip's values.
                     self.plugin.reload_values_from_project = true;
+                    self.project_video_rotation = None;
                 }
                 self.params.set_string(Params::ProjectPath, &new_path).unwrap(); // TODO: unwrap
                 return Ok(current_file.project_path.is_none());
             }
         }
+        Ok(false)
+    }
+}
+
+fn normalized_quarter_turn_deg(deg: f64) -> i32 {
+    let rounded = deg.round() as i32;
+    ((rounded % 360) + 360) % 360
+}
+
+fn is_sideways_rotation(deg: f64) -> bool {
+    matches!(normalized_quarter_turn_deg(deg), 90 | 270)
+}
+
+fn openfx_target_rotation(
+    project_rotation: f64,
+    current_video_rotation: f64,
+    input_rotation_index: i32,
+) -> Option<f64> {
+    let input_rotation = input_rotation_deg_from_index(input_rotation_index);
+    let target_rotation = if normalized_quarter_turn_deg(input_rotation) == 0 {
+        project_rotation
+    } else {
+        input_rotation
+    };
+
+    if normalized_quarter_turn_deg(target_rotation) == normalized_quarter_turn_deg(current_video_rotation) {
+        None
+    } else {
+        Some(target_rotation)
+    }
+}
+
+fn openfx_runtime_output_size(project_rotation: f64, target_rotation: f64, output_width: usize, output_height: usize) -> (usize, usize) {
+    if is_sideways_rotation(project_rotation) != is_sideways_rotation(target_rotation) {
+        (output_height, output_width)
+    } else {
+        (output_width, output_height)
+    }
+}
+
+fn openfx_project_rotation(project_video_rotation: &mut Option<f64>, rotation_param: f64) -> f64 {
+    *project_video_rotation.get_or_insert(rotation_param)
+}
+
+fn apply_openfx_rotation_to_stab(
+    project_rotation: f64,
+    input_rotation_index: i32,
+    output_size: (usize, usize),
+    stab: &StabilizationManager,
+) -> Option<f64> {
+    let current_video_rotation = stab.params.read().video_rotation;
+    let target_rotation = openfx_target_rotation(project_rotation, current_video_rotation, input_rotation_index)?;
+    {
+        let mut stab_params = stab.params.write();
+        stab_params.video_rotation = target_rotation;
+    }
+    let output_size = openfx_runtime_output_size(project_rotation, target_rotation, output_size.0, output_size.1);
+    stab.set_output_size(output_size.0, output_size.1);
+    stab.invalidate_blocking_zooming();
+    stab.invalidate_blocking_undistortion();
+
+    Some(target_rotation)
+}
+
+fn apply_openfx_input_rotation_override(
+    is_fusion_page: bool,
+    project_rotation: f64,
+    params: &mut dyn GyroflowPluginParams,
+    stab: &StabilizationManager,
+) -> PluginResult<bool> {
+    if is_fusion_page {
+        return Ok(false);
+    }
+
+    let Some(effective_rotation) = apply_openfx_rotation_to_stab(
+        project_rotation,
+        params.get_i32(Params::InputRotation)?,
+        (
+            params.get_f64(Params::OutputWidth)? as _,
+            params.get_f64(Params::OutputHeight)? as _,
+        ),
+        stab,
+    ) else {
+        return Ok(false);
+    };
+
+    params.set_f64(Params::Rotation, effective_rotation)?;
+
+    Ok(true)
+}
+
+fn apply_openfx_input_rotation_override_to_managers(
+    is_fusion_page: bool,
+    project_rotation: f64,
+    params: &mut dyn GyroflowPluginParams,
+    managers: &mut LruCache<String, Arc<StabilizationManager>>,
+) -> PluginResult<bool> {
+    if is_fusion_page {
+        return Ok(false);
+    }
+
+    let input_rotation_index = params.get_i32(Params::InputRotation)?;
+    let output_size = (
+        params.get_f64(Params::OutputWidth)? as _,
+        params.get_f64(Params::OutputHeight)? as _,
+    );
+    let mut effective_rotation = None;
+    for (_, stab) in managers.iter_mut() {
+        if let Some(target_rotation) = apply_openfx_rotation_to_stab(
+            project_rotation,
+            input_rotation_index,
+            output_size,
+            stab,
+        ) {
+            effective_rotation = Some(target_rotation);
+        }
+    }
+
+    if let Some(rotation) = effective_rotation {
+        params.set_f64(Params::Rotation, rotation)?;
+        Ok(true)
+    } else {
         Ok(false)
     }
 }
@@ -179,6 +303,7 @@ impl Execute for GyroflowPlugin {
                             // The clip under the effect changed (e.g. copy-pasted onto a different clip) —
                             // re-derive project-bound parameters (InputRotation etc.) from the new clip's project.
                             instance_data.plugin.reload_values_from_project = true;
+                            instance_data.project_video_rotation = None;
                         }
                         let _ = instance_data.params.set_string(Params::ProjectPath, &new_project_path);
                     }
@@ -196,6 +321,21 @@ impl Execute for GyroflowPlugin {
                 let output_rect: RectI = output_image.get_region_of_definition()?;
 
                 let stab = instance_data.stab_manager(&self.gyroflow_plugin.manager_cache, output_rect, loading_pending_video_file)?;
+                let project_rotation = *instance_data.project_video_rotation.get_or_insert_with(|| stab.params.read().video_rotation);
+                if apply_openfx_input_rotation_override(
+                    instance_data.is_fusion_page,
+                    project_rotation,
+                    &mut instance_data.params,
+                    &stab,
+                ).map_err(|e| {
+                    log::error!("input rotation override error: {e:?}");
+                    Error::UnknownError
+                })? {
+                    let use_gyroflows_keyframes = instance_data.params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
+                    let num_frames = instance_data.plugin.num_frames;
+                    let fps = instance_data.plugin.fps.max(1.0);
+                    instance_data.plugin.cache_keyframes(&instance_data.params, use_gyroflows_keyframes, num_frames, fps);
+                }
 
                 if !instance_data.supports_output_size {
                     let _ = instance_data.params.output_width.set_enabled(false);
@@ -473,6 +613,7 @@ impl Execute for GyroflowPlugin {
                     output_clip,
                     supports_output_size: true,
                     is_fusion_page: false,
+                    project_video_rotation: None,
                     file_path: None,
                     params: ParamHandler {
                         instance_id:              param_set.parameter("InstanceId")?,
@@ -578,11 +719,34 @@ impl Execute for GyroflowPlugin {
                         let rect = instance_data.source_clip.get_region_of_definition(0.0)?;
                         instance_data.plugin.timeline_size = ((rect.x2 - rect.x1) as usize, (rect.y2 - rect.y1) as usize);
                     }
+                    if matches!(param, Params::ProjectPath | Params::ReloadProject | Params::LoadCurrent) {
+                        instance_data.project_video_rotation = None;
+                    }
 
                     instance_data.plugin.param_changed(&mut instance_data.params, &self.gyroflow_plugin.manager_cache, param, in_args.get_change_reason()? == Change::UserEdited).map_err(|e| {
                         log::error!("param_changed error: {e:?}");
                         Error::InvalidAction
                     })?;
+                    if param == Params::InputRotation {
+                        let project_rotation = openfx_project_rotation(
+                            &mut instance_data.project_video_rotation,
+                            instance_data.params.get_f64(Params::Rotation).unwrap_or_default(),
+                        );
+                        if apply_openfx_input_rotation_override_to_managers(
+                            instance_data.is_fusion_page,
+                            project_rotation,
+                            &mut instance_data.params,
+                            &mut instance_data.plugin.managers,
+                        ).map_err(|e| {
+                            log::error!("input rotation override error: {e:?}");
+                            Error::InvalidAction
+                        })? {
+                            let use_gyroflows_keyframes = instance_data.params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
+                            let num_frames = instance_data.plugin.num_frames;
+                            let fps = instance_data.plugin.fps.max(1.0);
+                            instance_data.plugin.cache_keyframes(&instance_data.params, use_gyroflows_keyframes, num_frames, fps);
+                        }
+                    }
                 } else {
                     log::error!("Unknown param name: {:?}", in_args.get_name()?);
                 }
@@ -804,5 +968,67 @@ impl Execute for GyroflowPlugin {
 
             _ => REPLY_DEFAULT,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn target_rotation_maps_dropdown_and_restores_project_rotation() {
+        let cases = [
+            (0.0, 0.0, 0, None),
+            (0.0, 0.0, 1, Some(90.0)),
+            (0.0, 0.0, 2, Some(-90.0)),
+            (0.0, 0.0, 3, Some(180.0)),
+            (270.0, 270.0, 2, None),
+            (-90.0, -90.0, 2, None),
+            (450.0, 90.0, 1, None),
+            (90.0, 90.0, 0, None),
+            (0.0, 90.0, 0, Some(0.0)),
+        ];
+
+        for (project_rotation, current_video_rotation, input_rotation_index, expected) in cases {
+            assert_eq!(
+                openfx_target_rotation(project_rotation, current_video_rotation, input_rotation_index),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_output_size_swaps_when_rotation_quarter_turn_parity_changes() {
+        assert_eq!(openfx_runtime_output_size(0.0, 90.0, 3840, 2160), (2160, 3840));
+        assert_eq!(openfx_runtime_output_size(0.0, -90.0, 3840, 2160), (2160, 3840));
+        assert_eq!(openfx_runtime_output_size(90.0, 0.0, 2160, 3840), (3840, 2160));
+        assert_eq!(openfx_runtime_output_size(0.0, 180.0, 3840, 2160), (3840, 2160));
+        assert_eq!(openfx_runtime_output_size(90.0, -90.0, 2160, 3840), (2160, 3840));
+    }
+
+    #[test]
+    fn project_rotation_is_captured_once_before_input_rotation_overrides_mutate_rotation_param() {
+        let mut project_rotation = None;
+
+        assert_eq!(openfx_project_rotation(&mut project_rotation, 0.0), 0.0);
+        assert_eq!(openfx_project_rotation(&mut project_rotation, 90.0), 0.0);
+    }
+
+    #[test]
+    fn input_rotation_override_does_not_deadlock_when_mutating_stab_params() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = apply_openfx_rotation_to_stab(
+                0.0,
+                1,
+                (1920, 1080),
+                &StabilizationManager::default(),
+            );
+            let _ = tx.send(result == Some(90.0));
+        });
+
+        assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(true));
     }
 }
