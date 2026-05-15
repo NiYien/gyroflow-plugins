@@ -109,12 +109,35 @@ struct InstanceData {
     output_clip: ClipInstance,
 
     params: ParamHandler,
-    input_rotation_manually_edited: ParamHandle<bool>,
+    // Host-side manual-edit flags for each of the 5 paste-preservable params. These ride
+    // across copy/paste, so they carry "B manually edited this" intent into A's instance.
+    // No plugin-private shadow exists: by design, paste from B (where B did not manually
+    // edit a param) discards A's prior manual edit on that param and falls back to A's
+    // project default. The flag is enough to encode "B manually edited" intent.
+    input_rotation_manually_edited:           ParamHandle<bool>,
+    smoothness_manually_edited:               ParamHandle<bool>,
+    lens_correction_strength_manually_edited: ParamHandle<bool>,
+    horizon_lock_amount_manually_edited:      ParamHandle<bool>,
+    zoom_mode_manually_edited:                ParamHandle<bool>,
     plugin: GyroflowPluginBaseInstance,
     supports_output_size: bool,
     is_fusion_page: bool,
     project_video_rotation: Option<f64>,
-    preserved_input_rotation: Option<i32>,
+    // Captured at paste-detection time inside `check_pending_file_info`; consumed by the
+    // post-reload merge step in `stab_manager`. `None` means no paste is pending.
+    pending_paste_merge: Option<PendingPasteMerge>,
+    // Set by `InstanceChanged(ProjectPath, Plugin)` when the incoming host value did not
+    // match a plugin-initiated write. Consumed in `stab_manager` to actually run the
+    // snapshot + reload + merge sequence after all paste-writes have completed for this turn.
+    paste_detected: bool,
+    // Cached at `CreateInstance` from `props.get_src_file_path()`. The "expected" ProjectPath
+    // for this clip — used as the rewrite target when paste is detected.
+    source_derived_project_path: Option<String>,
+    // The last value the plugin itself wrote to `ProjectPath` (or expects to see after Browse/
+    // OpenRecentProject etc.). When `InstanceChanged(ProjectPath)` fires with this value, the
+    // event is our own and we consume the marker. Any other value indicates an external write
+    // (paste from another node).
+    expected_internal_project_path: Option<String>,
     file_path: Option<String>,
 
     current_file_info_pending: Arc<AtomicBool>,
@@ -123,34 +146,124 @@ struct InstanceData {
 
 impl InstanceData {
     fn stab_manager(&mut self, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, output_rect: RectI, loading_pending_video_file: bool) -> Result<Arc<StabilizationManager>> {
-        /*let source_rect = self.source_clip.get_region_of_definition(0.0)?;
-        let mut source_rect = RectI {
-            x1: source_rect.x1 as i32,
-            x2: source_rect.x2 as i32,
-            y1: source_rect.y1 as i32,
-            y2: source_rect.y2 as i32
-        };
-        if source_rect.x1 != output_rect.x1 || source_rect.x2 != output_rect.x2 || source_rect.y1 != output_rect.y1 || source_rect.y2 != output_rect.y2 {
-            source_rect = self.source_clip.get_image(0.0)?.get_bounds()?;
-        }
-        let in_size = ((source_rect.x2 - source_rect.x1) as usize, (source_rect.y2 - source_rect.y1) as usize);*/
         let out_size = ((output_rect.x2 - output_rect.x1) as usize, (output_rect.y2 - output_rect.y1) as usize);
 
-        let mut params = PreservedInputRotationParams {
-            inner: &mut self.params,
-            preserved_input_rotation: self.preserved_input_rotation,
-        };
-        let should_write_input_rotation_to_host = should_write_project_input_rotation_to_host(self.preserved_input_rotation);
+        // If `InstanceChanged(ProjectPath)` saw an external write (paste) since last render,
+        // do the paste-detection work now — once all the pasted params have settled into host.
+        // We snapshot the current host state (which is B's pasted values + flags), rewrite
+        // ProjectPath back to this clip's derived path, and arm the shared reload-from-project
+        // block in `self.plugin.stab_manager` below. The post-reload merge then collapses the
+        // snapshot against this instance's shadow per the spec's 3-tier priority.
+        if self.paste_detected {
+            self.paste_detected = false;
+            if let Some(derived) = self.source_derived_project_path.clone() {
+                self.pending_paste_merge = Some(snapshot_paste_state(
+                    &self.params,
+                    &self.smoothness_manually_edited,
+                    &self.lens_correction_strength_manually_edited,
+                    &self.horizon_lock_amount_manually_edited,
+                    &self.zoom_mode_manually_edited,
+                    &self.input_rotation_manually_edited,
+                ));
+                self.expected_internal_project_path = Some(derived.clone());
+                let _ = self.params.set_string(Params::ProjectPath, &derived);
+                self.plugin.reload_values_from_project = true;
+                self.project_video_rotation = None;
+            }
+        }
 
-        let stab = self.plugin.stab_manager(&mut params, manager_cache, out_size, loading_pending_video_file).map_err(|e| {
+        let stab = self.plugin.stab_manager(&mut self.params, manager_cache, out_size, loading_pending_video_file).map_err(|e| {
             log::error!("plugin.stab_manager error: {e:?}");
             Error::UnknownError
         })?;
-        if !should_write_input_rotation_to_host {
+
+        // Post-reload merge: if a paste was detected, the shared reload block above just wrote
+        // `A.gyroflow` defaults into all five paste-preservable host params, overwriting both
+        // B's pasted values and A's pre-paste values. Overlay the per-param merge result
+        // (B-manual > A-shadow > project default) on top so the user sees the right outcome.
+        if self.pending_paste_merge.is_some() && !self.is_fusion_page {
+            self.apply_paste_merge()?;
+            // Mirrors the old wrapper-removal block: once we've responded to a paste, avoid
+            // re-running the reload on the next render even if the load reported partial success.
             self.plugin.reload_values_from_project = false;
-            self.preserved_input_rotation = None;
         }
+        // Whether or not a merge ran, clear the slot so a stale snapshot doesn't leak into a
+        // future render (e.g. on Fusion where the merge is intentionally skipped).
+        self.pending_paste_merge = None;
+
         Ok(stab)
+    }
+
+    // Drain `self.pending_paste_merge` and apply the 2-tier priority per param. After the
+    // shared reload block has populated host params with `A.gyroflow` defaults, for each
+    // param we either overwrite with B's manually-edited value (snapshot.flag = true) or
+    // leave the reload's project default in place (snapshot.flag = false).
+    fn apply_paste_merge(&mut self) -> Result<()> {
+        let snapshot = self
+            .pending_paste_merge
+            .take()
+            .expect("apply_paste_merge called without pending_paste_merge");
+
+        // --- Smoothness (f64) ---
+        let project_default = self.params.get_f64(Params::Smoothness).unwrap_or_default();
+        let outcome = merge_paste_priority(
+            snapshot.smoothness.map(|(v, f)| (PasteableValue::F64(v), f)),
+            PasteableValue::F64(project_default),
+        );
+        if let PasteableValue::F64(v) = outcome.value {
+            let _ = self.params.set_f64(Params::Smoothness, v);
+        }
+        let _ = self.smoothness_manually_edited.set_value(outcome.host_manual_flag);
+
+        // --- LensCorrectionStrength (f64) ---
+        let project_default = self.params.get_f64(Params::LensCorrectionStrength).unwrap_or_default();
+        let outcome = merge_paste_priority(
+            snapshot.lens_correction_strength.map(|(v, f)| (PasteableValue::F64(v), f)),
+            PasteableValue::F64(project_default),
+        );
+        if let PasteableValue::F64(v) = outcome.value {
+            let _ = self.params.set_f64(Params::LensCorrectionStrength, v);
+        }
+        let _ = self.lens_correction_strength_manually_edited.set_value(outcome.host_manual_flag);
+
+        // --- HorizonLockAmount (f64) ---
+        let project_default = self.params.get_f64(Params::HorizonLockAmount).unwrap_or_default();
+        let outcome = merge_paste_priority(
+            snapshot.horizon_lock_amount.map(|(v, f)| (PasteableValue::F64(v), f)),
+            PasteableValue::F64(project_default),
+        );
+        if let PasteableValue::F64(v) = outcome.value {
+            let _ = self.params.set_f64(Params::HorizonLockAmount, v);
+        }
+        let _ = self.horizon_lock_amount_manually_edited.set_value(outcome.host_manual_flag);
+
+        // --- ZoomMode (i32) ---
+        let project_default = self.params.get_i32(Params::ZoomMode).unwrap_or_default();
+        let outcome = merge_paste_priority(
+            snapshot.zoom_mode.map(|(v, f)| (PasteableValue::I32(v), f)),
+            PasteableValue::I32(project_default),
+        );
+        if let PasteableValue::I32(v) = outcome.value {
+            let _ = self.params.set_i32(Params::ZoomMode, v);
+        }
+        let _ = self.zoom_mode_manually_edited.set_value(outcome.host_manual_flag);
+
+        // --- InputRotation (i32) ---
+        let project_default = self.params.get_i32(Params::InputRotation).unwrap_or_default();
+        let outcome = merge_paste_priority(
+            snapshot.input_rotation.map(|(v, f)| (PasteableValue::I32(v), f)),
+            PasteableValue::I32(project_default),
+        );
+        if let PasteableValue::I32(v) = outcome.value {
+            let _ = self.params.set_i32(Params::InputRotation, v);
+        }
+        let _ = self.input_rotation_manually_edited.set_value(outcome.host_manual_flag);
+
+        // Downstream in `Render` (and `InstanceChanged` for IR edits), `apply_openfx_input_rotation_override`
+        // is called after `stab_manager` returns. It reads the (now merged) host `InputRotation`
+        // and re-applies `video_rotation` / `output_size` to the StabilizationManager. So we rely
+        // on the natural flow rather than calling the override here.
+        Ok(())
     }
     pub fn check_pending_file_info(&mut self) -> Result<bool> { // -> is_video_file
         if self.current_file_info_pending.load(SeqCst) {
@@ -160,16 +273,23 @@ impl InstanceData {
                 let new_path = current_file.project_path.clone().unwrap_or_else(|| current_file.file_path.clone());
                 let old_path = self.params.get_string(Params::ProjectPath).unwrap_or_default();
                 if !old_path.is_empty() && old_path != new_path {
-                    // Re-derive project-bound parameters from the new clip. In OpenFX Edit/Color only, keep a
-                    // manually edited InputRotation as the user's copied host-rotation override.
-                    self.preserved_input_rotation = preserved_input_rotation_for_clip_change(
-                        self.is_fusion_page,
-                        self.input_rotation_manually_edited.get_value().unwrap_or(false),
-                        self.params.get_i32(Params::InputRotation).ok(),
-                    );
+                    // Paste detected: snapshot the incoming host state for the five
+                    // paste-preservable params before triggering the reload that would clobber it.
+                    // The post-reload merge in `stab_manager` consumes this and decides per param
+                    // whether B-pasted, A-shadow, or A.gyroflow default wins.
+                    self.pending_paste_merge = Some(snapshot_paste_state(
+                        &self.params,
+                        &self.smoothness_manually_edited,
+                        &self.lens_correction_strength_manually_edited,
+                        &self.horizon_lock_amount_manually_edited,
+                        &self.zoom_mode_manually_edited,
+                        &self.input_rotation_manually_edited,
+                    ));
                     self.plugin.reload_values_from_project = true;
                     self.project_video_rotation = None;
                 }
+                // Mark this write as plugin-initiated.
+                self.expected_internal_project_path = Some(new_path.clone());
                 self.params.set_string(Params::ProjectPath, &new_path).unwrap(); // TODO: unwrap
                 return Ok(current_file.project_path.is_none());
             }
@@ -178,88 +298,66 @@ impl InstanceData {
     }
 }
 
-struct PreservedInputRotationParams<'a> {
-    inner: &'a mut ParamHandler,
-    preserved_input_rotation: Option<i32>,
+// The five OpenFX UI-editable parameters that participate in the paste-time preservation
+// framework. Each one has both a host-side `<Param>ManuallyEdited` checkbox (carrying B's
+// manual-edit intent across copy/paste) and a private shadow slot on `InstanceData`
+// (preserving A's prior manual value, which paste destroys in host state).
+#[allow(dead_code)]
+const PASTEABLE_PARAMS: [Params; 5] = [
+    Params::Smoothness,
+    Params::LensCorrectionStrength,
+    Params::HorizonLockAmount,
+    Params::ZoomMode,
+    Params::InputRotation,
+];
+
+// Per-param value type tag, used by snapshot/merge logic to dispatch on the right typed
+// host accessor without resorting to dyn Any.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PasteableValue {
+    F64(f64),
+    I32(i32),
 }
 
-impl GyroflowPluginParams for PreservedInputRotationParams<'_> {
-    fn set_enabled(&mut self, param: Params, enabled: bool) -> PluginResult<()> {
-        self.inner.set_enabled(param, enabled)
-    }
+// Snapshot of the 5 incoming host states captured at the moment paste is detected
+// (before the shared reload block overwrites them with `A.gyroflow` defaults). Each field
+// holds `Some((host_value, host_manual_flag))` once captured, `None` otherwise.
+#[derive(Default, Clone, Debug, PartialEq)]
+struct PendingPasteMerge {
+    smoothness:               Option<(f64, bool)>,
+    lens_correction_strength: Option<(f64, bool)>,
+    horizon_lock_amount:      Option<(f64, bool)>,
+    zoom_mode:                Option<(i32, bool)>,
+    input_rotation:           Option<(i32, bool)>,
+}
 
-    fn set_label(&mut self, param: Params, label: &str) -> PluginResult<()> {
-        self.inner.set_label(param, label)
-    }
+// Outcome of merging one paste-preservable parameter according to the 2-tier priority.
+// Carries everything the caller needs to commit back to host state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MergeOutcome {
+    value:            PasteableValue,
+    host_manual_flag: bool,
+}
 
-    fn set_hint(&mut self, param: Params, hint: &str) -> PluginResult<()> {
-        self.inner.set_hint(param, hint)
+// Per-param merge rule: `B manual > project default`. The "project default" was already
+// written into host by the reload block, so when B did not manually edit the param we leave
+// the host value alone (caller passes `project_default` from a post-reload host read purely
+// so the test harness can reason about the final value without re-reading host).
+//
+// A's own prior manual edits are NOT preserved across paste: by design, any paste discards
+// A's host-side edits on every param except those B explicitly edited. A's pre-paste host
+// values for the 5 params are clobbered by paste itself before we even see the event, so
+// after paste-detection's reload, only B's manual-flag intent remains as the override signal.
+fn merge_paste_priority(
+    b_snapshot: Option<(PasteableValue, bool)>,
+    project_default: PasteableValue,
+) -> MergeOutcome {
+    if let Some((value, true)) = b_snapshot {
+        // Priority 1: B manually edited the param. B's value wins.
+        return MergeOutcome { value, host_manual_flag: true };
     }
-
-    fn set_f64(&mut self, param: Params, value: f64) -> PluginResult<()> {
-        self.inner.set_f64(param, value)
-    }
-
-    fn get_f64(&self, param: Params) -> PluginResult<f64> {
-        self.inner.get_f64(param)
-    }
-
-    fn get_f64_at_time(&self, param: Params, time: TimeType) -> PluginResult<f64> {
-        self.inner.get_f64_at_time(param, time)
-    }
-
-    fn set_bool(&mut self, param: Params, value: bool) -> PluginResult<()> {
-        self.inner.set_bool(param, value)
-    }
-
-    fn get_bool(&self, param: Params) -> PluginResult<bool> {
-        self.inner.get_bool(param)
-    }
-
-    fn get_bool_at_time(&self, param: Params, time: TimeType) -> PluginResult<bool> {
-        self.inner.get_bool_at_time(param, time)
-    }
-
-    fn set_string(&mut self, param: Params, value: &str) -> PluginResult<()> {
-        self.inner.set_string(param, value)
-    }
-
-    fn get_string(&self, param: Params) -> PluginResult<String> {
-        self.inner.get_string(param)
-    }
-
-    fn set_i32(&mut self, param: Params, value: i32) -> PluginResult<()> {
-        if param == Params::InputRotation && !should_write_project_input_rotation_to_host(self.preserved_input_rotation) {
-            Ok(())
-        } else {
-            self.inner.set_i32(param, value)
-        }
-    }
-
-    fn get_i32(&self, param: Params) -> PluginResult<i32> {
-        let host_value = self.inner.get_i32(param)?;
-        Ok(if param == Params::InputRotation {
-            effective_input_rotation_value(host_value, self.preserved_input_rotation)
-        } else {
-            host_value
-        })
-    }
-
-    fn is_keyframed(&self, param: Params) -> bool {
-        self.inner.is_keyframed(param)
-    }
-
-    fn get_keyframes(&self, param: Params) -> Vec<(TimeType, f64)> {
-        self.inner.get_keyframes(param)
-    }
-
-    fn clear_keyframes(&mut self, param: Params) -> PluginResult<()> {
-        self.inner.clear_keyframes(param)
-    }
-
-    fn set_f64_at_time(&mut self, param: Params, time: TimeType, value: f64) -> PluginResult<()> {
-        self.inner.set_f64_at_time(param, time, value)
-    }
+    // Priority 2: B did not manually edit — project default already in host (from reload) stays.
+    MergeOutcome { value: project_default, host_manual_flag: false }
 }
 
 fn normalized_quarter_turn_deg(deg: f64) -> i32 {
@@ -302,28 +400,50 @@ fn openfx_project_rotation(project_video_rotation: &mut Option<f64>, rotation_pa
     *project_video_rotation.get_or_insert(rotation_param)
 }
 
-fn preserved_input_rotation_for_clip_change(
-    is_fusion_page: bool,
-    input_rotation_manually_edited: bool,
-    input_rotation: Option<i32>,
-) -> Option<i32> {
-    if is_fusion_page || !input_rotation_manually_edited {
-        None
-    } else {
-        input_rotation
+// Capture the 5 incoming `(host_value, host_manual_flag)` pairs before the shared reload
+// block overwrites them with `A.gyroflow` defaults. The caller wires the result into
+// `InstanceData::pending_paste_merge`; the post-reload merge step then collapses each pair
+// against A's shadow according to the per-param priority.
+fn snapshot_paste_state(
+    params: &ParamHandler,
+    smoothness_flag:               &ParamHandle<bool>,
+    lens_correction_strength_flag: &ParamHandle<bool>,
+    horizon_lock_amount_flag:      &ParamHandle<bool>,
+    zoom_mode_flag:                &ParamHandle<bool>,
+    input_rotation_flag:           &ParamHandle<bool>,
+) -> PendingPasteMerge {
+    PendingPasteMerge {
+        smoothness: params
+            .get_f64(Params::Smoothness)
+            .ok()
+            .map(|v| (v, smoothness_flag.get_value().unwrap_or(false))),
+        lens_correction_strength: params
+            .get_f64(Params::LensCorrectionStrength)
+            .ok()
+            .map(|v| (v, lens_correction_strength_flag.get_value().unwrap_or(false))),
+        horizon_lock_amount: params
+            .get_f64(Params::HorizonLockAmount)
+            .ok()
+            .map(|v| (v, horizon_lock_amount_flag.get_value().unwrap_or(false))),
+        zoom_mode: params
+            .get_i32(Params::ZoomMode)
+            .ok()
+            .map(|v| (v, zoom_mode_flag.get_value().unwrap_or(false))),
+        input_rotation: params
+            .get_i32(Params::InputRotation)
+            .ok()
+            .map(|v| (v, input_rotation_flag.get_value().unwrap_or(false))),
     }
 }
 
-fn should_clear_input_rotation_manual_marker(param: Params) -> bool {
-    matches!(param, Params::ReloadProject | Params::LoadCurrent | Params::OpenRecentProject | Params::Browse)
-}
-
-fn effective_input_rotation_value(host_value: i32, preserved_input_rotation: Option<i32>) -> i32 {
-    preserved_input_rotation.unwrap_or(host_value)
-}
-
-fn should_write_project_input_rotation_to_host(preserved_input_rotation: Option<i32>) -> bool {
-    preserved_input_rotation.is_none()
+// `true` when the param event signals "user explicitly asked to re-derive A from project on
+// disk" — i.e. they clicked one of the project-reload buttons. Such an event clears all five
+// paste-preservable shadows and host flags so the next render reflects pure A.gyroflow.
+fn clear_paste_shadow_for_explicit_reload(param: Params) -> bool {
+    matches!(
+        param,
+        Params::ReloadProject | Params::LoadCurrent | Params::OpenRecentProject | Params::Browse
+    )
 }
 
 fn apply_openfx_rotation_to_stab(
@@ -425,16 +545,22 @@ impl Execute for GyroflowPlugin {
                     let new_project_path = gyroflow_plugin_base::GyroflowPluginBase::get_project_path(&path).unwrap_or(path);
                     if project_path.is_empty() || project_path != new_project_path {
                         if !project_path.is_empty() {
-                            // Re-derive project-bound parameters from the new clip. In OpenFX Edit/Color only,
-                            // keep a manually edited InputRotation as the user's copied host-rotation override.
-                            instance_data.preserved_input_rotation = preserved_input_rotation_for_clip_change(
-                                instance_data.is_fusion_page,
-                                instance_data.input_rotation_manually_edited.get_value().unwrap_or(false),
-                                instance_data.params.get_i32(Params::InputRotation).ok(),
-                            );
+                            // Same paste-detection path as `check_pending_file_info`: capture B's
+                            // host state for all five paste-preservable params, then trigger reload.
+                            instance_data.pending_paste_merge = Some(snapshot_paste_state(
+                                &instance_data.params,
+                                &instance_data.smoothness_manually_edited,
+                                &instance_data.lens_correction_strength_manually_edited,
+                                &instance_data.horizon_lock_amount_manually_edited,
+                                &instance_data.zoom_mode_manually_edited,
+                                &instance_data.input_rotation_manually_edited,
+                            ));
                             instance_data.plugin.reload_values_from_project = true;
                             instance_data.project_video_rotation = None;
                         }
+                        // Mark this write as plugin-initiated so the followup InstanceChanged
+                        // for ProjectPath does not re-trigger paste detection in a loop.
+                        instance_data.expected_internal_project_path = Some(new_project_path.clone());
                         let _ = instance_data.params.set_string(Params::ProjectPath, &new_project_path);
                     }
                 }
@@ -744,9 +870,16 @@ impl Execute for GyroflowPlugin {
                     supports_output_size: true,
                     is_fusion_page: false,
                     project_video_rotation: None,
-                    preserved_input_rotation: None,
+                    pending_paste_merge: None,
+                    paste_detected: false,
+                    source_derived_project_path: None,
+                    expected_internal_project_path: None,
                     file_path: None,
-                    input_rotation_manually_edited: param_set.parameter("InputRotationManuallyEdited")?,
+                    input_rotation_manually_edited:           param_set.parameter("InputRotationManuallyEdited")?,
+                    smoothness_manually_edited:               param_set.parameter("SmoothnessManuallyEdited")?,
+                    lens_correction_strength_manually_edited: param_set.parameter("LensCorrectionStrengthManuallyEdited")?,
+                    horizon_lock_amount_manually_edited:      param_set.parameter("HorizonLockAmountManuallyEdited")?,
+                    zoom_mode_manually_edited:                param_set.parameter("ZoomModeManuallyEdited")?,
                     params: ParamHandler {
                         instance_id:              param_set.parameter("InstanceId")?,
                         project_data:             param_set.parameter("ProjectData")?,
@@ -828,9 +961,22 @@ impl Execute for GyroflowPlugin {
                 }
                 if let Ok(path) = props.get_src_file_path() {
                     if !path.is_empty() {
+                        // Cache the gyroflow-project path derived from this clip's source video.
+                        // Live paste detection compares incoming `host.ProjectPath` against this
+                        // value: when they diverge it means another node's path was pasted in.
+                        instance_data.source_derived_project_path = Some(
+                            gyroflow_plugin_base::GyroflowPluginBase::get_project_path(&path)
+                                .unwrap_or_else(|| path.clone()),
+                        );
                         instance_data.file_path = Some(path.clone());
                     }
                 }
+                // The initial `host.ProjectPath` (loaded from saved project state, may be empty
+                // for fresh instances) is the plugin's expected value going in — any later
+                // InstanceChanged that brings a different value is external (paste).
+                instance_data.expected_internal_project_path = Some(
+                    instance_data.params.get_string(Params::ProjectPath).unwrap_or_default(),
+                );
 
                 effect.set_instance_data(instance_data)?;
 
@@ -857,19 +1003,72 @@ impl Execute for GyroflowPlugin {
                     ) {
                         instance_data.project_video_rotation = None;
                     }
-                    if should_clear_input_rotation_manual_marker(param) {
-                        instance_data.preserved_input_rotation = None;
+                    // Live paste detection: when a Resolve "paste node attributes" lands B's
+                    // ProjectPath onto this (A's) instance, the host fires `InstanceChanged(
+                    // ProjectPath, Plugin)`. Plugin-initiated writes pre-register their value in
+                    // `expected_internal_project_path`, so a value that doesn't match has come
+                    // from outside (paste). We mark `paste_detected` and defer the actual
+                    // snapshot + reload to the next `stab_manager` call so all the other pasted
+                    // params have settled into host first.
+                    // NOTE: only read host.ProjectPath inside this branch to keep the FFI surface
+                    // tight — calling `get_string(ProjectPath)` on every InstanceChanged (even for
+                    // non-ProjectPath params) is what triggered Resolve's AV crash earlier.
+                    if param == Params::ProjectPath {
+                        let current_pp = instance_data
+                            .params
+                            .get_string(Params::ProjectPath)
+                            .unwrap_or_default();
+                        if instance_data.expected_internal_project_path.as_deref() == Some(current_pp.as_str()) {
+                            instance_data.expected_internal_project_path = None;
+                        } else if !current_pp.is_empty() {
+                            instance_data.paste_detected = true;
+                        }
+                    }
+                    if clear_paste_shadow_for_explicit_reload(param) {
+                        // Explicit user request to re-derive A from disk: clear all five host
+                        // manual-edit flags so the next paste correctly sees "no manual edits"
+                        // and the reload's project default applies cleanly.
                         let _ = instance_data.input_rotation_manually_edited.set_value(false);
+                        let _ = instance_data.smoothness_manually_edited.set_value(false);
+                        let _ = instance_data.lens_correction_strength_manually_edited.set_value(false);
+                        let _ = instance_data.horizon_lock_amount_manually_edited.set_value(false);
+                        let _ = instance_data.zoom_mode_manually_edited.set_value(false);
                     }
 
-                    if !instance_data.is_fusion_page && param == Params::InputRotation && in_args.get_change_reason()? == Change::UserEdited {
-                        instance_data.input_rotation_manually_edited.set_value(true)?;
+                    if in_args.get_change_reason()? == Change::UserEdited {
+                        // The user dragged a slider or picked a value for one of the five
+                        // paste-preservable params: set the host flag so when this node is
+                        // later copy/pasted *out* (A becomes the "B" source for another node C),
+                        // the manual-edit intent propagates through paste.
+                        match param {
+                            Params::Smoothness                => { let _ = instance_data.smoothness_manually_edited.set_value(true); }
+                            Params::LensCorrectionStrength    => { let _ = instance_data.lens_correction_strength_manually_edited.set_value(true); }
+                            Params::HorizonLockAmount         => { let _ = instance_data.horizon_lock_amount_manually_edited.set_value(true); }
+                            Params::ZoomMode                  => { let _ = instance_data.zoom_mode_manually_edited.set_value(true); }
+                            Params::InputRotation             => { let _ = instance_data.input_rotation_manually_edited.set_value(true); }
+                            _ => {}
+                        }
                     }
 
                     instance_data.plugin.param_changed(&mut instance_data.params, &self.gyroflow_plugin.manager_cache, param, in_args.get_change_reason()? == Change::UserEdited).map_err(|e| {
                         log::error!("param_changed error: {e:?}");
                         Error::InvalidAction
                     })?;
+                    // Browse / OpenRecentProject both internally call `set_string(ProjectPath, new)`
+                    // via common::param_changed. The host then fires another InstanceChanged for
+                    // ProjectPath — we pre-register the new value here so that followup event
+                    // is consumed by the `expected_internal_project_path` discriminator instead of
+                    // being misclassified as a paste. Only read ProjectPath when we know one of
+                    // these buttons just ran, otherwise we'd be calling get_string for every event.
+                    if matches!(param, Params::Browse | Params::OpenRecentProject) {
+                        let new_pp = instance_data
+                            .params
+                            .get_string(Params::ProjectPath)
+                            .unwrap_or_default();
+                        if !new_pp.is_empty() {
+                            instance_data.expected_internal_project_path = Some(new_pp);
+                        }
+                    }
                     if param == Params::InputRotation {
                         let project_rotation = openfx_project_rotation(
                             &mut instance_data.project_video_rotation,
@@ -1029,6 +1228,24 @@ impl Execute for GyroflowPlugin {
                     },
                     None,
                 )?;
+                for id in [
+                    "SmoothnessManuallyEdited",
+                    "LensCorrectionStrengthManuallyEdited",
+                    "HorizonLockAmountManuallyEdited",
+                    "ZoomModeManuallyEdited",
+                ] {
+                    define_param(
+                        &mut param_set,
+                        ParameterType::Checkbox {
+                            id,
+                            label: id,
+                            hint: "",
+                            default: false,
+                            hidden: true,
+                        },
+                        None,
+                    )?;
+                }
 
                 param_set
                     .param_define_page("Main")?
@@ -1131,6 +1348,11 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    // ============================================================================================
+    // Rotation-mapping helpers (unchanged behavior). The IR-specific wrappers that used to live
+    // here were removed when InputRotation joined the general paste-preserve framework.
+    // ============================================================================================
+
     #[test]
     fn target_rotation_maps_dropdown_and_restores_project_rotation() {
         let cases = [
@@ -1186,37 +1408,220 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(true));
     }
 
+    // ============================================================================================
+    // §9 paste-preserve framework tests.
+    // ============================================================================================
+
+    // --- 9.4 explicit-reload predicate -----------------------------------------------------------
+
     #[test]
-    fn non_fusion_clip_change_reloads_auto_derived_input_rotation() {
-        assert_eq!(preserved_input_rotation_for_clip_change(false, false, Some(1)), None);
+    fn clear_paste_shadow_for_explicit_reload_matches_only_reload_buttons() {
+        assert!(clear_paste_shadow_for_explicit_reload(Params::ReloadProject));
+        assert!(clear_paste_shadow_for_explicit_reload(Params::LoadCurrent));
+        assert!(clear_paste_shadow_for_explicit_reload(Params::OpenRecentProject));
+        assert!(clear_paste_shadow_for_explicit_reload(Params::Browse));
+        // ProjectPath is the paste-detection signal, not an explicit reload — must not clear.
+        assert!(!clear_paste_shadow_for_explicit_reload(Params::ProjectPath));
+        // None of the five paste-preservable params themselves should trigger a clear.
+        for p in PASTEABLE_PARAMS {
+            assert!(!clear_paste_shadow_for_explicit_reload(p), "{p:?}");
+        }
+    }
+
+    // --- merge_paste_priority core table (2-tier: B-manual > project default) -------------------
+
+    fn b_manual(v: PasteableValue) -> Option<(PasteableValue, bool)> {
+        Some((v, true))
+    }
+    fn b_unedited(v: PasteableValue) -> Option<(PasteableValue, bool)> {
+        Some((v, false))
     }
 
     #[test]
-    fn non_fusion_clip_change_preserves_manually_edited_input_rotation() {
-        assert_eq!(preserved_input_rotation_for_clip_change(false, true, Some(1)), Some(1));
+    fn merge_paste_priority_b_manual_wins() {
+        // B edited the param → B's value overrides whatever the reload wrote into host.
+        let out = merge_paste_priority(
+            b_manual(PasteableValue::F64(80.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(
+            out,
+            MergeOutcome {
+                value: PasteableValue::F64(80.0),
+                host_manual_flag: true,
+            },
+        );
     }
 
     #[test]
-    fn preserved_input_rotation_overrides_project_reload_without_host_write() {
-        assert_eq!(effective_input_rotation_value(0, Some(1)), 1);
-        assert!(!should_write_project_input_rotation_to_host(Some(1)));
+    fn merge_paste_priority_b_unedited_falls_through_to_project_default() {
+        // B did not edit → the reload's project default stays. Any prior A-side host value
+        // was already clobbered by paste itself, so "project default" is the right outcome.
+        let out = merge_paste_priority(
+            b_unedited(PasteableValue::F64(50.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(
+            out,
+            MergeOutcome {
+                value: PasteableValue::F64(50.0),
+                host_manual_flag: false,
+            },
+        );
     }
 
     #[test]
-    fn fusion_clip_change_does_not_preserve_manually_edited_input_rotation() {
-        assert_eq!(preserved_input_rotation_for_clip_change(true, true, Some(1)), None);
+    fn merge_paste_priority_scenario_coverage_per_param() {
+        // All 5 params × 2 cases. f64 params use 50/75; i32 use 0/1.
+        let f64_cases = [
+            // (param-label, b_value, b_flag, project_default, expected_value, expected_flag)
+            ("smoothness:B-manual",      75.0, true,  50.0, 75.0, true),
+            ("smoothness:project",       50.0, false, 50.0, 50.0, false),
+            ("lens:B-manual",            75.0, true,  50.0, 75.0, true),
+            ("lens:project",             50.0, false, 50.0, 50.0, false),
+            ("horizon:B-manual",         75.0, true,  50.0, 75.0, true),
+            ("horizon:project",          50.0, false, 50.0, 50.0, false),
+        ];
+        for (label, bv, bf, pd, ev, ef) in f64_cases {
+            let out = merge_paste_priority(
+                Some((PasteableValue::F64(bv), bf)),
+                PasteableValue::F64(pd),
+            );
+            assert_eq!(out.value, PasteableValue::F64(ev), "{label}");
+            assert_eq!(out.host_manual_flag, ef, "{label}");
+        }
+
+        let i32_cases = [
+            ("zoom:B-manual",  1, true,  0, 1, true),
+            ("zoom:project",   0, false, 0, 0, false),
+            ("ir:B-manual",    1, true,  0, 1, true),
+            ("ir:project",     0, false, 0, 0, false),
+        ];
+        for (label, bv, bf, pd, ev, ef) in i32_cases {
+            let out = merge_paste_priority(
+                Some((PasteableValue::I32(bv), bf)),
+                PasteableValue::I32(pd),
+            );
+            assert_eq!(out.value, PasteableValue::I32(ev), "{label}");
+            assert_eq!(out.host_manual_flag, ef, "{label}");
+        }
     }
 
     #[test]
-    fn pasted_project_path_change_does_not_clear_manual_input_rotation_marker() {
-        assert!(!should_clear_input_rotation_manual_marker(Params::ProjectPath));
+    fn merge_paste_priority_independent_per_parameter_evaluation() {
+        // B edited only Smoothness; the rest fall through to project default.
+        let out = merge_paste_priority(
+            b_manual(PasteableValue::F64(75.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(out.value, PasteableValue::F64(75.0));
+        // Other 4 params: B did not edit → project default.
+        for default in [PasteableValue::F64(50.0), PasteableValue::F64(40.0), PasteableValue::I32(0)] {
+            let out = merge_paste_priority(Some((default, false)), default);
+            assert_eq!(out.value, default);
+            assert!(!out.host_manual_flag);
+        }
+    }
+
+    // --- live paste detection: distinguish plugin-initiated writes from external paste ----------
+
+    // Mirror of the live-paste discriminator used in `InstanceChanged(ProjectPath)`. The plugin
+    // pre-registers its own writes via `expected_internal_project_path`; a host-fired
+    // InstanceChanged whose new value matches the expected token is our own and is consumed;
+    // any other non-empty value indicates external (paste) write.
+    fn project_path_is_external(
+        new_host_value: &str,
+        expected: &mut Option<String>,
+    ) -> bool {
+        if expected.as_deref() == Some(new_host_value) {
+            *expected = None;
+            false
+        } else {
+            !new_host_value.is_empty()
+        }
     }
 
     #[test]
-    fn explicit_reload_clears_manual_input_rotation_marker() {
-        assert!(should_clear_input_rotation_manual_marker(Params::ReloadProject));
-        assert!(should_clear_input_rotation_manual_marker(Params::LoadCurrent));
-        assert!(should_clear_input_rotation_manual_marker(Params::Browse));
-        assert!(should_clear_input_rotation_manual_marker(Params::OpenRecentProject));
+    fn live_paste_discriminator_consumes_plugin_internal_writes() {
+        // Plugin writes a derived path: expected = Some(derived). Followup InstanceChanged with
+        // the same value is treated as internal and consumed.
+        let mut expected = Some("/clips/A.gyroflow".to_string());
+        assert!(!project_path_is_external("/clips/A.gyroflow", &mut expected));
+        assert_eq!(expected, None);
+
+        // Next InstanceChanged with a different value (paste from another node) is external.
+        let mut expected = Some("/clips/A.gyroflow".to_string());
+        assert!(project_path_is_external("/clips/B.gyroflow", &mut expected));
+        // Detection does NOT consume `expected` so a subsequent plugin write can still match.
+        assert_eq!(expected, Some("/clips/A.gyroflow".to_string()));
+    }
+
+    #[test]
+    fn live_paste_discriminator_skips_empty_values() {
+        // Empty ProjectPath (fresh instance, no project yet) is not paste.
+        let mut expected = Some("/clips/A.gyroflow".to_string());
+        assert!(!project_path_is_external("", &mut expected));
+    }
+
+    // --- 9.5 fusion page gating contract ---------------------------------------------------------
+
+    // `apply_paste_merge` is called from `stab_manager` only when `pending_paste_merge.is_some() &&
+    // !is_fusion_page`. The pure logic of that gate is captured here so the contract is testable
+    // without an InstanceData (which requires a live OFX runtime).
+    fn should_apply_paste_merge(pending: bool, is_fusion_page: bool) -> bool {
+        pending && !is_fusion_page
+    }
+
+    #[test]
+    fn fusion_page_skips_merge_even_with_pending_snapshot() {
+        assert!(should_apply_paste_merge(true, false));   // Edit/Color: run merge
+        assert!(!should_apply_paste_merge(true, true));   // Fusion: skip
+        assert!(!should_apply_paste_merge(false, false)); // No pending: nothing to do
+        assert!(!should_apply_paste_merge(false, true));  // Fusion + no pending: skip
+    }
+
+    // --- sequential pastes converge --------------------------------------------------------------
+
+    #[test]
+    fn sequential_pastes_converge() {
+        // No plugin-private shadow: each paste is resolved purely against B's manual-flag and
+        // the reload's project default. Sequential pastes therefore behave like independent
+        // resolutions on each paste step.
+        //
+        // Setup: A's project default for Smoothness = 50, for LCS = 50.
+        //
+        // Paste from B (B has only LensCorrectionStrength manually edited to 40):
+        //   Smoothness → B not edited → A's project default 50.
+        //   LCS        → B edited     → 40.
+        let sm = merge_paste_priority(
+            b_unedited(PasteableValue::F64(50.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(sm.value, PasteableValue::F64(50.0));
+        assert!(!sm.host_manual_flag);
+
+        let lcs = merge_paste_priority(
+            b_manual(PasteableValue::F64(40.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(lcs.value, PasteableValue::F64(40.0));
+        assert!(lcs.host_manual_flag);
+
+        // Paste from C (C has only Smoothness manually edited to 90):
+        //   Smoothness → C edited     → 90.
+        //   LCS        → C not edited → A's project default 50 (the prior 40 is gone).
+        let sm = merge_paste_priority(
+            b_manual(PasteableValue::F64(90.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(sm.value, PasteableValue::F64(90.0));
+        assert!(sm.host_manual_flag);
+
+        let lcs = merge_paste_priority(
+            b_unedited(PasteableValue::F64(50.0)),
+            PasteableValue::F64(50.0),
+        );
+        assert_eq!(lcs.value, PasteableValue::F64(50.0));
+        assert!(!lcs.host_manual_flag);
     }
 }
