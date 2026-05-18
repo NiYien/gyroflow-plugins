@@ -14,9 +14,26 @@ plugin_module!(
     GyroflowPlugin::default
 );
 
+// Plugin-wide cache of the host's mismatched-resolution / timeline-dimensions fields, populated
+// by the first successful fuscript query in a Resolve session. Subsequent CreateInstance calls
+// (e.g. duplicating the OFX node onto another clip) reuse this cache to avoid the multi-second
+// fuscript cold-start latency that otherwise produces a visible "first render passthrough, then
+// FillCrop applied" two-stage UX. The cache only stores project / timeline-level fields — never
+// per-clip data like file_path or frame_count.
+#[derive(Clone, Debug)]
+struct HostInputSizingCacheEntry {
+    mismatch_mode: Option<String>,
+    timeline_w: usize,
+    timeline_h: usize,
+    use_custom_settings: bool,
+}
+
 #[derive(Default)]
 struct GyroflowPlugin {
     gyroflow_plugin: GyroflowPluginBase,
+    // Lock contention here is minimal: write-once on first fuscript completion + on every
+    // ReloadProject refresh, read-once per CreateInstance.
+    host_input_sizing_cache: parking_lot::Mutex<Option<HostInputSizingCacheEntry>>,
 }
 
 pub fn frame_from_timetype(time: TimeType) -> f64 {
@@ -24,6 +41,132 @@ pub fn frame_from_timetype(time: TimeType) -> f64 {
         TimeType::Frame(x) => x,
         TimeType::FrameOrMicrosecond((Some(x), _)) => x,
         _ => panic!("Shouldn't happen"),
+    }
+}
+
+// OpenFX-only enum describing how the host has resized the source image into the timeline
+// buffer. `Auto` means "use whatever fuscript detected from Resolve's
+// `timelineInputResMismatchBehavior` setting; fall back to `Fit` when fuscript is unavailable
+// (Resolve Free / compound clip / non-Resolve host)". The explicit variants let the user
+// override the auto detection when fuscript fails or returns the wrong value.
+//
+// This enum lives in `gyroflow.rs` (not common) because the underlying setting is unique to
+// Resolve's OFX path; Adobe / Premiere / frei0r have no fuscript equivalent. Per the OFX
+// choice-param contract, the wire format is the dropdown index (0..=4).
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum HostInputSizing {
+    #[default]
+    Auto = 0,
+    Fit = 1,
+    FillCrop = 2,
+    CenterCrop = 3,
+    Stretch = 4,
+}
+
+impl HostInputSizing {
+    pub fn from_index(idx: i32) -> Self {
+        match idx {
+            1 => Self::Fit,
+            2 => Self::FillCrop,
+            3 => Self::CenterCrop,
+            4 => Self::Stretch,
+            _ => Self::Auto,
+        }
+    }
+    #[allow(dead_code)] // Reserved for future round-trip wire serialization (OFX choice setter).
+    pub fn to_index(self) -> i32 {
+        self as i32
+    }
+}
+
+// Map Resolve's `timelineInputResMismatchBehavior` enum strings to the plugin's enum. Returns
+// `None` for unknown / empty strings so the resolver can fall back to `Fit`. The four mappings
+// match Resolve's documented values (verified via fuscript spike 2026-05-17). Defined here
+// alongside the enum so the parser unit tests live in this file.
+pub fn parse_mismatch_mode(s: &str) -> Option<HostInputSizing> {
+    match s.trim() {
+        "scaleToFit"   => Some(HostInputSizing::Fit),
+        "scaleToCrop"  => Some(HostInputSizing::FillCrop),
+        "centerCrop"   => Some(HostInputSizing::CenterCrop),
+        "stretch"      => Some(HostInputSizing::Stretch),
+        _              => None,
+    }
+}
+
+// Pure resolver implementing the override precedence from the spec:
+//   1. DontDrawOutside: returns mode unchanged; caller must skip the mode-aware lens/params
+//      transform (DontDrawOutside has its own rect logic that subsumes mode handling).
+//   2. Fusion page: forces `Fit` (Fusion receives native-resolution clips, no mismatch).
+//   3. Vegas host: forces `Fit` (the existing Vegas `out_rect = None` bypass owns this path).
+//   4. UI dropdown == `Auto`: use the fuscript-detected mode, falling back to `Fit` when
+//      fuscript is unavailable or returned an unrecognised string.
+//   5. UI dropdown == explicit: that mode wins regardless of fuscript state.
+//
+// Note on DontDrawOutside: the return value is purposely the underlying resolved mode (not
+// `Fit`), so callers can inspect what the user *would* have gotten and decide whether to
+// emit a status hint. The skip-transform decision is a separate boolean caller responsibility.
+pub fn resolve_host_input_sizing(
+    ui_value: HostInputSizing,
+    fuscript_info: Option<&CurrentFileInfo>,
+    is_fusion_page: bool,
+    host_name: Option<&str>,
+    dont_draw_outside: bool,
+) -> HostInputSizing {
+    let _ = dont_draw_outside; // documented precedence; caller flag-gates the transform itself
+    if is_fusion_page {
+        return HostInputSizing::Fit;
+    }
+    if host_name == Some("com.vegascreativesoftware.vegas") {
+        return HostInputSizing::Fit;
+    }
+    match ui_value {
+        HostInputSizing::Auto => {
+            fuscript_info
+                .and_then(|info| info.mismatch_mode.as_deref())
+                .and_then(parse_mismatch_mode)
+                .unwrap_or(HostInputSizing::Fit)
+        }
+        explicit => explicit,
+    }
+}
+
+// Compute the source-pixel crop rectangle (w, h, x, y) for FillCrop / CenterCrop, given the
+// loaded source dimensions, the target timeline aspect, and any 90°/270° rotation applied to
+// the source before it reaches the host. Quarter-turn rotations swap the source dimensions
+// before applying the crop formula so the offset is in rotated-source space (matching the
+// pipeline order Resolve / Gyroflow share: Clip Attributes rotation runs before timeline
+// transform).
+//
+// Returns `(crop_w, crop_h, crop_x, crop_y)`. If `source_size` is already at `timeline_aspect`
+// the function returns the full source unchanged (no-op).
+pub fn compute_crop_geometry(
+    source_size: (usize, usize),
+    timeline_aspect: f64,
+    video_rotation_deg: f64,
+) -> (usize, usize, usize, usize) {
+    // 90° / 270° (and their negatives) swap the apparent source dimensions before crop.
+    let rotation = (((video_rotation_deg.round() as i64) % 360) + 360) % 360;
+    let (sw, sh) = if rotation == 90 || rotation == 270 {
+        (source_size.1, source_size.0)
+    } else {
+        source_size
+    };
+    if sw == 0 || sh == 0 || !timeline_aspect.is_finite() || timeline_aspect <= 0.0 {
+        return (sw, sh, 0, 0);
+    }
+    let source_aspect = sw as f64 / sh as f64;
+    if source_aspect > timeline_aspect {
+        // Horizontal crop: clip the sides to match the timeline aspect.
+        let crop_w = (sh as f64 * timeline_aspect).round() as usize;
+        let crop_h = sh;
+        let crop_x = sw.saturating_sub(crop_w) / 2;
+        (crop_w, crop_h, crop_x, 0)
+    } else {
+        // Vertical crop (or exact-match: yields the full source with zero offsets).
+        let crop_w = sw;
+        let crop_h = (sw as f64 / timeline_aspect).round() as usize;
+        let crop_y = sh.saturating_sub(crop_h) / 2;
+        (crop_w, crop_h, 0, crop_y)
     }
 }
 
@@ -142,6 +285,36 @@ struct InstanceData {
 
     current_file_info_pending: Arc<AtomicBool>,
     current_file_info: Arc<Mutex<Option<CurrentFileInfo>>>,
+
+    // OFX choice param backing the HostInputSizing dropdown. Kept out of the common Params
+    // enum because the underlying setting (Resolve's mismatched-resolution behaviour) is
+    // unique to the Resolve OFX path. Stored as `Int` because OFX choice params are integers.
+    host_input_sizing: ParamHandle<Int>,
+
+    // Tracks the mode currently baked into the stab manager so the transform is idempotent.
+    // Without this, reapplying the transform on top of an already-transformed lens would
+    // accumulate offsets every render.
+    applied_host_input_sizing: Option<HostInputSizing>,
+
+    // Weak ref to the stab the snapshots below were captured against. When the cache rebuilds
+    // the stab (after ProjectPath change, ReloadProject, LoadLens, ever_changed trigger, ...),
+    // the new Arc's identity differs and the weak upgrade either fails or returns a different
+    // pointer. We detect that and reset the snapshots so the freshly-loaded lens becomes the
+    // new pre-mode baseline.
+    last_applied_stab: Option<std::sync::Weak<StabilizationManager>>,
+
+    // Snapshot of lens/params state captured before the first host-input-sizing transform was
+    // applied to the current stab. Used to revert to the pre-transform state when the user
+    // picks a different mode, so the new transform starts from clean source-pixel coordinates
+    // rather than already-cropped ones. Reset whenever `last_applied_stab` no longer matches.
+    pre_mode_size: Option<(usize, usize)>,
+    pre_mode_output_size: Option<(usize, usize)>,
+    pre_mode_camera_matrix: Option<Vec<[f64; 3]>>,
+    pre_mode_calib_dimension: Option<(usize, usize)>,
+
+    // Guards the Stretch-mode "switch Resolve to scaleToFit/scaleToCrop" warning to once per
+    // StabilizationManager instance, so it doesn't spam the log every render.
+    host_input_sizing_stretch_warned: bool,
 }
 
 impl InstanceData {
@@ -169,6 +342,19 @@ impl InstanceData {
                 let _ = self.params.set_string(Params::ProjectPath, &derived);
                 self.plugin.reload_values_from_project = true;
                 self.project_video_rotation = None;
+                // Paste forces a stab cache reload — the upcoming stab Arc will be different
+                // (likely fresh) and host-input-sizing snapshots / applied marker tied to the
+                // previous Arc are now stale. Clear them so apply_host_input_sizing_if_needed
+                // re-snapshots from the freshly-loaded baseline and re-applies the transform.
+                // Without this, the new InstanceData would keep its initial None state and the
+                // first render after paste might capture pre_mode against the wrong stab.
+                self.applied_host_input_sizing = None;
+                self.last_applied_stab = None;
+                self.pre_mode_size = None;
+                self.pre_mode_output_size = None;
+                self.pre_mode_camera_matrix = None;
+                self.pre_mode_calib_dimension = None;
+                self.host_input_sizing_stretch_warned = false;
             }
         }
 
@@ -265,6 +451,145 @@ impl InstanceData {
         // on the natural flow rather than calling the override here.
         Ok(())
     }
+    // Apply (or re-apply, or revert + re-apply) the host-input-sizing transform to the given
+    // stab. Called from `Render` after `stab_manager` returns. Idempotent: if the stab already
+    // carries the target mode's transform, returns without touching it. Also detects when the
+    // stab cache rebuilt the stab underneath us (different Arc identity) and rebases the
+    // pre-mode snapshot from the freshly-loaded lens.
+    //
+    // `timeline_w` / `timeline_h` are the OFX output buffer dimensions (= timeline pixel dims
+    // on Edit/Color page). `timeline_aspect` is derived from them; Stretch mode uses the raw
+    // values directly as the new `stab.params.size`.
+    fn apply_host_input_sizing_if_needed(
+        &mut self,
+        stab: &Arc<StabilizationManager>,
+        mode: HostInputSizing,
+        timeline_w: usize,
+        timeline_h: usize,
+    ) {
+        let same_stab = self
+            .last_applied_stab
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .map(|s| Arc::ptr_eq(&s, stab))
+            .unwrap_or(false);
+        if !same_stab {
+            // Fresh stab (cache rebuild) — discard stale snapshots so this stab becomes the new
+            // pre-mode baseline. Also clears the once-per-stab Stretch warning gate.
+            self.applied_host_input_sizing = None;
+            self.pre_mode_size = None;
+            self.pre_mode_output_size = None;
+            self.pre_mode_camera_matrix = None;
+            self.pre_mode_calib_dimension = None;
+            self.host_input_sizing_stretch_warned = false;
+        }
+        if self.applied_host_input_sizing == Some(mode) {
+            return;
+        }
+
+        // Snapshot the pre-mode baseline once per stab. We take it even for `Fit` so a later
+        // switch from Fit -> FillCrop has a known-clean baseline to restore against.
+        if self.pre_mode_size.is_none() {
+            let params_lk = stab.params.read();
+            self.pre_mode_size = Some(params_lk.size);
+            self.pre_mode_output_size = Some(params_lk.output_size);
+            drop(params_lk);
+            let lens_lk = stab.lens.read();
+            self.pre_mode_camera_matrix = Some(lens_lk.fisheye_params.camera_matrix.clone());
+            self.pre_mode_calib_dimension = Some((lens_lk.calib_dimension.w, lens_lk.calib_dimension.h));
+        }
+
+        // Always restore to the pre-mode baseline before applying the new mode's transform.
+        // Without this, switching FillCrop -> Stretch would Stretch an already-cropped lens.
+        if let (Some(size), Some(out_size), Some(cm), Some(cd)) = (
+            self.pre_mode_size,
+            self.pre_mode_output_size,
+            self.pre_mode_camera_matrix.as_ref().cloned(),
+            self.pre_mode_calib_dimension,
+        ) {
+            {
+                let mut params_lk = stab.params.write();
+                params_lk.size = size;
+                params_lk.output_size = out_size;
+            }
+            {
+                let mut lens_lk = stab.lens.write();
+                lens_lk.fisheye_params.camera_matrix = cm;
+                lens_lk.calib_dimension = gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: cd.0, h: cd.1 };
+            }
+        }
+
+        // Apply the new mode-specific transform.
+        let did_mutate = match mode {
+            HostInputSizing::Auto | HostInputSizing::Fit => false,
+            HostInputSizing::FillCrop | HostInputSizing::CenterCrop => {
+                if timeline_w == 0 || timeline_h == 0 {
+                    log::warn!(target: "ofx", "host_input_sizing: skipping FillCrop/CenterCrop transform — timeline dims are zero");
+                    false
+                } else {
+                    let (source_size, video_rotation) = {
+                        let p = stab.params.read();
+                        (p.size, p.video_rotation)
+                    };
+                    let timeline_aspect = timeline_w as f64 / timeline_h as f64;
+                    let (crop_w, crop_h, crop_x, crop_y) =
+                        compute_crop_geometry(source_size, timeline_aspect, video_rotation);
+                    if crop_w == 0 || crop_h == 0 {
+                        log::warn!(target: "ofx", "host_input_sizing: skipping crop — geometry resolved to zero");
+                        false
+                    } else {
+                        {
+                            let mut lens_lk = stab.lens.write();
+                            if lens_lk.fisheye_params.camera_matrix.len() >= 2 {
+                                lens_lk.fisheye_params.camera_matrix[0][2] -= crop_x as f64;
+                                lens_lk.fisheye_params.camera_matrix[1][2] -= crop_y as f64;
+                            }
+                            lens_lk.calib_dimension =
+                                gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: crop_w, h: crop_h };
+                        }
+                        {
+                            let mut params_lk = stab.params.write();
+                            params_lk.size = (crop_w, crop_h);
+                            params_lk.output_size = (crop_w, crop_h);
+                        }
+                        log::info!(target: "ofx",
+                            "host_input_sizing: mode={mode:?} crop=({crop_w}x{crop_h}) offset=({crop_x},{crop_y}) source={source_size:?} video_rotation={video_rotation}");
+                        true
+                    }
+                }
+            }
+            HostInputSizing::Stretch => {
+                if timeline_w == 0 || timeline_h == 0 {
+                    false
+                } else {
+                    {
+                        let mut params_lk = stab.params.write();
+                        params_lk.size = (timeline_w, timeline_h);
+                    }
+                    if !self.host_input_sizing_stretch_warned {
+                        self.host_input_sizing_stretch_warned = true;
+                        log::warn!(target: "ofx",
+                            "host_input_sizing: Stretch mode is best-effort — switch Resolve mismatched-resolution to scaleToFit or scaleToCrop for accurate stabilization");
+                    }
+                    true
+                }
+            }
+        };
+
+        if did_mutate {
+            stab.init_size();
+            // Mode transitions reshape the stab's effective camera and resampling targets, so
+            // invalidate smoothing/zooming caches that depend on those dimensions before the
+            // recompute. `recompute_blocking` runs the full smoothing + zoom + undistort chain
+            // synchronously so the next `process_pixels` call sees consistent state.
+            stab.invalidate_smoothing();
+            stab.recompute_blocking();
+        }
+
+        self.applied_host_input_sizing = Some(mode);
+        self.last_applied_stab = Some(Arc::downgrade(stab));
+    }
+
     pub fn check_pending_file_info(&mut self) -> Result<bool> { // -> is_video_file
         if self.current_file_info_pending.load(SeqCst) {
             self.current_file_info_pending.store(false, SeqCst);
@@ -557,6 +882,21 @@ impl Execute for GyroflowPlugin {
                             ));
                             instance_data.plugin.reload_values_from_project = true;
                             instance_data.project_video_rotation = None;
+                            // Paste from another node is rewriting our ProjectPath to point at
+                            // THIS clip's `.gyroflow` (target). The stab Arc is about to rebuild
+                            // (cache miss because key path component just changed). Drop any
+                            // host-input-sizing snapshots from before this paste — they reference
+                            // the wrong source clip's lens/sizes. Without this reset, the next
+                            // apply_host_input_sizing_if_needed would snapshot pre-mode from the
+                            // freshly-built stab but reuse the stale `applied_host_input_sizing`
+                            // marker, skipping the transform that the target clip actually needs.
+                            instance_data.applied_host_input_sizing = None;
+                            instance_data.last_applied_stab = None;
+                            instance_data.pre_mode_size = None;
+                            instance_data.pre_mode_output_size = None;
+                            instance_data.pre_mode_camera_matrix = None;
+                            instance_data.pre_mode_calib_dimension = None;
+                            instance_data.host_input_sizing_stretch_warned = false;
                         }
                         // Mark this write as plugin-initiated so the followup InstanceChanged
                         // for ProjectPath does not re-trigger paste detection in a loop.
@@ -566,6 +906,42 @@ impl Execute for GyroflowPlugin {
                 }
 
                 let loading_pending_video_file = instance_data.check_pending_file_info()?;
+
+                // Mirror the freshly-populated CurrentFileInfo into the plugin-global
+                // host-input-sizing cache. `check_pending_file_info` is idempotent and only
+                // does real work when the pending flag flips, so this Render-path mirror only
+                // overwrites the cache when a new fuscript result came in.
+                {
+                    let info_lock = instance_data.current_file_info.lock();
+                    if let Some(ref info) = *info_lock {
+                        let entry = HostInputSizingCacheEntry {
+                            mismatch_mode: info.mismatch_mode.clone(),
+                            timeline_w: info.timeline_w,
+                            timeline_h: info.timeline_h,
+                            use_custom_settings: info.use_custom_settings,
+                        };
+                        let mut cache_lock = self.host_input_sizing_cache.lock();
+                        let needs_write = match cache_lock.as_ref() {
+                            Some(existing) => {
+                                existing.mismatch_mode != entry.mismatch_mode
+                                    || existing.timeline_w != entry.timeline_w
+                                    || existing.timeline_h != entry.timeline_h
+                                    || existing.use_custom_settings != entry.use_custom_settings
+                            }
+                            None => true,
+                        };
+                        if needs_write {
+                            *cache_lock = Some(entry);
+                        }
+                    }
+                }
+
+                // Cold-fuscript first-render: rather than `return OK` (which leaves the dst
+                // buffer uninitialised in Resolve — visible as a white flash for several frames
+                // until fuscript responds), fall through to the normal render path. The
+                // resolver falls back to `HostInputSizing::Fit` when fuscript info is missing,
+                // which renders a letterboxed/centered band — visually safe and consistent
+                // until the FlipX trigger fires another render with fuscript ready.
 
                 let output_image = if in_args.get_opengl_enabled().unwrap_or_default() {
                     instance_data.output_clip.load_texture_mut(time, None)?
@@ -591,6 +967,92 @@ impl Execute for GyroflowPlugin {
                     let num_frames = instance_data.plugin.num_frames;
                     let fps = instance_data.plugin.fps.max(1.0);
                     instance_data.plugin.cache_keyframes(&instance_data.params, use_gyroflows_keyframes, num_frames, fps);
+                    // The override mutated `stab.params.video_rotation` / `output_size` in-place.
+                    // Stale pre-mode snapshots from before the mutation would drive the apply
+                    // helper's restore branch to revert the rotation swap on the next call. Reset
+                    // them so apply re-snapshots from the post-override state and restore is a
+                    // no-op for the rotation change. This is defense-in-depth: the
+                    // InstanceChanged(InputRotation) handler already clears these synchronously,
+                    // but any future entry point that triggers the override here is covered too.
+                    instance_data.applied_host_input_sizing = None;
+                    instance_data.last_applied_stab = None;
+                    instance_data.pre_mode_size = None;
+                    instance_data.pre_mode_output_size = None;
+                    instance_data.pre_mode_camera_matrix = None;
+                    instance_data.pre_mode_calib_dimension = None;
+                }
+
+                // Resolve and apply the host-input-sizing transform after the lens is loaded and
+                // any input_rotation override has reshaped `video_rotation`/output_size. The
+                // resolver and `apply_host_input_sizing_if_needed` together implement the spec's
+                // override precedence: DontDrawOutside / Fusion / Vegas skip the transform; UI
+                // == Auto picks up the fuscript-detected Resolve mode; UI == explicit forces it.
+                //
+                // Idempotency is enforced inside the apply helper, so calling this every render
+                // is cheap when the mode hasn't changed and the stab Arc is the same.
+                let dont_draw_outside_for_mode = instance_data
+                    .params
+                    .get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time))
+                    .unwrap_or(false);
+                let host_name_str = _plugin_context.get_host().get_name().ok();
+                let host_name_ref = host_name_str.as_deref();
+                let host_input_sizing_ui = HostInputSizing::from_index(
+                    instance_data.host_input_sizing.get_value().unwrap_or(0),
+                );
+                let effective_host_input_sizing = {
+                    let fuscript_lock = instance_data.current_file_info.lock();
+                    resolve_host_input_sizing(
+                        host_input_sizing_ui,
+                        fuscript_lock.as_ref(),
+                        instance_data.is_fusion_page,
+                        host_name_ref,
+                        dont_draw_outside_for_mode,
+                    )
+                };
+                // Vegas + DontDrawOutside both subsume host-input-sizing on the output side; the
+                // resolver already coerces Fusion to Fit, so the apply call is a cheap no-op there.
+                let skip_host_input_sizing_transform = dont_draw_outside_for_mode
+                    || host_name_ref == Some("com.vegascreativesoftware.vegas");
+                // Thumbnail / proxy renders carry a non-1.0 render scale and arrive on a small
+                // off-aspect buffer (e.g. 288×162). If they hit `apply_host_input_sizing_if_needed`
+                // first (typical on a freshly-pasted instance), they bake a landscape crop into
+                // `stab.params.size` and the idempotency guard then prevents the subsequent
+                // full-res main render from recomputing — visible as vertical stretch on every
+                // pasted clip. Defer the transform to the next full-res render where buffer
+                // aspect matches the timeline's. Thumbnails will process the un-transformed stab,
+                // which is acceptable for the small preview pane.
+                // Thumbnail / inspector-preview renders arrive on a small buffer (typically
+                // ~288x162 in DaVinci Resolve) whose aspect matches the timeline aspect, but
+                // whose extent is much smaller than the timeline. When such a render hits
+                // `apply_host_input_sizing_if_needed` BEFORE the corresponding full-res main
+                // render, it bakes a crop computed for the wrong aspect — the main buffer's
+                // aspect differs when the plugin's RoD override forces Resolve to allocate a
+                // padded square buffer for the main render. The idempotency guard then prevents
+                // the main render from re-applying with the correct buffer aspect, leaving
+                // `stab.params.size` mismatched with the actual main buffer → visible stretch
+                // on every pasted clip. Two complementary skip conditions:
+                //   1. Sub-scale render (proxy / quality < 100%): host reports `render_scale<1`.
+                //   2. Inspector thumbnail: buffer is < 50% of fuscript-reported timeline in
+                //      either dimension. Thumbnails never exceed ~half-timeline.
+                let render_scale_for_apply = output_image.get_render_scale().ok();
+                let is_subscale_render = render_scale_for_apply
+                    .map(|s| s.x < 0.99 || s.y < 0.99)
+                    .unwrap_or(false);
+                let buffer_w_usize = (output_rect.x2 - output_rect.x1) as usize;
+                let buffer_h_usize = (output_rect.y2 - output_rect.y1) as usize;
+                let (fuscript_tw, fuscript_th) = {
+                    let info_lock = instance_data.current_file_info.lock();
+                    info_lock.as_ref().map(|i| (i.timeline_w, i.timeline_h)).unwrap_or((0, 0))
+                };
+                let is_preview_thumbnail = fuscript_tw > 0 && fuscript_th > 0
+                    && (buffer_w_usize * 2 < fuscript_tw || buffer_h_usize * 2 < fuscript_th);
+                if !skip_host_input_sizing_transform && !is_subscale_render && !is_preview_thumbnail {
+                    instance_data.apply_host_input_sizing_if_needed(
+                        &stab,
+                        effective_host_input_sizing,
+                        buffer_w_usize,
+                        buffer_h_usize,
+                    );
                 }
 
                 if !instance_data.supports_output_size {
@@ -699,11 +1161,25 @@ impl Execute for GyroflowPlugin {
                 let src_rect = GyroflowPluginBase::get_center_rect(src_size.0, src_size.1, org_ratio);
 
                 let dont_draw_outside = instance_data.params.get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time)).unwrap(); // TODO: unwrap
+                // `Fit` and DontDrawOutside both rely on the centered-content-band assumption.
+                // FillCrop/CenterCrop/Stretch deliver a buffer whose entire extent is valid
+                // source pixels (1:1 crop or stretched fill), so the input rect collapses to
+                // None — the core's `get_rect` then treats the whole buffer as content.
+                let mode_is_fit = matches!(effective_host_input_sizing, HostInputSizing::Auto | HostInputSizing::Fit);
+                let effective_src_rect: Option<(usize, usize, usize, usize)> = if mode_is_fit || dont_draw_outside {
+                    Some(src_rect)
+                } else {
+                    None
+                };
                 // Aspect-fit (letterbox) the stabilized output only on the Edit/Color page, where the host
                 // buffers are sized to the timeline resolution and may not match the source aspect. The Fusion
                 // page processes the original video at native resolution, so there is no mismatch there, and
                 // `DontDrawOutside` has its own (narrower) output rect that must not be overridden.
-                let aspect_fit_output = !dont_draw_outside && !instance_data.is_fusion_page && output_aspect.is_finite() && output_aspect > 0.0;
+                //
+                // FillCrop/CenterCrop/Stretch already align `stab.params.output_size` to the
+                // host buffer aspect, so the aspect-fit letterbox would synthesise bars that
+                // don't exist — gate on `mode_is_fit` to keep those modes 1:1 buffer-filling.
+                let aspect_fit_output = !dont_draw_outside && !instance_data.is_fusion_page && mode_is_fit && output_aspect.is_finite() && output_aspect > 0.0;
 
                 let mut out_rect = if dont_draw_outside {
                     let output_ratio = out_size.0 as f64 / out_size.1 as f64;
@@ -831,8 +1307,8 @@ impl Execute for GyroflowPlugin {
 
                 if let Some(buffers) = buffers {
                     let mut buffers = Buffers {
-                        input:  BufferDescription { size: src_size, rect: Some(src_rect), data: buffers.0, rotation: input_rotation, texture_copy: buffers.2 },
-                        output: BufferDescription { size: out_size, rect: out_rect,       data: buffers.1, rotation: None,           texture_copy: buffers.2 }
+                        input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2 },
+                        output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2 }
                     };
 
                     let processed = match output_image.get_pixel_depth()? {
@@ -946,6 +1422,14 @@ impl Execute for GyroflowPlugin {
                     },
                     current_file_info:         Arc::new(Mutex::new(None)),
                     current_file_info_pending: Arc::new(AtomicBool::new(false)),
+                    host_input_sizing:                param_set.parameter("HostInputSizing")?,
+                    applied_host_input_sizing:        None,
+                    last_applied_stab:                None,
+                    pre_mode_size:                    None,
+                    pre_mode_output_size:             None,
+                    pre_mode_camera_matrix:           None,
+                    pre_mode_calib_dimension:         None,
+                    host_input_sizing_stretch_warned: false,
                 };
                 let mut instance_id = instance_data.params.get_string(Params::InstanceId).unwrap_or_default();
                 instance_data.plugin.initialize_instance_id(&mut instance_id);
@@ -978,6 +1462,123 @@ impl Execute for GyroflowPlugin {
                     instance_data.params.get_string(Params::ProjectPath).unwrap_or_default(),
                 );
 
+                // Host-input-sizing bootstrap: try to populate `current_file_info` from the
+                // plugin-global cache first. Hit means a prior instance in this Resolve session
+                // already paid the fuscript cold-start cost — the new instance gets the
+                // project/timeline-level fields immediately and the first render applies the
+                // correct FillCrop / Fit mode without a passthrough stage.
+                //
+                // Miss: spawn a silent query and short-block (1s) so a warm fuscript still gets
+                // synchronised. If it doesn't come back in time, CreateInstance returns and the
+                // Render path's Fit fallback keeps the first frames visually safe until the
+                // async completion writes the cache and the query thread's FlipX trigger
+                // re-renders with the correct mode.
+                //
+                // Fresh drop invalidation: when the user drops the plugin onto a clip with no
+                // ProjectPath (fresh drop, not paste/restore), discard the global cache first.
+                // The cache is otherwise sticky across the entire Resolve session — if the user
+                // changed timeline / mismatched-resolution settings between session start and
+                // this drop, every subsequent paste would keep using the stale mode. The fresh
+                // drop is the natural "user reloads plugin to pick up new settings" signal.
+                {
+                    let project_path_at_create = instance_data
+                        .params
+                        .get_string(Params::ProjectPath)
+                        .unwrap_or_default();
+                    if project_path_at_create.is_empty() {
+                        let mut cache_lock = self.host_input_sizing_cache.lock();
+                        if cache_lock.is_some() {
+                            log::info!(target: "ofx",
+                                "host_input_sizing: fresh drop invalidating stale global cache");
+                            *cache_lock = None;
+                        }
+                    }
+                }
+                let global_cache_hit: Option<HostInputSizingCacheEntry> =
+                    self.host_input_sizing_cache.lock().clone();
+                match global_cache_hit {
+                    Some(entry) => {
+                        // Synthesize a placeholder CurrentFileInfo carrying only the
+                        // host-input-sizing fields. clip-level fields (fps / frame_count / file
+                        // path) are intentionally left at placeholder defaults — `LoadCurrent`
+                        // can still refresh them later if the user clicks that button.
+                        *instance_data.current_file_info.lock() = Some(CurrentFileInfo {
+                            file_path: String::new(),
+                            project_path: None,
+                            fps: 0.0,
+                            duration_s: 0.0,
+                            frame_count: 0,
+                            width: 0,
+                            height: 0,
+                            pixel_aspect_ratio: String::new(),
+                            mismatch_mode: entry.mismatch_mode.clone(),
+                            timeline_w: entry.timeline_w,
+                            timeline_h: entry.timeline_h,
+                            use_custom_settings: entry.use_custom_settings,
+                        });
+                        log::info!(target: "ofx",
+                            "host_input_sizing: CreateInstance hit global cache (mode={:?}, timeline {}x{})",
+                            entry.mismatch_mode, entry.timeline_w, entry.timeline_h);
+                    }
+                    None => {
+                        // Cache miss. Decide whether to actually spawn a fuscript query, or
+                        // skip it entirely so this instance defers to whatever LATER becomes
+                        // the cache value (via another instance's query, or a manual
+                        // LoadCurrent / ReloadProject click on this instance).
+                        //
+                        // Heuristic: if `ProjectPath` is non-empty at CreateInstance time, the
+                        // instance is being created from saved state — either pasted from
+                        // another node (Resolve "Paste Attributes") or restored from a `.drp`
+                        // project reopen. The user explicitly asked the paste path to NOT
+                        // re-query fuscript; we extend the same treatment to .drp restore
+                        // because both share the property that "the user did not just pick a
+                        // fresh source clip", so the desired host-input-sizing data is
+                        // expected to already match an existing global-cache entry (typical
+                        // case: same session, cache already filled by an earlier instance) —
+                        // and when it isn't (Resolve restart, no priming), the passthrough
+                        // fallback in Render keeps the first frames visually clean until the
+                        // user clicks LoadCurrent / ReloadProject to populate the cache.
+                        //
+                        // The fresh-drop case (user drags plugin onto a clip for the first
+                        // time in this session) has empty `ProjectPath` at this point and
+                        // does spawn the query, populating the cache for every subsequent
+                        // paste / restore.
+                        let project_path_at_create = instance_data
+                            .params
+                            .get_string(Params::ProjectPath)
+                            .unwrap_or_default();
+                        if !project_path_at_create.is_empty() {
+                            log::info!(target: "ofx",
+                                "host_input_sizing: CreateInstance with non-empty ProjectPath (paste / .drp restore) — \
+                                 skipping fuscript query, relying on existing cache or user-triggered refresh");
+                        } else if CurrentFileInfo::is_available() {
+                            let info_arc = instance_data.current_file_info.clone();
+                            let pending_arc = instance_data.current_file_info_pending.clone();
+                            CurrentFileInfo::query_silent(info_arc, pending_arc.clone());
+                            // Short spin-wait. Covers a warm fuscript (typical 200-500ms) but
+                            // bails out fast enough not to stall CreateInstance perceptibly on
+                            // cold start. The Render path's passthrough fallback handles the
+                            // cold-start case visually.
+                            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
+                            while !pending_arc.load(SeqCst) && std::time::Instant::now() < deadline {
+                                std::thread::sleep(std::time::Duration::from_millis(20));
+                            }
+                            if pending_arc.load(SeqCst) {
+                                // Mirror the project/timeline-level fields into the global cache
+                                // so any subsequent CreateInstance in this session is a hit.
+                                if let Some(ref info) = *instance_data.current_file_info.lock() {
+                                    *self.host_input_sizing_cache.lock() = Some(HostInputSizingCacheEntry {
+                                        mismatch_mode: info.mismatch_mode.clone(),
+                                        timeline_w: info.timeline_w,
+                                        timeline_h: info.timeline_h,
+                                        use_custom_settings: info.use_custom_settings,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 effect.set_instance_data(instance_data)?;
 
                 OK
@@ -986,6 +1587,32 @@ impl Execute for GyroflowPlugin {
                 let instance_data: &mut InstanceData = effect.get_instance_data()?;
                 if in_args.get_name()? == "LoadCurrent" {
                     CurrentFileInfo::query(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone());
+                }
+                // §8.2: re-query fuscript on ReloadProject so a user that just toggled Resolve's
+                // mismatched-resolution setting between renders can have the new value picked up
+                // without re-clicking "LoadCurrent". Silent — ReloadProject is a quiet refresh,
+                // we don't want a dialog if fuscript happens to fail. Also clear the
+                // idempotency marker so the resolved mode change is honored on the next render
+                // without waiting for a stab rebuild.
+                if in_args.get_name()? == "ReloadProject" && CurrentFileInfo::is_available() {
+                    CurrentFileInfo::query_silent(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone());
+                    instance_data.applied_host_input_sizing = None;
+                }
+                // §2.5 + §7.2: handle the OFX-only HostInputSizing dropdown before the
+                // FromStr-into-`Params` lookup (it's intentionally NOT in the common enum).
+                // The UI dropdown is hidden (`set_secret(true)`) but the param is still defined so
+                // paste round-trips serialize it. Clear `applied_host_input_sizing` so the next
+                // render re-applies with the new mode (otherwise the idempotency guard would skip
+                // the apply and the lens/size baked for the previous mode would persist).
+                // Paste shadow is NOT cleared — `HostInputSizing` is OpenFX-only and was never
+                // on the paste-preservable list.
+                if in_args.get_name()? == "HostInputSizing" {
+                    instance_data.applied_host_input_sizing = None;
+                    if in_args.get_change_reason()? == Change::UserEdited {
+                        log::info!(target: "ofx",
+                            "HostInputSizing changed by user; will re-evaluate on next render");
+                    }
+                    return OK;
                 }
                 if in_args.get_name()? == "Source" || in_args.get_name()? == "Output" || in_args.get_name()? == "ResolveUseAlphaForTrackCompositing" {
                     log::info!("InstanceChanged {:?} {:?}", in_args.get_name()?, in_args.get_change_reason()?);
@@ -1088,6 +1715,24 @@ impl Execute for GyroflowPlugin {
                             let fps = instance_data.plugin.fps.max(1.0);
                             instance_data.plugin.cache_keyframes(&instance_data.params, use_gyroflows_keyframes, num_frames, fps);
                         }
+                        // InputRotation changes `stab.params.video_rotation` AND swaps
+                        // `stab.params.output_size` via `apply_openfx_input_rotation_override_to_managers`.
+                        // After the first param edit `ever_changed` is true, so subsequent
+                        // InputRotation changes do NOT trigger `clear_stab` — the override is
+                        // applied in-place on the existing stab Arc that the next render will
+                        // reuse (same_stab=true). The stale `pre_mode_output_size` snapshot from
+                        // before the override would then drive `apply`'s restore branch to revert
+                        // the swap, leaving `output_size` back to the pre-rotation horizontal
+                        // value while `video_rotation` stays at 90 — visible as picture offset
+                        // (Fit mode) or wrong crop direction (FillCrop / CenterCrop). Clearing
+                        // the snapshots forces the next apply to re-snapshot from the freshly
+                        // overridden state so restore is a no-op for the rotation override.
+                        instance_data.applied_host_input_sizing = None;
+                        instance_data.last_applied_stab = None;
+                        instance_data.pre_mode_size = None;
+                        instance_data.pre_mode_output_size = None;
+                        instance_data.pre_mode_camera_matrix = None;
+                        instance_data.pre_mode_calib_dimension = None;
                     }
                 } else {
                     log::error!("Unknown param name: {:?}", in_args.get_name()?);
@@ -1247,13 +1892,37 @@ impl Execute for GyroflowPlugin {
                     )?;
                 }
 
+                // OpenFX-only `HostInputSizing` choice param. Drives the input-side handling for
+                // mismatched-resolution timelines. Defaults to `Auto`, which reads Resolve's
+                // `timelineInputResMismatchBehavior` via fuscript (Studio + Local scripting), and
+                // falls back to `Fit` (legacy letterbox path) when fuscript isn't available.
+                //
+                // Param is registered (so InstanceChanged / paste round-trips keep working) but
+                // hidden — the Auto path covers every visible user need; manual override is reserved
+                // for future debugging and is wired up via `set_secret(true)`.
+                {
+                    let mut param = param_set.param_define_choice("HostInputSizing")?;
+                    param.set_label(gyroflow_plugin_base::t!("label.host_input_sizing"))?;
+                    param.set_hint(gyroflow_plugin_base::t!("hint.host_input_sizing"))?;
+                    param.set_choices(&[
+                        gyroflow_plugin_base::t!("option.host_input_sizing_auto"),
+                        gyroflow_plugin_base::t!("option.host_input_sizing_fit"),
+                        gyroflow_plugin_base::t!("option.host_input_sizing_fill_crop"),
+                        gyroflow_plugin_base::t!("option.host_input_sizing_center_crop"),
+                        gyroflow_plugin_base::t!("option.host_input_sizing_stretch"),
+                    ])?;
+                    param.set_default(HostInputSizing::Auto as i32)?;
+                    param.set_secret(true)?;
+                    let _ = param.set_script_name("HostInputSizing");
+                }
+
                 param_set
                     .param_define_page("Main")?
                     .set_children(&[
                         "ProjectGroup",
                         "AdjustGroup",
                         "KeyframesGroup",
-                        "ToggleOverview", "DontDrawOutside", "IncludeProjectData"
+                        "ToggleOverview", "DontDrawOutside", "IncludeProjectData",
                     ])?;
 
                 OK
@@ -1623,5 +2292,129 @@ mod tests {
         );
         assert_eq!(lcs.value, PasteableValue::F64(50.0));
         assert!(!lcs.host_manual_flag);
+    }
+
+    // ============================================================================================
+    // §1-§4 host-input-sizing helpers.
+    // ============================================================================================
+
+    fn make_info(mismatch: Option<&str>) -> CurrentFileInfo {
+        CurrentFileInfo {
+            file_path: String::new(),
+            project_path: None,
+            fps: 30.0,
+            duration_s: 1.0,
+            frame_count: 30,
+            width: 0,
+            height: 0,
+            pixel_aspect_ratio: String::new(),
+            mismatch_mode: mismatch.map(|s| s.to_string()),
+            timeline_w: 1920,
+            timeline_h: 1920,
+            use_custom_settings: false,
+        }
+    }
+
+    #[test]
+    fn parse_mismatch_mode_maps_all_four_strings() {
+        assert_eq!(parse_mismatch_mode("scaleToFit"),  Some(HostInputSizing::Fit));
+        assert_eq!(parse_mismatch_mode("scaleToCrop"), Some(HostInputSizing::FillCrop));
+        assert_eq!(parse_mismatch_mode("centerCrop"),  Some(HostInputSizing::CenterCrop));
+        assert_eq!(parse_mismatch_mode("stretch"),     Some(HostInputSizing::Stretch));
+        // Trim whitespace defensively (fuscript stdout sometimes carries trailing newlines).
+        assert_eq!(parse_mismatch_mode("  scaleToCrop\n"), Some(HostInputSizing::FillCrop));
+    }
+
+    #[test]
+    fn parse_mismatch_mode_rejects_empty_and_unknown() {
+        assert_eq!(parse_mismatch_mode(""), None);
+        assert_eq!(parse_mismatch_mode("scaletofit"), None); // wrong case
+        assert_eq!(parse_mismatch_mode("nope"), None);
+    }
+
+    #[test]
+    fn resolve_host_input_sizing_fusion_forces_fit_over_ui_fill_crop() {
+        let info = make_info(Some("scaleToCrop"));
+        // Fusion takes precedence over both UI and fuscript: native-resolution clips don't mismatch.
+        let mode = resolve_host_input_sizing(HostInputSizing::FillCrop, Some(&info), true, None, false);
+        assert_eq!(mode, HostInputSizing::Fit);
+    }
+
+    #[test]
+    fn resolve_host_input_sizing_vegas_forces_fit_under_auto() {
+        let info = make_info(Some("scaleToCrop"));
+        let mode = resolve_host_input_sizing(
+            HostInputSizing::Auto,
+            Some(&info),
+            false,
+            Some("com.vegascreativesoftware.vegas"),
+            false,
+        );
+        assert_eq!(mode, HostInputSizing::Fit);
+    }
+
+    #[test]
+    fn resolve_host_input_sizing_auto_picks_fuscript_scale_to_crop() {
+        let info = make_info(Some("scaleToCrop"));
+        let mode = resolve_host_input_sizing(HostInputSizing::Auto, Some(&info), false, Some("com.blackmagicdesign.resolve"), false);
+        assert_eq!(mode, HostInputSizing::FillCrop);
+    }
+
+    #[test]
+    fn resolve_host_input_sizing_auto_falls_back_to_fit_when_fuscript_missing() {
+        // No fuscript info at all (Resolve Free / non-Resolve host).
+        let mode = resolve_host_input_sizing(HostInputSizing::Auto, None, false, Some("org.darktable"), false);
+        assert_eq!(mode, HostInputSizing::Fit);
+        // fuscript ran but returned an unknown / empty value.
+        let info = make_info(None);
+        let mode = resolve_host_input_sizing(HostInputSizing::Auto, Some(&info), false, None, false);
+        assert_eq!(mode, HostInputSizing::Fit);
+    }
+
+    #[test]
+    fn resolve_host_input_sizing_explicit_ui_overrides_fuscript() {
+        let info = make_info(Some("scaleToFit"));
+        // User picked FillCrop explicitly — that wins even if Resolve says scaleToFit.
+        let mode = resolve_host_input_sizing(HostInputSizing::FillCrop, Some(&info), false, None, false);
+        assert_eq!(mode, HostInputSizing::FillCrop);
+    }
+
+    #[test]
+    fn resolve_host_input_sizing_auto_picks_up_stretch() {
+        let info = make_info(Some("stretch"));
+        let mode = resolve_host_input_sizing(HostInputSizing::Auto, Some(&info), false, None, false);
+        assert_eq!(mode, HostInputSizing::Stretch);
+    }
+
+    // --- compute_crop_geometry ------------------------------------------------------------------
+
+    #[test]
+    fn compute_crop_geometry_horizontal_crop() {
+        // 3840×1920 source on a 1920×1920 (1.0 aspect) timeline -> trim the sides.
+        let (w, h, x, y) = compute_crop_geometry((3840, 1920), 1.0, 0.0);
+        assert_eq!((w, h, x, y), (1920, 1920, 960, 0));
+    }
+
+    #[test]
+    fn compute_crop_geometry_vertical_crop() {
+        // 1080×1920 vertical source on a 1920×1920 timeline -> trim top/bottom to a square.
+        let (w, h, x, y) = compute_crop_geometry((1080, 1920), 1.0, 0.0);
+        assert_eq!((w, h, x, y), (1080, 1080, 0, 420));
+    }
+
+    #[test]
+    fn compute_crop_geometry_matching_aspect_is_noop() {
+        // 1920×1080 source on a 16:9 timeline (1920/1080 = 1.7777…) -> exact match, full source.
+        let (w, h, x, y) = compute_crop_geometry((1920, 1080), 1920.0 / 1080.0, 0.0);
+        assert_eq!((w, h, x, y), (1920, 1080, 0, 0));
+    }
+
+    #[test]
+    fn compute_crop_geometry_90deg_rotated_source_swaps_dims_first() {
+        // Stored 1920×1080 with InputRotation=90°: the displayed frame is 1080×1920 (vertical).
+        // On a 1920×1920 timeline this crops top/bottom to (1080,1080) at offset (0,420),
+        // matching the rotated-source vertical-crop case.
+        let (w, h, x, y) = compute_crop_geometry((1920, 1080), 1.0, 90.0);
+        assert_eq!((w, h, x, y), (1080, 1080, 0, 420));
     }
 }

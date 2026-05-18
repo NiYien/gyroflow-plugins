@@ -88,6 +88,14 @@
   "option.zoom_mode_dynamic": "动态缩放",
   "option.zoom_mode_static": "静态缩放",
 
+  "label.host_input_sizing": "宿主输入缩放",
+  "hint.host_input_sizing": "宿主把分辨率不匹配的素材缩放到时间线缓冲的方式。自动模式通过 fuscript 读取达芬奇 Resolve 设置（仅 Studio 版 + 开启本地脚本可用）；显式模式会覆盖宿主设置。在 Resolve 中切换分辨率不匹配处理后请点击 Reload Project 让插件重新读取。",
+  "option.host_input_sizing_auto": "自动 (fuscript)",
+  "option.host_input_sizing_fit": "适应 (Fit)",
+  "option.host_input_sizing_fill_crop": "填充裁切 (Fill+Crop)",
+  "option.host_input_sizing_center_crop": "居中裁切 (Center Crop)",
+  "option.host_input_sizing_stretch": "拉伸 (Stretch)",
+
   "status.ok": "正常",
   "status.project_not_loaded": "项目未加载",
   "status.calculating": "正在计算...",

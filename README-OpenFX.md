@@ -48,6 +48,22 @@ If your video file is from GoPro 8+, DJI or Insta360, you can also select video 
 
 ## For more detailed instructions, see the [docs](https://docs.gyroflow.xyz/app/video-editor-plugins/general-plugin-workflow)
 
+### Host input sizing (DaVinci Resolve mismatched-resolution)
+
+When the source clip's resolution does not match the timeline resolution, DaVinci Resolve scales the clip into the timeline buffer per the **Project Settings → Image Scaling → Mismatched Resolution Files** option. The OpenFX plugin needs to know which mode is active so the stabilization math is computed against the correct source pixels.
+
+The `Host input sizing` dropdown (in the Adjust group) controls this:
+
+- **Auto (fuscript)** — *default*. The plugin reads Resolve's `timelineInputResMismatchBehavior` setting via the `fuscript` scripting bridge and picks the matching mode automatically. Requires **DaVinci Resolve Studio** with `Preferences → General → External scripting using` set to `Local`. On the free edition / when scripting is disabled / on compound clips, the plugin silently falls back to `Fit`.
+- **Fit** — assume Resolve letterboxed the clip into the timeline buffer (centered content band with black bars). This is the only legacy path; matches the plugin's pre-v2.2 behavior.
+- **Fill+Crop** — assume Resolve 1:1 center-cropped the source pixels to fill the timeline buffer. The plugin offsets the lens principal point (`cx`/`cy`) and trims the calibration dimensions to the crop region; `fx`/`fy`/distortion are unchanged.
+- **Center Crop** — same math as Fill+Crop for the common case (timeline ≤ source); kept as a distinct option for forward-compat with Resolve's `centerCrop` mode.
+- **Stretch** — Resolve non-uniformly scaled the source to fit the timeline buffer. The plugin accepts the aspect distortion and logs a one-time warning; recommend switching Resolve to `scaleToFit` / `scaleToCrop` for accurate stabilization.
+
+The Fusion page is always treated as `Fit` (it receives native-resolution clips). `Don't draw outside source clip` takes precedence over this dropdown.
+
+**Runtime caveat**: changing Resolve's mismatched-resolution setting while the project is open requires pressing `Reload project` for the plugin to pick up the new value.
+
 
 # License
 

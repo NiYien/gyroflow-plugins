@@ -88,6 +88,14 @@
   "option.zoom_mode_dynamic": "동적 줌",
   "option.zoom_mode_static": "정적 줌",
 
+  "label.host_input_sizing": "Host input sizing",
+  "hint.host_input_sizing": "How the editor scaled mismatched-resolution clips into the timeline buffer. Auto reads DaVinci Resolve's setting via fuscript (Resolve Studio + Local scripting only); explicit modes override regardless of host. Switch the host's mismatched-resolution setting then press Reload Project to pick up changes.",
+  "option.host_input_sizing_auto": "Auto (fuscript)",
+  "option.host_input_sizing_fit": "Fit",
+  "option.host_input_sizing_fill_crop": "Fill+Crop",
+  "option.host_input_sizing_center_crop": "Center Crop",
+  "option.host_input_sizing_stretch": "Stretch",
+
   "status.ok": "정상",
   "status.project_not_loaded": "프로젝트가 불러와지지 않음",
   "status.calculating": "계산 중...",
