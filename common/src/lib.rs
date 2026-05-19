@@ -1112,7 +1112,22 @@ impl GyroflowPluginBaseInstance {
             }
 
             if let Ok(zm) = params.get_i32(Params::ZoomMode) {
-                stab.params.write().adaptive_zoom_window = zoom_window_from_mode_index(zm);
+                // ZoomMode is a 3-value OFX dropdown but adaptive_zoom_window
+                // is a continuous f64 in the project file. The naive
+                // `params.write() = zoom_window_from_mode_index(zm)` lossy
+                // round-trip clobbers any project value that doesn't land
+                // exactly on {0.0, -1.0, 4.0} — e.g. a desktop-saved
+                // smoothing window of 2.0 gets quietly forced to 4.0 on
+                // every OFX load, producing fovs that disagree with the
+                // desktop app's preview and re-firing the §11 snapshot diff
+                // (see optimize-stab-load-pipeline design.md §29).
+                // Only overwrite when the user's OFX choice changes the
+                // bucket; within the same bucket preserve the project's
+                // exact value.
+                let current = stab.params.read().adaptive_zoom_window;
+                if mode_index_from_zoom_window(current) != zm {
+                    stab.params.write().adaptive_zoom_window = zoom_window_from_mode_index(zm);
+                }
             }
 
             // §11.4 + §11.5: skip the redundant second recompute when nothing
