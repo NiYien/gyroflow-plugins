@@ -78,6 +78,16 @@ fn hash_str(s: &str) -> u64 {
     h.finish()
 }
 
+// Lock-ordering contract: acquires read guards on `params`, `lens`, `gyro`,
+// `keyframes`, and `smoothing` in that exact order. Callers MUST NOT hold a
+// write guard on any of those locks when invoking, otherwise parking_lot's
+// non-reentrant RwLock will deadlock. Callers SHOULD NOT hold any other read
+// guard on the same stab manager either (read-read against parking_lot is
+// safe today but a concurrent writer between calls can cause writer-starvation
+// fairness issues). Current call sites in `stab_manager` satisfy this — the
+// pre/post snapshots run in the cache-miss construction block where the
+// manager is exclusively owned. Future call sites in render / async paths
+// MUST re-audit before adding.
 fn snapshot_compute_inputs(stab: &StabilizationManager) -> ComputeInputsSnapshot {
     let p = stab.params.read();
     let lens = stab.lens.read();
