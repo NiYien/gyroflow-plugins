@@ -39,6 +39,124 @@ impl GyroflowLaunchCommand {
     }
 }
 
+// Snapshot of `StabilizationManager` fields that feed
+// `gyroflow_core::stabilization::compute_params::ComputeParams::from_manager`.
+// Captured pre- and post-mutation inside `stab_manager()` so the post-import
+// recompute pair (`invalidate_smoothing()` + `recompute_blocking()`) can be
+// skipped when no relevant input changed. Field list derived from a direct
+// code audit of `from_manager` (see gyroflow/src/core/stabilization/compute_params.rs).
+//
+// Raw stretch mirror fields (`input_horizontal_stretch_raw`,
+// `input_vertical_stretch_raw`) are included even though they are not directly
+// read by `from_manager`. The motivation comes from §10: `apply_anamorphic_decay`
+// reads them, and any later change in the raw mirror semantically affects the
+// compute output. Both raw and mutating fields are tracked to detect any state
+// change. In the common anamorphic case, `disable_lens_stretch` only changes
+// the mutating fields (raw stays at λ), so the snapshot still diffs and fires
+// — this is correct: size also changed, so a recompute is required. The §10
+// gain is render coherence with the desktop app, not skip-count.
+#[derive(Clone, Debug, PartialEq)]
+struct ComputeInputsSnapshot {
+    size: (usize, usize),
+    output_size: (usize, usize),
+    video_rotation: f64,
+    adaptive_zoom_window: f64,
+    adaptive_zoom_method: i32,
+    input_horizontal_stretch: f64,
+    input_vertical_stretch: f64,
+    input_horizontal_stretch_raw: Option<f64>,
+    input_vertical_stretch_raw: Option<f64>,
+    integration_method: usize,
+    keyframes_hash: u64,
+    smoothing_hash: u64,
+}
+
+fn hash_str(s: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(s.as_bytes());
+    h.finish()
+}
+
+fn snapshot_compute_inputs(stab: &StabilizationManager) -> ComputeInputsSnapshot {
+    let p = stab.params.read();
+    let lens = stab.lens.read();
+    let gyro = stab.gyro.read();
+    let kf = stab.keyframes.read();
+    let smoothing = stab.smoothing.read();
+
+    let keyframes_hash = serde_json::to_string(&*kf)
+        .map(|s| hash_str(&s))
+        .unwrap_or(0);
+    let smoothing_hash = hash_str(&smoothing.current().get_parameters_json().to_string());
+
+    ComputeInputsSnapshot {
+        size: p.size,
+        output_size: p.output_size,
+        video_rotation: p.video_rotation,
+        adaptive_zoom_window: p.adaptive_zoom_window,
+        adaptive_zoom_method: p.adaptive_zoom_method,
+        input_horizontal_stretch: lens.input_horizontal_stretch,
+        input_vertical_stretch: lens.input_vertical_stretch,
+        input_horizontal_stretch_raw: lens.input_horizontal_stretch_raw(),
+        input_vertical_stretch_raw: lens.input_vertical_stretch_raw(),
+        integration_method: gyro.integration_method,
+        keyframes_hash,
+        smoothing_hash,
+    }
+}
+
+// §11.7: throttle the retry storm seen in gyroflow-openfx.log (~70 attempts in
+// 11 s on a wrong path). Resolve calls stab_manager() many times during a
+// missing-file state; caching the NotFound result short-circuits the kernel
+// open(2) and the surrounding log noise. Cache TTL is 5 s so a user fixing a
+// typo still gets a fresh attempt within a few frames after correction. The
+// cache keys on the resolved video path (input to filesystem::open_file).
+const NOT_FOUND_THROTTLE_MS: u128 = 5_000;
+static NOT_FOUND_CACHE: std::sync::OnceLock<Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>> = std::sync::OnceLock::new();
+
+fn not_found_cache() -> &'static Mutex<std::collections::HashMap<String, (std::time::Instant, String)>> {
+    NOT_FOUND_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn check_not_found_cache(path: &str) -> Option<String> {
+    let cache = not_found_cache().lock();
+    cache.get(path).and_then(|(t, msg)| {
+        if t.elapsed().as_millis() < NOT_FOUND_THROTTLE_MS {
+            Some(msg.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn record_not_found(path: &str, msg: String) {
+    not_found_cache().lock().insert(path.to_string(), (std::time::Instant::now(), msg));
+}
+
+fn clear_not_found(path: &str) {
+    not_found_cache().lock().remove(path);
+}
+
+impl ComputeInputsSnapshot {
+    fn diff(&self, other: &Self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        if self.size != other.size { out.push("size"); }
+        if self.output_size != other.output_size { out.push("output_size"); }
+        if self.video_rotation != other.video_rotation { out.push("video_rotation"); }
+        if self.adaptive_zoom_window != other.adaptive_zoom_window { out.push("adaptive_zoom_window"); }
+        if self.adaptive_zoom_method != other.adaptive_zoom_method { out.push("adaptive_zoom_method"); }
+        if self.input_horizontal_stretch != other.input_horizontal_stretch { out.push("input_horizontal_stretch"); }
+        if self.input_vertical_stretch != other.input_vertical_stretch { out.push("input_vertical_stretch"); }
+        if self.input_horizontal_stretch_raw != other.input_horizontal_stretch_raw { out.push("input_horizontal_stretch_raw"); }
+        if self.input_vertical_stretch_raw != other.input_vertical_stretch_raw { out.push("input_vertical_stretch_raw"); }
+        if self.integration_method != other.integration_method { out.push("integration_method"); }
+        if self.keyframes_hash != other.keyframes_hash { out.push("keyframes"); }
+        if self.smoothing_hash != other.smoothing_hash { out.push("smoothing"); }
+        out
+    }
+}
+
 #[derive(Debug, Copy, Clone, Hash, PartialEq, PartialOrd, Eq, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Params {
     Logo,
@@ -724,8 +842,28 @@ impl GyroflowPluginBaseInstance {
             }
 
             if !path.ends_with(".gyroflow") {
+                // §11.7: short-circuit the retry storm before invoking open_file.
+                if let Some(cached_msg) = check_not_found_cache(&path) {
+                    return Err(format!("open_file (cached NotFound, retry throttled): {cached_msg}").into());
+                }
                 let url = filesystem::path_to_url(&path);
-                let mut file = filesystem::open_file(&url, false, false)?;
+                let mut file = match filesystem::open_file(&url, false, false) {
+                    Ok(f) => {
+                        clear_not_found(&path);
+                        f
+                    }
+                    Err(e) => {
+                        let is_not_found = matches!(
+                            &e,
+                            gyroflow_core::filesystem::FilesystemError::IOError(io)
+                                if io.kind() == std::io::ErrorKind::NotFound,
+                        );
+                        if is_not_found {
+                            record_not_found(&path, format!("{e}"));
+                        }
+                        return Err(e.into());
+                    }
+                };
                 let filesize = file.size;
                 match stab.load_video_file(file.get_file(), filesize, &url, None, true) {
                     Ok(md) => {
@@ -931,6 +1069,13 @@ impl GyroflowPluginBaseInstance {
 
             self.update_loaded_state(params, loaded);
 
+            // §11.3: snapshot compute-params inputs immediately after import #1
+            // and before the OFX-side mutation block. Captured here (vs inside
+            // the `let loaded = { ... }` scope) so the read locks acquired by
+            // snapshot_compute_inputs do not nest with the gf_params guard held
+            // inside that block.
+            let pre_snapshot = snapshot_compute_inputs(&stab);
+
             // Check if loaded preset/project/lens data contains the plugin_disable_stretch flag
             self.maybe_auto_disable_stretch_from_embedded_data(params, &mut disable_stretch)?;
 
@@ -960,8 +1105,22 @@ impl GyroflowPluginBaseInstance {
                 stab.params.write().adaptive_zoom_window = zoom_window_from_mode_index(zm);
             }
 
-            stab.invalidate_smoothing();
-            stab.recompute_blocking();
+            // §11.4 + §11.5: skip the redundant second recompute when nothing
+            // relevant changed since import #1. The skip target is the
+            // 25-iter / ~85 s Max-Zoom limiter rerun observed in
+            // gyroflow-openfx.log for a non-anamorphic Canon MXF where import
+            // #1 reported `any above limit: false` but the post-mutation
+            // recompute disagreed. Diff list goes to `stab.load` so a future
+            // log shows which mutation actually triggers the rerun.
+            let post_snapshot = snapshot_compute_inputs(&stab);
+            if pre_snapshot != post_snapshot {
+                let diff = pre_snapshot.diff(&post_snapshot);
+                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?}");
+                stab.invalidate_smoothing();
+                stab.recompute_blocking();
+            } else {
+                log::info!(target: "stab.load", "post-mutation recompute skipped, no input change");
+            }
             let inverse = !(params.get_bool(Params::UseGyroflowsKeyframes)? && stab.keyframes.read().is_keyframed_internally(&KeyframeType::VideoSpeed));
             stab.params.write().calculate_ramped_timestamps(&stab.keyframes.read(), inverse, inverse);
 
@@ -1477,6 +1636,67 @@ mod tests {
 
         assert_eq!(command.program, "open");
         assert_eq!(command.args, vec!["-a", "/Applications/GyroflowNiYien.app"]);
+    }
+
+    // §11.8 unit stand-in: full integration test (mock GyroflowPluginParams +
+    // .gyroflow fixture + log capture) requires test infra that doesn't exist
+    // in this crate. Verify the testable invariant directly: snapshot of an
+    // un-mutated manager equals itself, so the `if pre != post` skip branch
+    // would fire on the same-state load path.
+    #[test]
+    fn snapshot_of_unchanged_manager_is_equal() {
+        let stab = StabilizationManager::default();
+        let pre = snapshot_compute_inputs(&stab);
+        let post = snapshot_compute_inputs(&stab);
+        assert_eq!(pre, post);
+        assert!(pre.diff(&post).is_empty());
+    }
+
+    // §11.9 unit stand-in: mutate the field that the OFX ZoomMode round-trip
+    // writes (`stab.params.write().adaptive_zoom_window = ...` at
+    // common/src/lib.rs:960), then verify the diff names that exact field.
+    #[test]
+    fn snapshot_diff_detects_adaptive_zoom_window_mutation() {
+        let stab = StabilizationManager::default();
+        let original = stab.params.read().adaptive_zoom_window;
+        let pre = snapshot_compute_inputs(&stab);
+        stab.params.write().adaptive_zoom_window = original + 1.0;
+        let post = snapshot_compute_inputs(&stab);
+        let diff = pre.diff(&post);
+        assert_eq!(diff, vec!["adaptive_zoom_window"]);
+    }
+
+    // Coverage for the other commonly-mutated fields in the OFX flow so the
+    // skip decision is provably safe across the mutation table in design.md.
+    #[test]
+    fn snapshot_diff_detects_integration_method_change() {
+        let stab = StabilizationManager::default();
+        let original = stab.gyro.read().integration_method;
+        let pre = snapshot_compute_inputs(&stab);
+        stab.gyro.write().integration_method = original.wrapping_add(1);
+        let post = snapshot_compute_inputs(&stab);
+        assert_eq!(pre.diff(&post), vec!["integration_method"]);
+    }
+
+    #[test]
+    fn snapshot_diff_detects_output_size_change() {
+        let stab = StabilizationManager::default();
+        let pre = snapshot_compute_inputs(&stab);
+        stab.params.write().output_size = (1920, 1080);
+        let post = snapshot_compute_inputs(&stab);
+        assert_eq!(pre.diff(&post), vec!["output_size"]);
+    }
+
+    // §11.7 throttle behavior: first NotFound caches; second within the window
+    // returns the cached msg; after explicit clear the cache misses again.
+    #[test]
+    fn not_found_cache_throttles_within_window_and_clears() {
+        let path = format!("not_found_cache_test_{}", fastrand::u64(..));
+        assert!(check_not_found_cache(&path).is_none());
+        record_not_found(&path, "boom".into());
+        assert_eq!(check_not_found_cache(&path).as_deref(), Some("boom"));
+        clear_not_found(&path);
+        assert!(check_not_found_cache(&path).is_none());
     }
 }
 
