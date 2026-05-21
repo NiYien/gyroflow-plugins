@@ -291,6 +291,12 @@ struct InstanceData {
     // unique to the Resolve OFX path. Stored as `Int` because OFX choice params are integers.
     host_input_sizing: ParamHandle<Int>,
 
+    // Hidden OFX string param persisting the raw fuscript mismatch value (one of
+    // "" / "scaleToFit" / "scaleToCrop" / "centerCrop" / "stretch"). Serialised to `.drp` and
+    // copied through "Paste Attributes" by Resolve's standard OFX machinery, so on project
+    // reopen each node's mismatch mode is restored without re-running fuscript.
+    detected_mismatch_mode: ParamHandle<String>,
+
     // Tracks the mode currently baked into the stab manager so the transform is idempotent.
     // Without this, reapplying the transform on top of an already-transformed lens would
     // accumulate offsets every render.
@@ -911,7 +917,15 @@ impl Execute for GyroflowPlugin {
                 // host-input-sizing cache. `check_pending_file_info` is idempotent and only
                 // does real work when the pending flag flips, so this Render-path mirror only
                 // overwrites the cache when a new fuscript result came in.
-                {
+                //
+                // Same pass also persists the raw mismatch string into the per-node hidden
+                // `DetectedMismatchMode` OFX param so subsequent `.drp` reopens can restore the
+                // mode without fuscript. The set_value happens AFTER the locks above are
+                // dropped, so the synchronous `InstanceChanged(DetectedMismatchMode)` callback
+                // Resolve might fire (which would attempt to re-lock `current_file_info`)
+                // never deadlocks. The InstanceChanged handler treats unknown param names as a
+                // benign no-op (logs once), so this set_value path is safe.
+                let persist_mismatch: Option<String> = {
                     let info_lock = instance_data.current_file_info.lock();
                     if let Some(ref info) = *info_lock {
                         let entry = HostInputSizingCacheEntry {
@@ -933,6 +947,21 @@ impl Execute for GyroflowPlugin {
                         if needs_write {
                             *cache_lock = Some(entry);
                         }
+                        info.mismatch_mode
+                            .as_ref()
+                            .filter(|s| !s.is_empty())
+                            .cloned()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(raw) = persist_mismatch {
+                    let already_persisted = instance_data
+                        .detected_mismatch_mode
+                        .get_value()
+                        .unwrap_or_default();
+                    if already_persisted != raw {
+                        let _ = instance_data.detected_mismatch_mode.set_value(raw);
                     }
                 }
 
@@ -1044,8 +1073,14 @@ impl Execute for GyroflowPlugin {
                     let info_lock = instance_data.current_file_info.lock();
                     info_lock.as_ref().map(|i| (i.timeline_w, i.timeline_h)).unwrap_or((0, 0))
                 };
-                let is_preview_thumbnail = fuscript_tw > 0 && fuscript_th > 0
-                    && (buffer_w_usize * 2 < fuscript_tw || buffer_h_usize * 2 < fuscript_th);
+                // OR with an unconditional small-buffer cutoff so `.drp` restore via the
+                // hidden-field fallback (no fuscript run yet → timeline_w/h still 0) is also
+                // protected. Inspector thumbnails are well below 400px on a side; the smallest
+                // sensible timeline render is far above it (480p shortest side = 480).
+                let is_preview_thumbnail = (fuscript_tw > 0 && fuscript_th > 0
+                    && (buffer_w_usize * 2 < fuscript_tw || buffer_h_usize * 2 < fuscript_th))
+                    || (buffer_w_usize > 0 && buffer_h_usize > 0
+                        && (buffer_w_usize < 400 || buffer_h_usize < 400));
                 if !skip_host_input_sizing_transform && !is_subscale_render && !is_preview_thumbnail {
                     instance_data.apply_host_input_sizing_if_needed(
                         &stab,
@@ -1423,6 +1458,7 @@ impl Execute for GyroflowPlugin {
                     current_file_info:         Arc::new(Mutex::new(None)),
                     current_file_info_pending: Arc::new(AtomicBool::new(false)),
                     host_input_sizing:                param_set.parameter("HostInputSizing")?,
+                    detected_mismatch_mode:           param_set.parameter("DetectedMismatchMode")?,
                     applied_host_input_sizing:        None,
                     last_applied_stab:                None,
                     pre_mode_size:                    None,
@@ -1548,6 +1584,35 @@ impl Execute for GyroflowPlugin {
                             .get_string(Params::ProjectPath)
                             .unwrap_or_default();
                         if !project_path_at_create.is_empty() {
+                            // .drp restore / paste with empty global cache (typical: Resolve was
+                            // just restarted). The per-node hidden field is the persistence
+                            // layer that survives both save/restore and "Paste Attributes" — if
+                            // it carries a previous fuscript result we can populate
+                            // `current_file_info.mismatch_mode` directly and skip fuscript,
+                            // restoring the FillCrop / scaleToFit / ... mode chosen earlier
+                            // without any user action.
+                            let persisted = instance_data
+                                .detected_mismatch_mode
+                                .get_value()
+                                .unwrap_or_default();
+                            if !persisted.is_empty() {
+                                *instance_data.current_file_info.lock() = Some(CurrentFileInfo {
+                                    file_path: String::new(),
+                                    project_path: None,
+                                    fps: 0.0,
+                                    duration_s: 0.0,
+                                    frame_count: 0,
+                                    width: 0,
+                                    height: 0,
+                                    pixel_aspect_ratio: String::new(),
+                                    mismatch_mode: Some(persisted.clone()),
+                                    timeline_w: 0,
+                                    timeline_h: 0,
+                                    use_custom_settings: false,
+                                });
+                                log::info!(target: "host_input_sizing",
+                                    "CreateInstance restored mismatch from hidden field (mode={persisted:?})");
+                            }
                             log::info!(target: "ofx",
                                 "host_input_sizing: CreateInstance with non-empty ProjectPath (paste / .drp restore) — \
                                  skipping fuscript query, relying on existing cache or user-triggered refresh");
@@ -1612,6 +1677,14 @@ impl Execute for GyroflowPlugin {
                         log::info!(target: "ofx",
                             "HostInputSizing changed by user; will re-evaluate on next render");
                     }
+                    return OK;
+                }
+                // Hidden persistence param. Plugin-initiated writes (mirror block in Render)
+                // and Resolve-initiated writes (paste/.drp restore) both end up here. Either
+                // way the param is pure storage — the runtime mismatch_mode comes from the
+                // global cache / hidden-field fallback at CreateInstance — so this event has
+                // no work to do beyond suppressing the `Unknown param name` log line below.
+                if in_args.get_name()? == "DetectedMismatchMode" {
                     return OK;
                 }
                 if in_args.get_name()? == "Source" || in_args.get_name()? == "Output" || in_args.get_name()? == "ResolveUseAlphaForTrackCompositing" {
@@ -1890,6 +1963,20 @@ impl Execute for GyroflowPlugin {
                         },
                         None,
                     )?;
+                }
+
+                // Hidden per-node persistence for the fuscript mismatch result. OFX serialises
+                // hidden string params to `.drp` and replicates them through "Paste Attributes",
+                // so this single param gives both project save/restore and paste round-trips
+                // for free. Holds the raw fuscript string (one of "" / "scaleToFit" /
+                // "scaleToCrop" / "centerCrop" / "stretch"); empty means "not yet detected".
+                {
+                    let mut param = param_set.param_define_string("DetectedMismatchMode")?;
+                    let _ = param.set_script_name("DetectedMismatchMode");
+                    param.set_string_type(ParamStringType::SingleLine)?;
+                    param.set_label("Detected mismatch mode")?;
+                    param.set_hint("")?;
+                    param.set_secret(true)?;
                 }
 
                 // OpenFX-only `HostInputSizing` choice param. Drives the input-side handling for
