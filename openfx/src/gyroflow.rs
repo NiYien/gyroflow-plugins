@@ -1617,29 +1617,18 @@ impl Execute for GyroflowPlugin {
                                 "host_input_sizing: CreateInstance with non-empty ProjectPath (paste / .drp restore) — \
                                  skipping fuscript query, relying on existing cache or user-triggered refresh");
                         } else if CurrentFileInfo::is_available() {
-                            let info_arc = instance_data.current_file_info.clone();
-                            let pending_arc = instance_data.current_file_info_pending.clone();
-                            CurrentFileInfo::query_silent(info_arc, pending_arc.clone());
-                            // Short spin-wait. Covers a warm fuscript (typical 200-500ms) but
-                            // bails out fast enough not to stall CreateInstance perceptibly on
-                            // cold start. The Render path's passthrough fallback handles the
-                            // cold-start case visually.
-                            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1000);
-                            while !pending_arc.load(SeqCst) && std::time::Instant::now() < deadline {
-                                std::thread::sleep(std::time::Duration::from_millis(20));
-                            }
-                            if pending_arc.load(SeqCst) {
-                                // Mirror the project/timeline-level fields into the global cache
-                                // so any subsequent CreateInstance in this session is a hit.
-                                if let Some(ref info) = *instance_data.current_file_info.lock() {
-                                    *self.host_input_sizing_cache.lock() = Some(HostInputSizingCacheEntry {
-                                        mismatch_mode: info.mismatch_mode.clone(),
-                                        timeline_w: info.timeline_w,
-                                        timeline_h: info.timeline_h,
-                                        use_custom_settings: info.use_custom_settings,
-                                    });
-                                }
-                            }
+                            // Fire-and-forget: don't block CreateInstance on fuscript. Resolve
+                            // calls CreateInstance on the UI thread, so any synchronous wait here
+                            // freezes the host. The Render path's `Fit` fallback keeps the first
+                            // frame visually safe, the Render path's pending-flag handler mirrors
+                            // the result into the global cache once fuscript returns, and
+                            // `query_silent`'s FlipX trigger forces a re-render to swap in the
+                            // correct mode — accepting a deliberate two-stage UX in exchange for
+                            // a non-blocking instance create.
+                            CurrentFileInfo::query_silent(
+                                instance_data.current_file_info.clone(),
+                                instance_data.current_file_info_pending.clone(),
+                            );
                         }
                     }
                 }
