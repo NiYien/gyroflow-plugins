@@ -2,6 +2,7 @@
   "group.project": "Gyroflow(Niyien) project",
   "group.adjust": "Adjust parameters",
   "group.keyframes": "Keyframes",
+  "group.output_adjust": "Output adjust (post-stabilization)",
   "group.output_size": "Output size",
   "group.info": "Info",
 
@@ -42,6 +43,10 @@
   "label.loaded_project": "Loaded project",
   "label.loaded_preset": "Loaded preset",
   "label.loaded_lens": "Loaded lens profile",
+  "label.output_zoom": "Output zoom",
+  "label.output_rotation": "Output rotation (±10°)",
+  "label.output_offset_x": "Output offset X (%)",
+  "label.output_offset_y": "Output offset Y (%)",
 
   "hint.status": "Status",
   "hint.load_current": "Try to load project file for current video file, or try to stabilize that video file directly",
@@ -79,6 +84,10 @@
   "hint.loaded_project": "Loaded project or video file",
   "hint.loaded_preset": "Loaded preset",
   "hint.loaded_lens": "Loaded lens profile",
+  "hint.output_zoom": "Post-stabilization zoom of the output buffer only; does not affect stabilization math. Range 0.5x–2.0x, default 1.0x.",
+  "hint.output_rotation": "Post-stabilization rotation of the output buffer only; horizon micro-tweak. Range ±10°, default 0°.",
+  "hint.output_offset_x": "Post-stabilization X shift of the output buffer only; percentage of buffer width. Range ±50%, default 0%.",
+  "hint.output_offset_y": "Post-stabilization Y shift of the output buffer only; percentage of buffer height. Range ±50%, default 0%.",
 
   "option.integration_none": "None",
   "option.integration_complementary": "Complementary",

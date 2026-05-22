@@ -2,6 +2,7 @@
   "group.project": "Проект Gyroflow(Niyien)",
   "group.adjust": "Параметры",
   "group.keyframes": "Ключевые кадры",
+  "group.output_adjust": "Output adjust (post-stabilization)",
   "group.output_size": "Размер вывода",
   "group.info": "Информация",
 
@@ -42,6 +43,10 @@
   "label.loaded_project": "Загруженный проект",
   "label.loaded_preset": "Загруженный пресет",
   "label.loaded_lens": "Загруженный профиль объектива",
+  "label.output_zoom": "Output zoom",
+  "label.output_rotation": "Output rotation (±10°)",
+  "label.output_offset_x": "Output offset X (%)",
+  "label.output_offset_y": "Output offset Y (%)",
 
   "hint.status": "Состояние",
   "hint.load_current": "Попытаться загрузить файл проекта для текущего видеофайла или стабилизировать его напрямую",
@@ -79,6 +84,10 @@
   "hint.loaded_project": "Загруженный проект или видеофайл",
   "hint.loaded_preset": "Загруженный пресет",
   "hint.loaded_lens": "Загруженный профиль объектива",
+  "hint.output_zoom": "Post-stabilization zoom of the output buffer only; does not affect stabilization math. Range 0.5x–2.0x, default 1.0x.",
+  "hint.output_rotation": "Post-stabilization rotation of the output buffer only; horizon micro-tweak. Range ±10°, default 0°.",
+  "hint.output_offset_x": "Post-stabilization X shift of the output buffer only; percentage of buffer width. Range ±50%, default 0%.",
+  "hint.output_offset_y": "Post-stabilization Y shift of the output buffer only; percentage of buffer height. Range ±50%, default 0%.",
 
   "option.integration_none": "Нет",
   "option.integration_complementary": "Комплементарный",

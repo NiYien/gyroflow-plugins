@@ -233,14 +233,16 @@ extern "C" fn f0r_update(instance: f0r_instance_t, time: f64, inframe: *const u3
             rect: Some(src_rect),
             data: BufferSource::Cpu { buffer: inframe },
             rotation: None,
-            texture_copy: false
+            texture_copy: false,
+            post_affine: None,
         },
         output: BufferDescription {
             size: src_size,
             rect: None,
             data: BufferSource::Cpu { buffer: outframe },
             rotation: None,
-            texture_copy: false
+            texture_copy: false,
+            post_affine: None,
         }
     };
 

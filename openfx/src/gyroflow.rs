@@ -208,6 +208,12 @@ define_params!(ParamHandler {
         VideoSpeed            => video_speed:              ParamHandle<Double>,
         OutputWidth           => output_width:             ParamHandle<Double>,
         OutputHeight          => output_height:            ParamHandle<Double>,
+        // openfx-output-adjust-affine: must be listed here, else the macro-generated
+        // get_f64_at_time match falls through to panic!("Wrong parameter type") on these.
+        OutputZoom            => output_zoom:              ParamHandle<Double>,
+        OutputRotation        => output_rotation_param:    ParamHandle<Double>,
+        OutputOffsetX         => output_offset_x:          ParamHandle<Double>,
+        OutputOffsetY         => output_offset_y:          ParamHandle<Double>,
         //FusionStartFrame      => fusion_start_frame:       ParamHandle<Double>,
     ],
     i32s: [
@@ -1260,6 +1266,29 @@ impl Execute for GyroflowPlugin {
 
                 let input_rotation = Some(input_rotation_deg as f32);
 
+                // openfx-output-adjust-affine: read the four sliders at the current frame
+                // (host may keyframe them) and assemble PostAffine. Fusion page bypasses
+                // (D7); identity values also bypass to short-circuit the cache-invalidate
+                // path even though the kernel block self-short-circuits too (D4).
+                let output_post_affine: Option<PostAffine> = if instance_data.is_fusion_page {
+                    None
+                } else {
+                    let raw_zoom = instance_data.params.get_f64_at_time(Params::OutputZoom,     TimeType::Frame(time)).unwrap_or(1.0);
+                    let raw_rot  = instance_data.params.get_f64_at_time(Params::OutputRotation, TimeType::Frame(time)).unwrap_or(0.0);
+                    let raw_ox   = instance_data.params.get_f64_at_time(Params::OutputOffsetX,  TimeType::Frame(time)).unwrap_or(0.0);
+                    let raw_oy   = instance_data.params.get_f64_at_time(Params::OutputOffsetY,  TimeType::Frame(time)).unwrap_or(0.0);
+                    let zoom   = raw_zoom.clamp(0.5, 2.0) as f32;
+                    let rot    = raw_rot .clamp(-10.0, 10.0) as f32;
+                    let off_x  = (raw_ox / 100.0).clamp(-0.5, 0.5) as f32;
+                    let off_y  = (raw_oy / 100.0).clamp(-0.5, 0.5) as f32;
+                    if zoom == 1.0 && rot == 0.0 && off_x == 0.0 && off_y == 0.0 {
+                        None
+                    } else {
+                        log::info!(target: "app", "output_post_affine zoom={zoom} rot={rot} off=({off_x},{off_y})");
+                        Some(PostAffine { rotation_deg: rot, zoom, offset_norm: [off_x, off_y] })
+                    }
+                };
+
                 // log::debug!("src_size: {src_size:?} | src_rect: {src_rect:?}");
                 // log::debug!("out_size: {out_size:?} | out_rect: {out_rect:?}");
 
@@ -1342,8 +1371,8 @@ impl Execute for GyroflowPlugin {
 
                 if let Some(buffers) = buffers {
                     let mut buffers = Buffers {
-                        input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2 },
-                        output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2 }
+                        input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2, post_affine: None },
+                        output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine }
                     };
 
                     let processed = match output_image.get_pixel_depth()? {
@@ -1422,6 +1451,11 @@ impl Execute for GyroflowPlugin {
                         output_height:            param_set.parameter("OutputHeight")?,
                         output_swap:              param_set.parameter("OutputSizeSwap")?,
                         output_size_fit:          param_set.parameter("OutputSizeToTimeline")?,
+                        // openfx-output-adjust-affine: fetch handles for the 4 sliders.
+                        output_zoom:              param_set.parameter("OutputZoom")?,
+                        output_rotation_param:    param_set.parameter("OutputRotation")?,
+                        output_offset_x:          param_set.parameter("OutputOffsetX")?,
+                        output_offset_y:          param_set.parameter("OutputOffsetY")?,
                         interpolation:            param_set.parameter("Interpolation")?,
                         integration_method:       param_set.parameter("IntegrationMethod")?,
                         zoom_mode:                param_set.parameter("ZoomMode")?,

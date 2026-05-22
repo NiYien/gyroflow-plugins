@@ -2,6 +2,7 @@
   "group.project": "Gyroflow(Niyien) プロジェクト",
   "group.adjust": "パラメータ調整",
   "group.keyframes": "キーフレーム",
+  "group.output_adjust": "Output adjust (post-stabilization)",
   "group.output_size": "出力サイズ",
   "group.info": "情報",
 
@@ -42,6 +43,10 @@
   "label.loaded_project": "読み込まれたプロジェクト",
   "label.loaded_preset": "読み込まれたプリセット",
   "label.loaded_lens": "読み込まれたレンズプロファイル",
+  "label.output_zoom": "Output zoom",
+  "label.output_rotation": "Output rotation (±10°)",
+  "label.output_offset_x": "Output offset X (%)",
+  "label.output_offset_y": "Output offset Y (%)",
 
   "hint.status": "ステータス",
   "hint.load_current": "現在の動画ファイル用のプロジェクトファイルを読み込むか、その動画を直接手ぶれ補正します",
@@ -79,6 +84,10 @@
   "hint.loaded_project": "読み込まれたプロジェクトまたは動画ファイル",
   "hint.loaded_preset": "読み込まれたプリセット",
   "hint.loaded_lens": "読み込まれたレンズプロファイル",
+  "hint.output_zoom": "Post-stabilization zoom of the output buffer only; does not affect stabilization math. Range 0.5x–2.0x, default 1.0x.",
+  "hint.output_rotation": "Post-stabilization rotation of the output buffer only; horizon micro-tweak. Range ±10°, default 0°.",
+  "hint.output_offset_x": "Post-stabilization X shift of the output buffer only; percentage of buffer width. Range ±50%, default 0%.",
+  "hint.output_offset_y": "Post-stabilization Y shift of the output buffer only; percentage of buffer height. Range ±50%, default 0%.",
 
   "option.integration_none": "なし",
   "option.integration_complementary": "相補フィルタ",

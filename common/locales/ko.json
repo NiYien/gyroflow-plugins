@@ -2,6 +2,7 @@
   "group.project": "Gyroflow(Niyien) 프로젝트",
   "group.adjust": "매개변수 조정",
   "group.keyframes": "키프레임",
+  "group.output_adjust": "Output adjust (post-stabilization)",
   "group.output_size": "출력 크기",
   "group.info": "정보",
 
@@ -42,6 +43,10 @@
   "label.loaded_project": "불러온 프로젝트",
   "label.loaded_preset": "불러온 프리셋",
   "label.loaded_lens": "불러온 렌즈 프로필",
+  "label.output_zoom": "Output zoom",
+  "label.output_rotation": "Output rotation (±10°)",
+  "label.output_offset_x": "Output offset X (%)",
+  "label.output_offset_y": "Output offset Y (%)",
 
   "hint.status": "상태",
   "hint.load_current": "현재 영상 파일에 대한 프로젝트 파일을 불러오거나, 해당 영상을 직접 안정화합니다",
@@ -79,6 +84,10 @@
   "hint.loaded_project": "불러온 프로젝트 또는 영상 파일",
   "hint.loaded_preset": "불러온 프리셋",
   "hint.loaded_lens": "불러온 렌즈 프로필",
+  "hint.output_zoom": "Post-stabilization zoom of the output buffer only; does not affect stabilization math. Range 0.5x–2.0x, default 1.0x.",
+  "hint.output_rotation": "Post-stabilization rotation of the output buffer only; horizon micro-tweak. Range ±10°, default 0°.",
+  "hint.output_offset_x": "Post-stabilization X shift of the output buffer only; percentage of buffer width. Range ±50%, default 0%.",
+  "hint.output_offset_y": "Post-stabilization Y shift of the output buffer only; percentage of buffer height. Range ±50%, default 0%.",
 
   "option.integration_none": "없음",
   "option.integration_complementary": "상보 필터",

@@ -203,6 +203,12 @@ pub enum Params {
     KeyframesGroup, KeyframesGroupEnd,
     UseGyroflowsKeyframes,
     RecalculateKeyframes,
+    // openfx-output-adjust-affine: output-stage post-affine UI (OpenFX only).
+    OutputAdjustGroup, OutputAdjustGroupEnd,
+    OutputZoom,
+    OutputRotation,
+    OutputOffsetX,
+    OutputOffsetY,
     OutputSizeGroup, OutputSizeGroupEnd,
     OutputWidth,
     OutputHeight,
@@ -413,7 +419,7 @@ impl GyroflowPluginBase {
         }
     }
 
-    pub fn get_param_definitions() -> [ParameterType; 12] {
+    pub fn get_param_definitions() -> [ParameterType; 13] {
         [
             ParameterType::HiddenString { id: "InstanceId" },
             ParameterType::HiddenString { id: "ProjectPath" },
@@ -474,6 +480,14 @@ impl GyroflowPluginBase {
                 ParameterType::Checkbox { id: "StabilizationSpeedRamp",  label: t!("label.stabilization_speed_ramp"),  hint: t!("hint.stabilization_speed_ramp"),  default: true,  hidden: true },
                 ParameterType::Button   { id: "RecalculateKeyframes",    label: t!("label.recalculate_keyframes"),     hint: t!("hint.recalculate_keyframes"),       hidden: true },
                 ParameterType::Button   { id: "CreateCamera",            label: t!("label.create_camera"),             hint: t!("hint.create_camera"),               hidden: true },
+            ] },
+            // openfx-output-adjust-affine: collapsed by default, identity defaults.
+            // OpenFX render path reads these; Adobe/frei0r ignore them.
+            ParameterType::Group { id: "OutputAdjustGroup", label: t!("group.output_adjust"), opened: false, hidden: false, parameters: vec![
+                ParameterType::Slider { id: "OutputZoom",     label: t!("label.output_zoom"),     hint: t!("hint.output_zoom"),     min:  0.5, max:  2.0, default: 1.0, hidden: false },
+                ParameterType::Slider { id: "OutputRotation", label: t!("label.output_rotation"), hint: t!("hint.output_rotation"), min: -10.0, max: 10.0, default: 0.0, hidden: false },
+                ParameterType::Slider { id: "OutputOffsetX",  label: t!("label.output_offset_x"), hint: t!("hint.output_offset_x"), min: -50.0, max: 50.0, default: 0.0, hidden: false },
+                ParameterType::Slider { id: "OutputOffsetY",  label: t!("label.output_offset_y"), hint: t!("hint.output_offset_y"), min: -50.0, max: 50.0, default: 0.0, hidden: false },
             ] },
             ParameterType::Group { id: "OutputSizeGroup", label: t!("group.output_size"), opened: false, hidden: true, parameters: vec![
                 ParameterType::Slider   { id: "OutputWidth",          label: t!("label.output_width"),           hint: t!("hint.output_width"),           min: 1.0, max: 16384.0, default: 3840.0, hidden: true },
