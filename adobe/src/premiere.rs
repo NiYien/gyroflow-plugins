@@ -225,8 +225,8 @@ impl pr::GpuFilter for PremiereGPU {
                     let input_rotation = -(input_rotation_deg_from_index(params.get_i32(Params::InputRotation).unwrap_or(0)) as f32);
 
                     let mut buffers = Buffers {
-                        input:  BufferDescription { size: src_size,  rect: None,           data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None },
-                        output: BufferDescription { size: dest_size, rect: Some(out_rect), data: buffers.1, rotation: None,                 texture_copy: buffers.2, post_affine: None }
+                        input:  BufferDescription { size: src_size,  rect: None,           data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false },
+                        output: BufferDescription { size: dest_size, rect: Some(out_rect), data: buffers.1, rotation: None,                 texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false }
                     };
                     if let Err(e) = match pixel_format {
                         pr::PixelFormat::GpuBgra4444_32f => stab.process_pixels::<RGBAf>(timestamp_us, None, &mut buffers),

@@ -209,6 +209,9 @@ pub enum Params {
     OutputRotation,
     OutputOffsetX,
     OutputOffsetY,
+    // openfx-output-adjust-flip: post-stab mirror toggles, OpenFX only.
+    FlipHorizontal,
+    FlipVertical,
     OutputSizeGroup, OutputSizeGroupEnd,
     OutputWidth,
     OutputHeight,
@@ -483,11 +486,16 @@ impl GyroflowPluginBase {
             ] },
             // openfx-output-adjust-affine: collapsed by default, identity defaults.
             // OpenFX render path reads these; Adobe/frei0r ignore them.
+            // openfx-output-adjust-flip (2026-05-22): zoom range tightened from [0.5, 2.0]
+            // to [1.0, 4.0] to sidestep the sample-out-of-bounds jitter that exposed itself
+            // when zoom < 1.0. Two Boolean flip toggles added after the four sliders.
             ParameterType::Group { id: "OutputAdjustGroup", label: t!("group.output_adjust"), opened: false, hidden: false, parameters: vec![
-                ParameterType::Slider { id: "OutputZoom",     label: t!("label.output_zoom"),     hint: t!("hint.output_zoom"),     min:  0.5, max:  2.0, default: 1.0, hidden: false },
-                ParameterType::Slider { id: "OutputRotation", label: t!("label.output_rotation"), hint: t!("hint.output_rotation"), min: -10.0, max: 10.0, default: 0.0, hidden: false },
-                ParameterType::Slider { id: "OutputOffsetX",  label: t!("label.output_offset_x"), hint: t!("hint.output_offset_x"), min: -50.0, max: 50.0, default: 0.0, hidden: false },
-                ParameterType::Slider { id: "OutputOffsetY",  label: t!("label.output_offset_y"), hint: t!("hint.output_offset_y"), min: -50.0, max: 50.0, default: 0.0, hidden: false },
+                ParameterType::Slider  { id: "OutputZoom",     label: t!("label.output_zoom"),     hint: t!("hint.output_zoom"),     min:  1.0, max:  4.0, default: 1.0, hidden: false },
+                ParameterType::Slider  { id: "OutputRotation", label: t!("label.output_rotation"), hint: t!("hint.output_rotation"), min: -10.0, max: 10.0, default: 0.0, hidden: false },
+                ParameterType::Slider  { id: "OutputOffsetX",  label: t!("label.output_offset_x"), hint: t!("hint.output_offset_x"), min: -50.0, max: 50.0, default: 0.0, hidden: false },
+                ParameterType::Slider  { id: "OutputOffsetY",  label: t!("label.output_offset_y"), hint: t!("hint.output_offset_y"), min: -50.0, max: 50.0, default: 0.0, hidden: false },
+                ParameterType::Checkbox { id: "FlipHorizontal", label: t!("label.flip_horizontal"), hint: t!("hint.flip_horizontal"), default: false, hidden: false },
+                ParameterType::Checkbox { id: "FlipVertical",   label: t!("label.flip_vertical"),   hint: t!("hint.flip_vertical"),   default: false, hidden: false },
             ] },
             ParameterType::Group { id: "OutputSizeGroup", label: t!("group.output_size"), opened: false, hidden: true, parameters: vec![
                 ParameterType::Slider   { id: "OutputWidth",          label: t!("label.output_width"),           hint: t!("hint.output_width"),           min: 1.0, max: 16384.0, default: 3840.0, hidden: true },

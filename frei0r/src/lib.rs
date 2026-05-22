@@ -235,6 +235,8 @@ extern "C" fn f0r_update(instance: f0r_instance_t, time: f64, inframe: *const u3
             rotation: None,
             texture_copy: false,
             post_affine: None,
+            flip_h: false,
+            flip_v: false,
         },
         output: BufferDescription {
             size: src_size,
@@ -243,6 +245,8 @@ extern "C" fn f0r_update(instance: f0r_instance_t, time: f64, inframe: *const u3
             rotation: None,
             texture_copy: false,
             post_affine: None,
+            flip_h: false,
+            flip_v: false,
         }
     };
 

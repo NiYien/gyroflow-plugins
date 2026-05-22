@@ -192,6 +192,10 @@ define_params!(ParamHandler {
         DontDrawOutside       => dont_draw_outside:       ParamHandle<bool>,
         IncludeProjectData    => include_project_data:    ParamHandle<bool>,
         UseGyroflowsKeyframes => use_gyroflows_keyframes: ParamHandle<bool>,
+        // openfx-output-adjust-flip: must be listed here, else the macro-generated
+        // get_bool_at_time match falls through to panic!("Wrong parameter type") on these.
+        FlipHorizontal        => flip_horizontal:         ParamHandle<bool>,
+        FlipVertical          => flip_vertical:           ParamHandle<bool>,
     ],
     f64s: [
         Fov                   => fov:                      ParamHandle<Double>,
@@ -1270,6 +1274,9 @@ impl Execute for GyroflowPlugin {
                 // (host may keyframe them) and assemble PostAffine. Fusion page bypasses
                 // (D7); identity values also bypass to short-circuit the cache-invalidate
                 // path even though the kernel block self-short-circuits too (D4).
+                // openfx-output-adjust-flip (2026-05-22): zoom range is now [1.0, 4.0] to
+                // sidestep the sample-out-of-bounds bug at zoom<1; a future change can
+                // re-extend the lower bound after reordering the post-affine in shaders.
                 let output_post_affine: Option<PostAffine> = if instance_data.is_fusion_page {
                     None
                 } else {
@@ -1277,7 +1284,7 @@ impl Execute for GyroflowPlugin {
                     let raw_rot  = instance_data.params.get_f64_at_time(Params::OutputRotation, TimeType::Frame(time)).unwrap_or(0.0);
                     let raw_ox   = instance_data.params.get_f64_at_time(Params::OutputOffsetX,  TimeType::Frame(time)).unwrap_or(0.0);
                     let raw_oy   = instance_data.params.get_f64_at_time(Params::OutputOffsetY,  TimeType::Frame(time)).unwrap_or(0.0);
-                    let zoom   = raw_zoom.clamp(0.5, 2.0) as f32;
+                    let zoom   = raw_zoom.clamp(1.0, 4.0) as f32;
                     let rot    = raw_rot .clamp(-10.0, 10.0) as f32;
                     let off_x  = (raw_ox / 100.0).clamp(-0.5, 0.5) as f32;
                     let off_y  = (raw_oy / 100.0).clamp(-0.5, 0.5) as f32;
@@ -1287,6 +1294,19 @@ impl Execute for GyroflowPlugin {
                         log::info!(target: "app", "output_post_affine zoom={zoom} rot={rot} off=({off_x},{off_y})");
                         Some(PostAffine { rotation_deg: rot, zoom, offset_norm: [off_x, off_y] })
                     }
+                };
+
+                // openfx-output-adjust-flip: read the two checkboxes and apply Fusion-page
+                // bypass (matches the post-affine bypass pattern above, D7 precedent).
+                let (output_flip_h, output_flip_v): (bool, bool) = if instance_data.is_fusion_page {
+                    (false, false)
+                } else {
+                    let raw_flip_h = instance_data.params.get_bool_at_time(Params::FlipHorizontal, TimeType::Frame(time)).unwrap_or(false);
+                    let raw_flip_v = instance_data.params.get_bool_at_time(Params::FlipVertical,   TimeType::Frame(time)).unwrap_or(false);
+                    if raw_flip_h || raw_flip_v {
+                        log::info!(target: "app", "output_flip h={raw_flip_h} v={raw_flip_v}");
+                    }
+                    (raw_flip_h, raw_flip_v)
                 };
 
                 // log::debug!("src_size: {src_size:?} | src_rect: {src_rect:?}");
@@ -1371,8 +1391,8 @@ impl Execute for GyroflowPlugin {
 
                 if let Some(buffers) = buffers {
                     let mut buffers = Buffers {
-                        input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2, post_affine: None },
-                        output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine }
+                        input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2, post_affine: None,               flip_h: false,         flip_v: false         },
+                        output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine, flip_h: output_flip_h, flip_v: output_flip_v }
                     };
 
                     let processed = match output_image.get_pixel_depth()? {
@@ -1456,6 +1476,9 @@ impl Execute for GyroflowPlugin {
                         output_rotation_param:    param_set.parameter("OutputRotation")?,
                         output_offset_x:          param_set.parameter("OutputOffsetX")?,
                         output_offset_y:          param_set.parameter("OutputOffsetY")?,
+                        // openfx-output-adjust-flip: fetch handles for the 2 checkboxes.
+                        flip_horizontal:          param_set.parameter("FlipHorizontal")?,
+                        flip_vertical:            param_set.parameter("FlipVertical")?,
                         interpolation:            param_set.parameter("Interpolation")?,
                         integration_method:       param_set.parameter("IntegrationMethod")?,
                         zoom_mode:                param_set.parameter("ZoomMode")?,

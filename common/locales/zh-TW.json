@@ -47,6 +47,8 @@
   "label.output_rotation": "輸出旋轉 (±10°)",
   "label.output_offset_x": "輸出 X 偏移 (%)",
   "label.output_offset_y": "輸出 Y 偏移 (%)",
+  "label.flip_horizontal": "水平翻轉",
+  "label.flip_vertical": "垂直翻轉",
 
   "hint.status": "狀態",
   "hint.load_current": "嘗試為目前影片檔載入專案檔，或直接穩定該影片檔",
@@ -84,10 +86,12 @@
   "hint.loaded_project": "已載入的專案或影片檔",
   "hint.loaded_preset": "已載入預設",
   "hint.loaded_lens": "已載入鏡頭設定檔",
-  "hint.output_zoom": "僅對輸出緩衝做穩定後縮放，不影響穩定運算。範圍 0.5x–2.0x，預設 1.0x。",
+  "hint.output_zoom": "僅對輸出緩衝做穩定後縮放，不影響穩定運算。範圍 1.0x–4.0x，預設 1.0x。",
   "hint.output_rotation": "僅對輸出緩衝做穩定後旋轉，用於水平微調。範圍 ±10°，預設 0°。",
   "hint.output_offset_x": "僅對輸出緩衝做穩定後 X 平移，按緩衝寬度百分比。範圍 ±50%，預設 0%。",
   "hint.output_offset_y": "僅對輸出緩衝做穩定後 Y 平移，按緩衝高度百分比。範圍 ±50%，預設 0%。",
+  "hint.flip_horizontal": "將穩定後的輸出左右鏡像（在其他輸出調整之前套用）。",
+  "hint.flip_vertical": "將穩定後的輸出上下鏡像（在其他輸出調整之前套用）。",
 
   "option.integration_none": "無",
   "option.integration_complementary": "互補濾波",

@@ -47,6 +47,8 @@
   "label.output_rotation": "输出旋转 (±10°)",
   "label.output_offset_x": "输出 X 偏移 (%)",
   "label.output_offset_y": "输出 Y 偏移 (%)",
+  "label.flip_horizontal": "水平翻转",
+  "label.flip_vertical": "竖直翻转",
 
   "hint.status": "状态",
   "hint.load_current": "尝试为当前视频文件加载项目文件，或直接稳定该视频文件",
@@ -84,10 +86,12 @@
   "hint.loaded_project": "已加载的项目或视频文件",
   "hint.loaded_preset": "已加载预设",
   "hint.loaded_lens": "已加载镜头配置",
-  "hint.output_zoom": "仅对输出缓冲做稳定后缩放，不影响稳定运算。范围 0.5x–2.0x，默认 1.0x。",
+  "hint.output_zoom": "仅对输出缓冲做稳定后缩放，不影响稳定运算。范围 1.0x–4.0x，默认 1.0x。",
   "hint.output_rotation": "仅对输出缓冲做稳定后旋转，用于水平微调。范围 ±10°，默认 0°。",
   "hint.output_offset_x": "仅对输出缓冲做稳定后 X 平移，按缓冲宽度百分比。范围 ±50%，默认 0%。",
   "hint.output_offset_y": "仅对输出缓冲做稳定后 Y 平移，按缓冲高度百分比。范围 ±50%，默认 0%。",
+  "hint.flip_horizontal": "将稳定后的输出左右镜像（在其他输出调整之前应用）。",
+  "hint.flip_vertical": "将稳定后的输出上下镜像（在其他输出调整之前应用）。",
 
   "option.integration_none": "无",
   "option.integration_complementary": "互补滤波",
