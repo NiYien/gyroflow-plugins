@@ -104,6 +104,10 @@ impl CrossThreadInstance {
             anamorphic_adjust_size:         false,
             always_set_input_rotation:      true,
             auto_disable_stretch:           true,
+            // Adobe never enables the OpenFX-only load-time InputRotation step; with the flag
+            // off the shared stab-manager load path is byte-identical to before that step existed.
+            apply_input_rotation_on_load:   false,
+            original_project_rotation:      None,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false,
                 cached_keyframes:         KeyframeManager::default()

@@ -586,6 +586,21 @@ pub struct GyroflowPluginBaseInstance {
     pub auto_disable_stretch: bool,
 
     pub opencl_disabled: bool,
+
+    // Gate for the load-time InputRotation step in `stab_manager` (openfx-restore-rotation-order).
+    // Only the OpenFX plugin enables this (per call, Edit/Color pages only); Adobe and frei0r
+    // never set it, keeping their load path byte-identical to before the step existed.
+    // Not persisted: the owning wrapper re-decides it on every `stab_manager` call.
+    #[serde(skip)]
+    pub apply_input_rotation_on_load: bool,
+
+    // The project's rotation as imported (`stab.params.video_rotation` right after import,
+    // before any mutation or runtime InputRotation override touches it). Re-captured on every
+    // cache-miss rebuild; single source of truth for "InputRotation = 0°" semantics. Not
+    // persisted by design — it must always be re-derived from the project itself (spec:
+    // "Original project rotation survives restore").
+    #[serde(skip)]
+    pub original_project_rotation: Option<f64>,
 }
 impl Clone for GyroflowPluginBaseInstance {
     fn clone(&self) -> Self {
@@ -605,6 +620,8 @@ impl Clone for GyroflowPluginBaseInstance {
             anamorphic_adjust_size:         self.anamorphic_adjust_size,
             always_set_input_rotation:      self.always_set_input_rotation,
             auto_disable_stretch:           self.auto_disable_stretch,
+            apply_input_rotation_on_load:   self.apply_input_rotation_on_load,
+            original_project_rotation:      self.original_project_rotation,
             keyframable_params:             Arc::new(RwLock::new(self.keyframable_params.read().clone())),
         }
     }
@@ -627,6 +644,8 @@ impl Default for GyroflowPluginBaseInstance {
             anamorphic_adjust_size:         true,
             always_set_input_rotation:      false,
             auto_disable_stretch:           true,
+            apply_input_rotation_on_load:   false,
+            original_project_rotation:      None,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false, // TODO param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                 cached_keyframes:         KeyframeManager::default()
@@ -675,6 +694,83 @@ pub fn input_rotation_index_from_deg(deg: f64) -> i32 {
         180 => 3,
         _ => 0,
     }
+}
+
+// ------------------------------------------------------------------------------------------------
+// InputRotation runtime-override geometry (openfx-restore-rotation-order).
+// Hoisted from openfx/src/gyroflow.rs so the gated load-time rotation step in `stab_manager`
+// and the OpenFX render-path override share one implementation (no logic fork). These are pure
+// functions plus one in-place stab mutation; invalidation/recompute policy stays with the caller
+// (the load path relies on the §11.4 snapshot diff, the OpenFX live-edit path invalidates
+// zooming/undistortion explicitly).
+// ------------------------------------------------------------------------------------------------
+
+/// Normalize an arbitrary rotation in degrees to a quarter-turn bucket in `[0, 360)`.
+pub fn normalized_quarter_turn_deg(deg: f64) -> i32 {
+    let rounded = deg.round() as i32;
+    ((rounded % 360) + 360) % 360
+}
+
+/// `true` when the rotation swaps width/height (90° or 270°).
+pub fn is_sideways_rotation(deg: f64) -> bool {
+    matches!(normalized_quarter_turn_deg(deg), 90 | 270)
+}
+
+/// Resolve the effective `video_rotation` implied by the `InputRotation` dropdown against the
+/// project's original rotation. Returns `None` when the target already matches the stab's
+/// current rotation (idempotence early-out), `Some(target)` when a change must be applied.
+pub fn input_rotation_target_rotation(
+    project_rotation: f64,
+    current_video_rotation: f64,
+    input_rotation_index: i32,
+) -> Option<f64> {
+    let input_rotation = input_rotation_deg_from_index(input_rotation_index);
+    let target_rotation = if normalized_quarter_turn_deg(input_rotation) == 0 {
+        project_rotation
+    } else {
+        input_rotation
+    };
+
+    if normalized_quarter_turn_deg(target_rotation) == normalized_quarter_turn_deg(current_video_rotation) {
+        None
+    } else {
+        Some(target_rotation)
+    }
+}
+
+/// Transpose the requested output size when the target rotation changes sideways parity
+/// relative to the project rotation.
+pub fn input_rotation_output_size(project_rotation: f64, target_rotation: f64, output_width: usize, output_height: usize) -> (usize, usize) {
+    if is_sideways_rotation(project_rotation) != is_sideways_rotation(target_rotation) {
+        (output_height, output_width)
+    } else {
+        (output_width, output_height)
+    }
+}
+
+/// Apply the InputRotation-implied `video_rotation` + `output_size` transpose to a stab manager
+/// in place. Returns the effective rotation when a change was applied, `None` when the target
+/// already matches (no mutation). Performs NO invalidation or recompute — callers decide:
+/// the load-time step lets the post-mutation snapshot diff fire the single recompute, while the
+/// OpenFX render/live-edit wrapper invalidates zooming/undistortion itself.
+/// Note the order: `video_rotation` is written first so `set_output_size`'s aspect constraint
+/// (`constrained_output_size` in gyroflow-core) sees the rotated input orientation.
+pub fn apply_input_rotation_to_stab(
+    project_rotation: f64,
+    input_rotation_index: i32,
+    output_size: (usize, usize),
+    stab: &StabilizationManager,
+) -> Option<f64> {
+    let current_video_rotation = stab.params.read().video_rotation;
+    let target_rotation = input_rotation_target_rotation(project_rotation, current_video_rotation, input_rotation_index)?;
+    {
+        let mut stab_params = stab.params.write();
+        stab_params.video_rotation = target_rotation;
+    }
+    let output_size = input_rotation_output_size(project_rotation, target_rotation, output_size.0, output_size.1);
+    stab.set_output_size(output_size.0, output_size.1);
+
+    Some(target_rotation)
 }
 
 impl GyroflowPluginBaseInstance {
@@ -820,6 +916,27 @@ impl GyroflowPluginBaseInstance {
             }
         }
         Ok(())
+    }
+
+    // Gated load-time InputRotation step (openfx-restore-rotation-order D1). Called from the
+    // cache-miss mutation block in `stab_manager`. Returns the effective rotation when a
+    // rotation + output-size transpose was applied to the stab, `None` when the step is
+    // disabled (flag unset — Adobe/frei0r/Fusion), no project rotation was captured yet, or
+    // the InputRotation target already matches the stab's current rotation (no mutation).
+    // Reads the same param inputs as the OpenFX render-path override
+    // (`InputRotation` + `OutputWidth`/`OutputHeight`), so that override's
+    // target-== -current early-out makes it a no-op on freshly rebuilt stabs.
+    pub fn maybe_apply_input_rotation_on_load(&self, params: &dyn GyroflowPluginParams, stab: &StabilizationManager) -> Option<f64> {
+        if !self.apply_input_rotation_on_load {
+            return None;
+        }
+        let project_rotation = self.original_project_rotation?;
+        let input_rotation_index = params.get_i32(Params::InputRotation).ok()?;
+        let output_size = (
+            params.get_f64(Params::OutputWidth).ok()? as usize,
+            params.get_f64(Params::OutputHeight).ok()? as usize,
+        );
+        apply_input_rotation_to_stab(project_rotation, input_rotation_index, output_size, stab)
     }
 
     pub fn stab_manager(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, out_size: (usize, usize), open_gyroflow_if_no_data: bool) -> PluginResult<Arc<StabilizationManager>> {
@@ -1002,6 +1119,10 @@ impl GyroflowPluginBaseInstance {
                 let gf_params = stab.params.read();
                 self.original_video_size = gf_params.size;
                 self.original_output_size = gf_params.output_size;
+                // Capture the project's rotation as imported, before the mutation block below or
+                // any runtime InputRotation override can touch it. Re-captured on every cache-miss
+                // rebuild — never read back from a parameter the override writes (design D2).
+                self.original_project_rotation = Some(gf_params.video_rotation);
                 self.num_frames = gf_params.frame_count;
                 self.fps = gf_params.fps;
                 let loaded = gf_params.duration_ms > 0.0;
@@ -1124,6 +1245,22 @@ impl GyroflowPluginBaseInstance {
 
             stab.init_size();
             stab.set_output_size(params.get_f64(Params::OutputWidth)? as _, params.get_f64(Params::OutputHeight)? as _);
+
+            // Load-time InputRotation step (openfx-restore-rotation-order D1): apply the
+            // InputRotation-implied video_rotation + output_size transpose before the §11.4
+            // post-mutation snapshot, so the first recompute after a rebuild never observes the
+            // hybrid "rotated content + untransposed output_size" state (which made the core
+            // Max-Zoom limiter misclassify every frame on host restore). Must run after the
+            // `set_output_size(OutputWidth/Height)` call above — that call would otherwise
+            // overwrite the transposed size with the persisted landscape params — and before the
+            // ZoomMode bucket-preserve step below. Gated by an instance flag that only the OpenFX
+            // plugin enables (Edit/Color pages); Adobe/frei0r never set it (flag defaults false),
+            // keeping their load path byte-identical. When InputRotation already matches the
+            // project rotation (fresh drop, landscape clips) this is a no-op and the
+            // skip-recompute fast path is preserved.
+            if let Some(effective_rotation) = self.maybe_apply_input_rotation_on_load(&*params, &stab) {
+                log::info!(target: "stab.load", "load-time input rotation applied: effective_rotation={} output_size={:?}", effective_rotation, stab.params.read().output_size);
+            }
 
             self.set_keyframe_provider(&stab);
 
@@ -1744,6 +1881,118 @@ mod tests {
         assert_eq!(check_not_found_cache(&path).as_deref(), Some("boom"));
         clear_not_found(&path);
         assert!(check_not_found_cache(&path).is_none());
+    }
+
+    // ============================================================================================
+    // Load-time InputRotation step (openfx-restore-rotation-order). Mirrors the call inside
+    // `stab_manager`'s mutation block: the step runs between `set_output_size(OutputWidth/Height)`
+    // and the §11.4 post_snapshot, so its mutations are exactly what the snapshot diff sees.
+    // ============================================================================================
+
+    // Build a stab manager that mimics the post-import state of the reproduction project:
+    // landscape 2048x1080 source, video_rotation = 0 (the .gyroflow's value).
+    fn landscape_project_stab() -> StabilizationManager {
+        let stab = StabilizationManager::default();
+        {
+            let mut p = stab.params.write();
+            p.size = (2048, 1080);
+            p.output_size = (2048, 1080);
+            p.video_rotation = 0.0;
+        }
+        stab
+    }
+
+    // Params as persisted by the host on restore: InputRotation = 90° left (index 1), the
+    // OutputWidth/Height params still hold the landscape project values.
+    fn restored_rotation_params() -> TestParams {
+        let mut params = TestParams::default();
+        params.set_i32(Params::InputRotation, 1).unwrap();
+        params.set_f64(Params::OutputWidth, 2048.0).unwrap();
+        params.set_f64(Params::OutputHeight, 1080.0).unwrap();
+        params
+    }
+
+    // (a) Flag off (Adobe / frei0r / Fusion): the step is unreachable and the stab is untouched —
+    // the byte-identical guarantee for non-OpenFX consumers of `stab_manager`.
+    #[test]
+    fn load_time_rotation_step_flag_off_leaves_stab_untouched() {
+        let instance = GyroflowPluginBaseInstance {
+            original_project_rotation: Some(0.0),
+            ..Default::default() // apply_input_rotation_on_load defaults to false
+        };
+        let params = restored_rotation_params();
+        let stab = landscape_project_stab();
+
+        let pre = snapshot_compute_inputs(&stab);
+        assert_eq!(instance.maybe_apply_input_rotation_on_load(&params, &stab), None);
+        let post = snapshot_compute_inputs(&stab);
+
+        assert_eq!(pre, post);
+        assert_eq!(stab.params.read().video_rotation, 0.0);
+        assert_eq!(stab.params.read().output_size, (2048, 1080));
+    }
+
+    // (b) Flag on + restored InputRotation=90 + landscape project: the step transposes the output
+    // before the snapshot diff, so the single post-mutation recompute runs on portrait geometry
+    // (the diff includes "output_size" — the recompute fires, on the correct size).
+    #[test]
+    fn load_time_rotation_step_transposes_output_before_snapshot_diff() {
+        let instance = GyroflowPluginBaseInstance {
+            apply_input_rotation_on_load: true,
+            original_project_rotation: Some(0.0),
+            ..Default::default()
+        };
+        let params = restored_rotation_params();
+        let stab = landscape_project_stab();
+
+        let pre = snapshot_compute_inputs(&stab);
+        assert_eq!(instance.maybe_apply_input_rotation_on_load(&params, &stab), Some(90.0));
+        let post = snapshot_compute_inputs(&stab);
+
+        assert_eq!(stab.params.read().video_rotation, 90.0);
+        assert_eq!(stab.params.read().output_size, (1080, 2048));
+        let diff = pre.diff(&post);
+        assert!(diff.contains(&"output_size"), "diff={diff:?}");
+        assert!(diff.contains(&"video_rotation"), "diff={diff:?}");
+    }
+
+    // (c) Flag on + InputRotation matching the project rotation (fresh drop on a landscape clip):
+    // the step is a no-op and the skip-recompute fast path (equal snapshots) is preserved.
+    #[test]
+    fn load_time_rotation_step_matching_rotation_keeps_fast_path() {
+        let instance = GyroflowPluginBaseInstance {
+            apply_input_rotation_on_load: true,
+            original_project_rotation: Some(0.0),
+            ..Default::default()
+        };
+        let mut params = restored_rotation_params();
+        params.set_i32(Params::InputRotation, 0).unwrap(); // 0° == project rotation
+
+        let stab = landscape_project_stab();
+
+        let pre = snapshot_compute_inputs(&stab);
+        assert_eq!(instance.maybe_apply_input_rotation_on_load(&params, &stab), None);
+        let post = snapshot_compute_inputs(&stab);
+
+        assert_eq!(pre, post);
+        assert!(pre.diff(&post).is_empty());
+    }
+
+    // Flag on but no project rotation captured yet (defensive: capture happens right after
+    // import in the cache-miss branch, so this state should not occur in practice).
+    #[test]
+    fn load_time_rotation_step_without_captured_rotation_is_noop() {
+        let instance = GyroflowPluginBaseInstance {
+            apply_input_rotation_on_load: true,
+            original_project_rotation: None,
+            ..Default::default()
+        };
+        let params = restored_rotation_params();
+        let stab = landscape_project_stab();
+
+        assert_eq!(instance.maybe_apply_input_rotation_on_load(&params, &stab), None);
+        assert_eq!(stab.params.read().video_rotation, 0.0);
+        assert_eq!(stab.params.read().output_size, (2048, 1080));
     }
 }
 

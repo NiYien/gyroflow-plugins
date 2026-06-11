@@ -374,6 +374,14 @@ impl InstanceData {
             }
         }
 
+        // Enable the gated load-time InputRotation step in the shared stab-manager load path
+        // (openfx-restore-rotation-order D1): on a cache-miss rebuild the InputRotation-implied
+        // rotation + output-size transpose is applied before the post-mutation recompute, so a
+        // host-restored ZoomMode never recomputes on the hybrid "rotated content + landscape
+        // output_size" state. Decided per call: Fusion keeps the step disabled (the render-path
+        // override is skipped there too), and Adobe/frei0r never touch this flag (default false).
+        self.plugin.apply_input_rotation_on_load = !self.is_fusion_page;
+
         let stab = self.plugin.stab_manager(&mut self.params, manager_cache, out_size, loading_pending_video_file).map_err(|e| {
             log::error!("plugin.stab_manager error: {e:?}");
             Error::UnknownError
@@ -701,44 +709,18 @@ fn merge_paste_priority(
     MergeOutcome { value: project_default, host_manual_flag: false }
 }
 
-fn normalized_quarter_turn_deg(deg: f64) -> i32 {
-    let rounded = deg.round() as i32;
-    ((rounded % 360) + 360) % 360
-}
+// The rotation geometry (`input_rotation_target_rotation`, `input_rotation_output_size`,
+// `apply_input_rotation_to_stab`) lives in gyroflow-plugin-base since
+// openfx-restore-rotation-order — shared with the gated load-time rotation step inside the
+// common `stab_manager` so the two paths can never fork.
 
-fn is_sideways_rotation(deg: f64) -> bool {
-    matches!(normalized_quarter_turn_deg(deg), 90 | 270)
-}
-
-fn openfx_target_rotation(
-    project_rotation: f64,
-    current_video_rotation: f64,
-    input_rotation_index: i32,
-) -> Option<f64> {
-    let input_rotation = input_rotation_deg_from_index(input_rotation_index);
-    let target_rotation = if normalized_quarter_turn_deg(input_rotation) == 0 {
-        project_rotation
-    } else {
-        input_rotation
-    };
-
-    if normalized_quarter_turn_deg(target_rotation) == normalized_quarter_turn_deg(current_video_rotation) {
-        None
-    } else {
-        Some(target_rotation)
-    }
-}
-
-fn openfx_runtime_output_size(project_rotation: f64, target_rotation: f64, output_width: usize, output_height: usize) -> (usize, usize) {
-    if is_sideways_rotation(project_rotation) != is_sideways_rotation(target_rotation) {
-        (output_height, output_width)
-    } else {
-        (output_width, output_height)
-    }
-}
-
-fn openfx_project_rotation(project_video_rotation: &mut Option<f64>, rotation_param: f64) -> f64 {
-    *project_video_rotation.get_or_insert(rotation_param)
+fn openfx_project_rotation(project_video_rotation: &mut Option<f64>, original_project_rotation: Option<f64>, rotation_param: f64) -> f64 {
+    // Prefer the rotation captured at import time (re-derived on every cache-miss rebuild —
+    // the single source of truth, design D2). The `Rotation` param is written with the
+    // *effective* rotation by the override itself and persisted by the host, so after a
+    // restore it no longer holds the project's original rotation; reading it back is only a
+    // legacy fallback for the window where no import has populated the captured value yet.
+    *project_video_rotation.get_or_insert_with(|| original_project_rotation.unwrap_or(rotation_param))
 }
 
 // Capture the 5 incoming `(host_value, host_manual_flag)` pairs before the shared reload
@@ -793,14 +775,12 @@ fn apply_openfx_rotation_to_stab(
     output_size: (usize, usize),
     stab: &StabilizationManager,
 ) -> Option<f64> {
-    let current_video_rotation = stab.params.read().video_rotation;
-    let target_rotation = openfx_target_rotation(project_rotation, current_video_rotation, input_rotation_index)?;
-    {
-        let mut stab_params = stab.params.write();
-        stab_params.video_rotation = target_rotation;
-    }
-    let output_size = openfx_runtime_output_size(project_rotation, target_rotation, output_size.0, output_size.1);
-    stab.set_output_size(output_size.0, output_size.1);
+    // Shared in-place mutation (rotation + output-size transpose) from gyroflow-plugin-base;
+    // this OpenFX wrapper adds the live-edit invalidation that the load-time step doesn't
+    // need (there the §11.4 snapshot diff fires the single recompute instead). On a freshly
+    // rebuilt stab the load-time step already applied the transpose, so the shared helper's
+    // target == current early-out returns `None` and nothing is invalidated.
+    let target_rotation = apply_input_rotation_to_stab(project_rotation, input_rotation_index, output_size, stab)?;
     stab.invalidate_blocking_zooming();
     stab.invalidate_blocking_undistortion();
 
@@ -992,7 +972,16 @@ impl Execute for GyroflowPlugin {
                 let output_rect: RectI = output_image.get_region_of_definition()?;
 
                 let stab = instance_data.stab_manager(&self.gyroflow_plugin.manager_cache, output_rect, loading_pending_video_file)?;
-                let project_rotation = *instance_data.project_video_rotation.get_or_insert_with(|| stab.params.read().video_rotation);
+                // Prefer the rotation captured at import time over the stab's current
+                // `video_rotation`: after the load-time rotation step a freshly rebuilt stab
+                // already carries the *effective* rotation (e.g. 90 on a restored portrait
+                // setup), which would poison this cache as "project rotation" and make
+                // flipping InputRotation back to 0° unable to return to the project's native
+                // orientation. The stab fallback only covers the legacy window where no
+                // cache-miss import has populated the captured value (then the stab is
+                // unmutated and its rotation IS the project rotation).
+                let original_rotation = instance_data.plugin.original_project_rotation;
+                let project_rotation = *instance_data.project_video_rotation.get_or_insert_with(|| original_rotation.unwrap_or_else(|| stab.params.read().video_rotation));
                 if apply_openfx_input_rotation_override(
                     instance_data.is_fusion_page,
                     project_rotation,
@@ -1507,6 +1496,11 @@ impl Execute for GyroflowPlugin {
                         always_set_input_rotation:   false,
                         auto_disable_stretch:        true,
                         has_motion:                  false,
+                        // Re-decided per stab_manager call (`!is_fusion_page`); false here only
+                        // until the first call. Rotation capture happens on the first cache-miss
+                        // import (openfx-restore-rotation-order).
+                        apply_input_rotation_on_load: false,
+                        original_project_rotation:    None,
                         keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                             use_gyroflows_keyframes: param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                             cached_keyframes:        KeyframeManager::default()
@@ -1818,6 +1812,7 @@ impl Execute for GyroflowPlugin {
                     if param == Params::InputRotation {
                         let project_rotation = openfx_project_rotation(
                             &mut instance_data.project_video_rotation,
+                            instance_data.plugin.original_project_rotation,
                             instance_data.params.get_f64(Params::Rotation).unwrap_or_default(),
                         );
                         if apply_openfx_input_rotation_override_to_managers(
@@ -2151,8 +2146,9 @@ mod tests {
     use std::time::Duration;
 
     // ============================================================================================
-    // Rotation-mapping helpers (unchanged behavior). The IR-specific wrappers that used to live
-    // here were removed when InputRotation joined the general paste-preserve framework.
+    // Rotation-mapping helpers (geometry shared with gyroflow-plugin-base since
+    // openfx-restore-rotation-order; behavior unchanged). The IR-specific wrappers that used to
+    // live here were removed when InputRotation joined the general paste-preserve framework.
     // ============================================================================================
 
     #[test]
@@ -2171,7 +2167,7 @@ mod tests {
 
         for (project_rotation, current_video_rotation, input_rotation_index, expected) in cases {
             assert_eq!(
-                openfx_target_rotation(project_rotation, current_video_rotation, input_rotation_index),
+                input_rotation_target_rotation(project_rotation, current_video_rotation, input_rotation_index),
                 expected
             );
         }
@@ -2179,19 +2175,32 @@ mod tests {
 
     #[test]
     fn runtime_output_size_swaps_when_rotation_quarter_turn_parity_changes() {
-        assert_eq!(openfx_runtime_output_size(0.0, 90.0, 3840, 2160), (2160, 3840));
-        assert_eq!(openfx_runtime_output_size(0.0, -90.0, 3840, 2160), (2160, 3840));
-        assert_eq!(openfx_runtime_output_size(90.0, 0.0, 2160, 3840), (3840, 2160));
-        assert_eq!(openfx_runtime_output_size(0.0, 180.0, 3840, 2160), (3840, 2160));
-        assert_eq!(openfx_runtime_output_size(90.0, -90.0, 2160, 3840), (2160, 3840));
+        assert_eq!(input_rotation_output_size(0.0, 90.0, 3840, 2160), (2160, 3840));
+        assert_eq!(input_rotation_output_size(0.0, -90.0, 3840, 2160), (2160, 3840));
+        assert_eq!(input_rotation_output_size(90.0, 0.0, 2160, 3840), (3840, 2160));
+        assert_eq!(input_rotation_output_size(0.0, 180.0, 3840, 2160), (3840, 2160));
+        assert_eq!(input_rotation_output_size(90.0, -90.0, 2160, 3840), (2160, 3840));
     }
 
     #[test]
     fn project_rotation_is_captured_once_before_input_rotation_overrides_mutate_rotation_param() {
         let mut project_rotation = None;
 
-        assert_eq!(openfx_project_rotation(&mut project_rotation, 0.0), 0.0);
-        assert_eq!(openfx_project_rotation(&mut project_rotation, 90.0), 0.0);
+        assert_eq!(openfx_project_rotation(&mut project_rotation, None, 0.0), 0.0);
+        assert_eq!(openfx_project_rotation(&mut project_rotation, None, 90.0), 0.0);
+    }
+
+    // D2: the imported project rotation (captured by the common stab_manager on every
+    // cache-miss rebuild) wins over the persisted `Rotation` param, which holds the
+    // *effective* rotation (90) after a restore — not the project's original (0). Without
+    // this preference, flipping InputRotation back to 0° after a restart could never
+    // return to the project's native orientation.
+    #[test]
+    fn project_rotation_prefers_imported_rotation_over_persisted_rotation_param() {
+        let mut project_rotation = None;
+        assert_eq!(openfx_project_rotation(&mut project_rotation, Some(0.0), 90.0), 0.0);
+        // Once seeded, later calls keep the cached value regardless of inputs.
+        assert_eq!(openfx_project_rotation(&mut project_rotation, Some(180.0), 90.0), 0.0);
     }
 
     #[test]
@@ -2208,6 +2217,32 @@ mod tests {
         });
 
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(true));
+    }
+
+    // 2.3: on a freshly rebuilt stab the load-time step (shared helper, runs inside the common
+    // stab_manager's mutation block) already applied the transpose — the render-path override
+    // must then hit the target == current early-out and mutate nothing (no re-transpose, no
+    // invalidation churn, every render stays cheap).
+    #[test]
+    fn render_override_is_noop_after_load_time_rotation_step() {
+        let stab = StabilizationManager::default();
+        {
+            let mut p = stab.params.write();
+            p.size = (2048, 1080);
+            p.output_size = (2048, 1080);
+            p.video_rotation = 0.0;
+        }
+
+        // Load-time step: project rotation 0, restored InputRotation = 90° left (index 1),
+        // OutputWidth/Height params still landscape.
+        assert_eq!(apply_input_rotation_to_stab(0.0, 1, (2048, 1080), &stab), Some(90.0));
+        assert_eq!(stab.params.read().video_rotation, 90.0);
+        assert_eq!(stab.params.read().output_size, (1080, 2048));
+
+        // Render-path override with the same param inputs: idempotent no-op.
+        assert_eq!(apply_openfx_rotation_to_stab(0.0, 1, (2048, 1080), &stab), None);
+        assert_eq!(stab.params.read().video_rotation, 90.0);
+        assert_eq!(stab.params.read().output_size, (1080, 2048));
     }
 
     // ============================================================================================
