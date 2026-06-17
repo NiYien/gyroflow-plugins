@@ -9,8 +9,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 gyroflow-plugin-base = { path = "../common" }
-after-effects = { version = "0.3", git = "https://github.com/virtualritz/after-effects.git", rev = "0e0b197" }
-premiere      = { version = "0.2", git = "https://github.com/virtualritz/after-effects.git", rev = "0e0b197" }
+# CJK encoding fix (change adobe-cjk-encoding): build against the NiYien fork of
+# virtualritz/after-effects (branch niyien-cjk-encoding, rev e55cb119) — routes button /
+# popup labels through the system-code-page conversion set_name already does. Uncomment the
+# path deps below for local fork development.
+after-effects = { version = "0.3", git = "https://github.com/NiYien/after-effects.git", rev = "e55cb119bcf02fb489a58614e9484e26b3cd285c" }
+premiere      = { version = "0.2", git = "https://github.com/NiYien/after-effects.git", rev = "e55cb119bcf02fb489a58614e9484e26b3cd285c" }
 #after-effects = { path = "../../after-effects/after-effects" }
 #premiere = { path = "../../after-effects/premiere" }
 log = "0.4"
@@ -22,6 +26,7 @@ serde_json = "1"
 
 win_dbg_logger = "0.1"
 log-panics = { version = "2.1", features = ["with-backtrace"]}
+ctor = "0.2"
 
 [build-dependencies]
 #pipl = { path = "../../after-effects/pipl" }

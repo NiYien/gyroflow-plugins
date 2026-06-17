@@ -127,15 +127,30 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
             }), ParamFlag::SUPERVISE, ui).unwrap();
         }
         ParameterType::Select { id, label, options, default, hidden, .. } => {
+            // Input-rotation dropdown is removed from the Adobe UI: the geometry path always outputs
+            // the source-native frame and the host's Motion/Transform owns all orientation, so a
+            // plugin-side input rotation is redundant. Hide it (NO_ECW_UI) rather than skipping
+            // registration, to keep the param index slot stable (no host-stored-value shift). The
+            // shared param stays visible for OpenFX. See adobe-output-geometry-fix.
+            let hidden = hidden || id == "InputRotation";
             let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
             params.add_with_flags(Params::from_str(id).unwrap(), label, ae::PopupDef::setup(|f| {
                 f.set_options(&options);
-                f.set_default(options.iter().position(|x| *x == default).unwrap_or(0) as i32);
+                // PF popup `dephault`/`value` are 1-based (item 1 = first option), matching the
+                // +1 / -1 done in set_i32 / get_i32. position() is 0-based, so add 1 or the
+                // registered default lands one item early (e.g. ZoomMode "Dynamic" rendered as
+                // "None" in Premiere, where set_i32 can't correct it at load time).
+                f.set_default(options.iter().position(|x| *x == default).unwrap_or(0) as i32 + 1);
                 f.set_value(f.default());
             }), ParamFlag::SUPERVISE, ui).unwrap();
         }
         ParameterType::Group { id, label, parameters, opened, hidden } => {
             if id == "InfoGroup" { return; }
+            // Output-adjust group is dead UI in Adobe: every render path hardcodes
+            // post_affine: None / flip_h/v: false and never reads these params. Skip
+            // registration entirely (no children registered) and let the user adjust
+            // framing with the host's native Motion / Transform. OpenFX still uses it.
+            if id == "OutputAdjustGroup" { return; }
             // If the whole group is hidden, register each child at the top level (still hidden via its own flag)
             // so that param queries keep working without showing an empty group header.
             if hidden {
@@ -262,7 +277,24 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         if p == Params::OutputWidth || p == Params::OutputHeight {
             let stored = self.stored.read();
             if stored.sequence_size != (0, 0) {
-                return Ok(if p == Params::OutputWidth { stored.sequence_size.0 as f64 } else { stored.sequence_size.1 as f64 });
+                let seq = stored.sequence_size;
+                let src = stored.source_size;
+                // When the clip/source aspect differs from the sequence aspect (e.g. a landscape
+                // clip on a portrait sequence that the user rotates via the host's Motion),
+                // returning the sequence size bakes the sequence aspect into the plugin's own
+                // output framing: out_rect inscribes a narrow strip and the stabilization
+                // output_size gets a mismatched aspect. Output at the source/clip geometry instead
+                // and let the host's Motion/Transform place it into the sequence. The matching-aspect
+                // case (the common case) and the source-unknown case keep returning sequence_size, so
+                // their output geometry is byte-unchanged. See adobe-output-geometry-fix.
+                if src != (0, 0) {
+                    let seq_ratio = seq.0 as f64 / seq.1.max(1) as f64;
+                    let src_ratio = src.0 as f64 / src.1.max(1) as f64;
+                    if (seq_ratio - src_ratio).abs() > 0.01 {
+                        return Ok(if p == Params::OutputWidth { src.0 as f64 } else { src.1 as f64 });
+                    }
+                }
+                return Ok(if p == Params::OutputWidth { seq.0 as f64 } else { seq.1 as f64 });
             }
         }
         if let Some(v) = self.stored.read().pending_params_f64.get(&p) {

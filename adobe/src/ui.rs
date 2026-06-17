@@ -71,11 +71,15 @@ pub fn draw(_in_data: &ae::InData, params: &mut ae::Parameters<Params>, event: &
 
             if !status.is_empty() {
                 let font = supplier.new_default_font(supplier.default_font_size()? * 0.9)?;
-                let text_color = if status == "OK" {
+                // Pick the colour from the status's meaning, not its display text. The status
+                // string is localized (set via t!()), so comparing against English literals like
+                // "OK" always fell through to the red branch in non-English locales (status showed
+                // red during normal operation). Compare against the same localized values instead.
+                let text_color = if status == gyroflow_plugin_base::t!("status.ok") {
                     ae::drawbot::ColorRgba { red: 0.22, green: 0.86, blue: 0.1, alpha: 1.0 } // Green
-                } else if status == "Calculating..." {
+                } else if status == gyroflow_plugin_base::t!("status.calculating") {
                     ae::drawbot::ColorRgba { red: 0.92, green: 0.57, blue: 0.08, alpha: 1.0 } // Yellow
-                } else if status == "---" {
+                } else if status == gyroflow_plugin_base::t!("status.project_not_loaded") || status == "---" {
                     ae::drawbot::ColorRgba { red: 0.8, green: 0.8, blue: 0.8, alpha: 1.0 } // White
                 } else {
                     ae::drawbot::ColorRgba { red: 0.95, green: 0.15, blue: 0.15, alpha: 1.0 } // Red

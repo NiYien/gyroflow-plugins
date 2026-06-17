@@ -17,6 +17,18 @@ use parameters::*;
 
 use serde::{ Serialize, Deserialize };
 
+// Install the plugin file logger from a DLL-load constructor so it wins the process-global `log`
+// slot BEFORE the after-effects entry macro registers `win_dbg_logger` (which would otherwise make
+// our file logger registration fail and leave gyroflow-adobe.log empty — records would only reach
+// the debugger). Only cheap atomic registration happens here; the log file is opened lazily on the
+// first record, outside the Windows loader lock. See `gyroflow_plugin_base::ensure_file_logger`.
+#[ctor::ctor]
+fn install_plugin_file_logger() {
+    let _ = std::panic::catch_unwind(|| {
+        gyroflow_plugin_base::ensure_file_logger("adobe");
+    });
+}
+
 static mut AEGP_PLUGIN_ID: PluginId = 0;
 static mut IS_PREMIERE: bool = false;
 static GLOBAL_INST: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -44,6 +56,12 @@ pub struct StoredParams {
     pub media_file_path: String,
     pub instance_id: String,
     pub sequence_size: (usize, usize),
+    /// Source/clip frame size captured at render time (Premiere GPU path). Transient, never
+    /// persisted (`serde(skip)` keeps the bincode layout stable for old projects). Used to detect
+    /// when the clip aspect differs from the sequence aspect so output geometry is derived from the
+    /// source frame instead of the sequence. See adobe-output-geometry-fix.
+    #[serde(skip)]
+    pub source_size: (usize, usize),
     pub media_fps: f64,
     pub media_fps_ticks: i64,
     pub pending_params_f64: HashMap<Params, f64>,
@@ -62,6 +80,7 @@ impl Default for StoredParams {
             media_file_path: String::new(),
             instance_id: instance_id.clone(),
             sequence_size: (0, 0),
+            source_size: (0, 0),
             media_fps: 0.0,
             media_fps_ticks: 0,
             pending_params_f64: HashMap::new(),
@@ -155,7 +174,7 @@ impl Instance {
                     return Err(Error::UnrecogizedParameterType);
                 }
                 if let Some(stab) = stab {
-                    let RenderData { stab, stored } = stab;
+                    let RenderData { stab, .. } = stab;
                     // log::info!("smart_render: timestamp: {} time: {}, time_step: {}, time_scale: {}, frame: {}, local_frame: {}",
                     //     in_data.current_timestamp(),
                     //     in_data.current_time(),
@@ -236,11 +255,9 @@ impl Instance {
                         )
                     };
 
-                    let input_rotation = {
-                        let params = ParamHandler { inner: ParamsInner::AeRO(plugin.params), stored: stored.clone() };
-                        // `InputRotation` is a dropdown index; map it to degrees.
-                        -(input_rotation_deg_from_index(params.get_i32(Params::InputRotation).unwrap_or(0)) as f32)
-                    };
+                    // Adobe has no Input Rotation control (removed) — the host's Transform owns all
+                    // orientation, so the source buffer is always fed un-rotated.
+                    let input_rotation = 0.0_f32;
 
                     let mut buffers = Buffers {
                         input:  BufferDescription { size: src_size,  rect: None, data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false },
@@ -748,6 +765,17 @@ impl AdobePluginInstance for CrossThreadInstance {
                     extra.set_max_result_rect(extra.result_rect());
                     extra.set_returns_extra_pixels(true);
 
+                    // [adobe-ae-output-geometry §1] Diagnostic: pin the AE buffer/ref/output dims for the
+                    // landscape-footage-in-portrait-comp scenario (whether the portrait quantity is the
+                    // result rect, the output buffer, or the stab output_size). Remove once the fix is
+                    // pinned (that change's Task §4.4).
+                    {
+                        let (seq, src) = { let s = stored.read(); (s.sequence_size, s.source_size) };
+                        let rr = extra.result_rect();
+                        log::info!("[adobe-geom-ae] SmartPreRender in_size=({},{}) ref=({},{}) seq={seq:?} src={src:?} out_wh=({w},{h}) result_rect=({},{},{},{}) ds=({sx},{sy})",
+                            in_data.width(), in_data.height(), in_result.ref_width, in_result.ref_height, rr.left, rr.top, rr.right, rr.bottom);
+                    }
+
                     let full_rect = ae::Rect { left: 0, top: 0, right: w as _, bottom: h as _ };
 
                     if let Some(stab) = _self.stab_manager(&mut params, plugin.global, full_rect) {
@@ -788,6 +816,14 @@ impl AdobePluginInstance for CrossThreadInstance {
                 let (nw, nh) = ((params.get_f64(Params::OutputWidth).unwrap() * sx).round() as u32, (params.get_f64(Params::OutputHeight).unwrap() * sy).round() as u32);
                 plugin.out_data.set_width(nw as _);
                 plugin.out_data.set_height(nh as _);
+
+                // [adobe-ae-output-geometry §1] Diagnostic: pin the AE FrameSetup output buffer. Remove with §4.4.
+                {
+                    let (seq, src) = { let s = _self.stored.read(); (s.sequence_size, s.source_size) };
+                    let eh = out_layer.extent_hint();
+                    log::info!("[adobe-geom-ae] FrameSetup out_buffer=({nw},{nh}) extent_hint=({},{},{},{}) seq={seq:?} src={src:?} ds=({sx},{sy})",
+                        eh.left, eh.top, eh.right, eh.bottom);
+                }
 
                 if let Some(stab) = _self.stab_manager(&mut params, plugin.global, out_layer.extent_hint()) {
                     plugin.out_data.set_frame_data::<RenderData>(RenderData { stab, stored })

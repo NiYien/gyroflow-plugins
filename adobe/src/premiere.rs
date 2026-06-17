@@ -94,6 +94,12 @@ impl pr::GpuFilter for PremiereGPU {
 
                 let mut params = ParamHandler { inner: ParamsInner::Premiere((filter, render_params.clone())), stored: inst.stored.clone() };
 
+                // Capture the source/clip buffer size (Premiere hands the GPU filter a source-native
+                // buffer) so get_f64(OutputWidth/Height) can detect a clip-aspect-vs-sequence-aspect
+                // mismatch and derive output geometry from the source frame instead of the sequence.
+                // Written before any OutputWidth/Height read. See adobe-output-geometry-fix.
+                inst.stored.write().source_size = (in_size.0 as usize, in_size.1 as usize);
+
                 if params.get_bool(Params::StabilizationSpeedRamp).unwrap_or_default() {
                     let kf = if let Ok(pr::PropertyData::Keyframes(kf)) = filter.video_segment_suite.node_property(clip_node, pr::Property::Clip_TimeRemapping) {
                         kf.0.clone()
@@ -178,6 +184,51 @@ impl pr::GpuFilter for PremiereGPU {
                             stab.invalidate_blocking_smoothing();
                         }
                     }*/
+
+                    // adobe-output-geometry-fix (D2): when the clip aspect differs from the sequence
+                    // aspect, the host (Premiere Motion) is orienting the clip, and Premiere hands the
+                    // GPU filter the source-native buffer — out_size is the true clip frame here. Output
+                    // at the clip geometry so the stabilized image fills its own buffer, and neutralize
+                    // any rotation baked into the .gyroflow so the clip is processed purely as landscape
+                    // (the host's Motion owns all orientation), identical to a rotation-free project.
+                    //
+                    // Zeroing stab.params.video_rotation alone is NOT enough: cache_keyframes caches the
+                    // (constant, non-keyframed) Adobe Rotation param as a VideoRotation keyframe at t=0,
+                    // and frame_transform reads that keyframe via the keyframe provider, overriding
+                    // params.video_rotation. So also zero the Adobe Rotation param and rebuild the
+                    // keyframe cache. Gated on the stab actually carrying a rotation / wrong output_size,
+                    // so the (expensive) recompute fires once and a rotation-free clip (e.g. C0016) is
+                    // skipped entirely — byte-unchanged. Matching-aspect clips never enter this branch.
+                    // Read sequence_size via params.stored (an Arc clone of inst.stored) rather than
+                    // inst directly, so this read does not collide with the base_inst (&mut inst.gyroflow)
+                    // borrow held for cache_keyframes below — field borrows through the lock guard are
+                    // not disjoint.
+                    let seq = params.stored.read().sequence_size;
+                    let src_out = (out_size.0 as usize, out_size.1 as usize);
+                    let aspect_mismatch = seq.0 != 0 && seq.1 != 0 && src_out.0 != 0 && src_out.1 != 0
+                        && ((seq.0 as f64 / seq.1 as f64) - (src_out.0 as f64 / src_out.1 as f64)).abs() > 0.01;
+                    if aspect_mismatch {
+                        let needs_fix = {
+                            let p = stab.params.read();
+                            p.video_rotation != 0.0 || p.output_size != src_out
+                        };
+                        if needs_fix {
+                            // Zero the Adobe Rotation param + rebuild the keyframe cache so the cached
+                            // VideoRotation keyframe (read by frame_transform) becomes 0.
+                            let _ = params.set_f64(Params::Rotation, 0.0);
+                            let ugk = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
+                            let nf = base_inst.num_frames;
+                            let kf_fps = base_inst.fps.max(1.0);
+                            base_inst.cache_keyframes(&params, ugk, nf, kf_fps);
+                            // Zero core video_rotation *before* set_output_size so constrained_output_size
+                            // does not transpose the source bounds back into a portrait letterbox.
+                            stab.params.write().video_rotation = 0.0;
+                            stab.set_output_size(src_out.0, src_out.1);
+                            stab.recompute_blocking();
+                            log::info!("[adobe-geom] forced source-native landscape (rotation neutralized): output_size={src_out:?} (sequence={seq:?})");
+                        }
+                    }
+
                     let fps = stab.params.read().fps;
 
                     let fps_ticks = inst.stored.read().media_fps_ticks;
@@ -221,8 +272,9 @@ impl pr::GpuFilter for PremiereGPU {
                         _ => panic!("Invalid GPU framework")
                     };
 
-                    // `InputRotation` is a dropdown index; map it to degrees.
-                    let input_rotation = -(input_rotation_deg_from_index(params.get_i32(Params::InputRotation).unwrap_or(0)) as f32);
+                    // Adobe has no Input Rotation control (removed) — the host's Motion/Transform owns
+                    // all orientation, so the source buffer is always fed un-rotated.
+                    let input_rotation = 0.0_f32;
 
                     let mut buffers = Buffers {
                         input:  BufferDescription { size: src_size,  rect: None,           data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false },

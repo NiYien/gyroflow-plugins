@@ -2,7 +2,6 @@ pub mod i18n;
 
 use lru::LruCache;
 use parking_lot::{ Mutex, RwLock };
-use std::cell::Cell;
 use std::sync::{ Arc, atomic::AtomicBool };
 
 pub use gyroflow_core::{ StabilizationManager, keyframes::*, stabilization::*, filesystem, gpu::* };
@@ -230,8 +229,72 @@ pub enum Params {
     FusionStartFrame,
 }
 
-thread_local! {
-    pub static LOG_INITIALIZED: Cell<bool> = Cell::new(false);
+// ---- Plugin file logger ----
+//
+// The After Effects entry macro (after-effects crate) registers `win_dbg_logger` as the
+// process-global `log` logger at plugin load (PF_Cmd_GLOBAL_SETUP / EntryPointFunc), before any of
+// our command/render code runs. Because `log::set_logger` is one-shot, `simplelog::WriteLogger::init`
+// in the old `initialize_log` then failed silently: `gyroflow-adobe.log` was created (truncated) but
+// never written, and every record went to the debugger only. The Adobe plugin wins the global slot
+// from a DLL-load constructor (see `adobe/src/lib.rs`) that calls `ensure_file_logger` BEFORE the
+// macro. To stay safe under the Windows loader lock, the constructor only performs cheap atomic
+// registration here; the real file open (`data_dir()` -> `SHGetKnownFolderPath`, `File::create`) is
+// deferred to the first emitted record, which happens at command/render time, outside loader lock.
+// Records are tee'd to `win_dbg_logger` so debug-build DebugView output is preserved unchanged.
+struct PluginFileLogger {
+    inner: RwLock<Option<Box<dyn log::Log>>>,
+    name: std::sync::OnceLock<String>,
+    open_attempted: AtomicBool,
+}
+impl PluginFileLogger {
+    const fn new() -> Self {
+        Self { inner: RwLock::new(None), name: std::sync::OnceLock::new(), open_attempted: AtomicBool::new(false) }
+    }
+    fn ensure_inner(&self) {
+        use std::sync::atomic::Ordering;
+        if self.open_attempted.load(Ordering::Acquire) { return; }
+        let mut guard = self.inner.write();
+        if self.open_attempted.swap(true, Ordering::AcqRel) { return; }
+        let name = self.name.get().map(String::as_str).unwrap_or("plugin");
+        let log_config = [ "mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "ofx" ]
+            .into_iter()
+            .fold(simplelog::ConfigBuilder::new(), |mut cfg, x| { cfg.add_filter_ignore_str(x); cfg })
+            .build();
+        let data_path = gyroflow_core::settings::data_dir().join(format!("gyroflow-{name}.log"));
+        let tmp_path  = std::env::temp_dir().join(format!("gyroflow-{name}.log"));
+        let file = std::fs::File::create(&data_path).or_else(|_| std::fs::File::create(&tmp_path));
+        match file {
+            Ok(file) => { *guard = Some(simplelog::WriteLogger::new(log::LevelFilter::Debug, log_config, file)); }
+            Err(e)   => { eprintln!("Failed to create plugin log file: {data_path:?} / {tmp_path:?}: {e}"); }
+        }
+    }
+}
+impl log::Log for PluginFileLogger {
+    fn enabled(&self, _: &log::Metadata) -> bool { true }
+    fn log(&self, record: &log::Record) {
+        // Tee to the debugger (DebugView) so debug-build behavior is unchanged.
+        log::Log::log(&win_dbg_logger::DEBUGGER_LOGGER, record);
+        self.ensure_inner();
+        let guard = self.inner.read();
+        if let Some(inner) = guard.as_deref() { inner.log(record); }
+    }
+    fn flush(&self) {
+        let guard = self.inner.read();
+        if let Some(inner) = guard.as_deref() { inner.flush(); }
+    }
+}
+static PLUGIN_FILE_LOGGER: PluginFileLogger = PluginFileLogger::new();
+
+/// Register the plugin file logger as the process-global `log` logger and remember which file to
+/// write (`gyroflow-{name}.log`). Cheap and loader-lock-safe: only atomic registration happens here,
+/// the file is opened lazily on the first record. Idempotent — safe to call from a DLL-load
+/// constructor and again from `initialize_log`. Winning the global slot first makes the host's later
+/// `win_dbg_logger` registration a no-op while still tee'ing records to the debugger.
+pub fn ensure_file_logger(name: &str) {
+    let _ = PLUGIN_FILE_LOGGER.name.set(name.to_string());
+    if log::set_logger(&PLUGIN_FILE_LOGGER).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
+    }
 }
 
 pub struct GyroflowPluginBase {
@@ -277,36 +340,15 @@ impl GyroflowPluginBase {
     }
 
     pub fn initialize_log(&mut self, name: &str) {
-        LOG_INITIALIZED.with(|x| {
-            if !x.get() {
-                log_panics::init();
-
-                // #[cfg(target_os = "windows")] { win_dbg_logger::init(); }
-
-                let tmp_log = std::env::temp_dir().join(format!("gyroflow-{name}.log"));
-
-                let log_path = gyroflow_core::settings::data_dir().join(format!("gyroflow-{name}.log"));
-                let log_config = [ "mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "ofx" ]
-                    .into_iter()
-                    .fold(simplelog::ConfigBuilder::new(), |mut cfg, x| { cfg.add_filter_ignore_str(x); cfg })
-                    .build();
-
-                if let Ok(file_log) = std::fs::File::create(&log_path) {
-                    let _ = simplelog::WriteLogger::init(log::LevelFilter::Debug, log_config, file_log);
-                    x.set(true);
-                } else if let Ok(file_log) = std::fs::File::create(&tmp_log) {
-                    let _ = simplelog::WriteLogger::init(log::LevelFilter::Debug, log_config, file_log);
-                    x.set(true);
-                } else if cfg!(target_os = "linux") {
-                    if let Ok(file_log) = std::fs::File::create(&format!("/tmp/gyroflow-{name}.log")) {
-                        let _ = simplelog::WriteLogger::init(log::LevelFilter::Debug, log_config, file_log);
-                        x.set(true);
-                    } else {
-                        eprintln!("Failed to create log file: {log_path:?}, {tmp_log:?}, /tmp/gyroflow-ofx.log");
-                    }
-                }
-            }
-        });
+        // Install the file logger (idempotent; usually already done by the DLL-load constructor on
+        // the Adobe plugin, but the only init point on the OpenFX / frei0r plugins which have no
+        // competing global logger).
+        ensure_file_logger(name);
+        // (Re-)install the panic logger. Done here, at command/render time, rather than in the
+        // constructor, so it runs AFTER the host entry macro sets its own panic hook and therefore
+        // wins — preserving the prior behavior of routing panics to the log file.
+        static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+        PANIC_HOOK.call_once(log_panics::init);
     }
 
     pub fn get_center_rect(width: usize, height: usize, org_ratio: f64) -> (usize, usize, usize, usize) {
@@ -440,7 +482,7 @@ impl GyroflowPluginBase {
                 ParameterType::Button  { id: "OpenRecentProject", label: t!("label.open_recent_project"), hint: t!("hint.open_recent_project"),   hidden: true },
             ] },
             ParameterType::Group { id: "AdjustGroup", label: t!("group.adjust"), opened: true, hidden: false, parameters: vec![
-                ParameterType::Slider   { id: "Smoothness",             label: t!("label.smoothness"),               hint: t!("hint.smoothness"),                   min: 1.0,    max: 300.0, default: 50.0,    hidden: false },
+                ParameterType::Slider   { id: "Smoothness",             label: t!("label.smoothness"),               hint: t!("hint.smoothness"),                   min: 1.0,    max: 300.0, default: 15.0,    hidden: false },
                 ParameterType::Slider   { id: "ZoomLimit",              label: t!("label.zoom_limit"),               hint: t!("hint.zoom_limit"),                   min: 51.0,   max: 300.0, default: 130.0,   hidden: true },
                 ParameterType::Slider   { id: "LensCorrectionStrength", label: t!("label.lens_correction_strength"), hint: t!("hint.lens_correction_strength"),     min: 0.0,    max: 100.0, default: 100.0,   hidden: false },
                 ParameterType::Slider   { id: "HorizonLockAmount",      label: t!("label.horizon_lock_amount"),      hint: t!("hint.horizon_lock_amount"),          min: 0.0,    max: 100.0, default: 0.0,     hidden: false },
