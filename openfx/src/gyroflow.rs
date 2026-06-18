@@ -374,13 +374,17 @@ impl InstanceData {
             }
         }
 
-        // Enable the gated load-time InputRotation step in the shared stab-manager load path
-        // (openfx-restore-rotation-order D1): on a cache-miss rebuild the InputRotation-implied
-        // rotation + output-size transpose is applied before the post-mutation recompute, so a
-        // host-restored ZoomMode never recomputes on the hybrid "rotated content + landscape
-        // output_size" state. Decided per call: Fusion keeps the step disabled (the render-path
-        // override is skipped there too), and Adobe/frei0r never touch this flag (default false).
-        self.plugin.apply_input_rotation_on_load = !self.is_fusion_page;
+        // openfx-input-rotation-paste-flip: the load-time InputRotation step
+        // (openfx-restore-rotation-order D1) applies the rotation DURING the rebuild and the
+        // subsequent post-mutation recompute produces a ~1.78x over-zoomed + sideways-warped
+        // result (gyroflow-openfx.log run 011 final_fov 0.243 = correct 0.431 / 1.78). The
+        // render-path override (`apply_openfx_input_rotation_override`, run after stab_manager on
+        // every render) applies the exact same rotation via the eager mechanism from the settled
+        // vr=0 baseline and is CORRECT (run 013 final_fov 0.431). So defer rotation entirely to
+        // the render-path override: keep the load-time step disabled. (Preserving smoothing in the
+        // load path did not help — `set_output_size`→`init_size` invalidates smoothing in both
+        // paths; the divergence is the rebuild-time state, not the invalidation set.)
+        self.plugin.apply_input_rotation_on_load = false;
 
         let stab = self.plugin.stab_manager(&mut self.params, manager_cache, out_size, loading_pending_video_file).map_err(|e| {
             log::error!("plugin.stab_manager error: {e:?}");
