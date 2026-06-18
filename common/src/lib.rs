@@ -636,6 +636,14 @@ pub struct GyroflowPluginBaseInstance {
     #[serde(skip)]
     pub apply_input_rotation_on_load: bool,
 
+    // Gate for the load-time host-placement neutralization step in `stab_manager`
+    // (adobe-output-geometry-recompute-once). Only the Adobe Premiere path enables this, per call,
+    // when the clip aspect differs from the sequence aspect (the host's Motion owns orientation);
+    // OpenFX / frei0r / AE never set it, keeping their load path byte-identical. Not persisted:
+    // re-decided on every `stab_manager` call from the captured sequence_size / source_size.
+    #[serde(skip)]
+    pub host_owns_orientation: bool,
+
     // The project's rotation as imported (`stab.params.video_rotation` right after import,
     // before any mutation or runtime InputRotation override touches it). Re-captured on every
     // cache-miss rebuild; single source of truth for "InputRotation = 0°" semantics. Not
@@ -663,6 +671,7 @@ impl Clone for GyroflowPluginBaseInstance {
             always_set_input_rotation:      self.always_set_input_rotation,
             auto_disable_stretch:           self.auto_disable_stretch,
             apply_input_rotation_on_load:   self.apply_input_rotation_on_load,
+            host_owns_orientation:          self.host_owns_orientation,
             original_project_rotation:      self.original_project_rotation,
             keyframable_params:             Arc::new(RwLock::new(self.keyframable_params.read().clone())),
         }
@@ -687,6 +696,7 @@ impl Default for GyroflowPluginBaseInstance {
             always_set_input_rotation:      false,
             auto_disable_stretch:           true,
             apply_input_rotation_on_load:   false,
+            host_owns_orientation:          false,
             original_project_rotation:      None,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false, // TODO param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
@@ -1302,6 +1312,33 @@ impl GyroflowPluginBaseInstance {
             // skip-recompute fast path is preserved.
             if let Some(effective_rotation) = self.maybe_apply_input_rotation_on_load(&*params, &stab) {
                 log::info!(target: "stab.load", "load-time input rotation applied: effective_rotation={} output_size={:?}", effective_rotation, stab.params.read().output_size);
+            }
+
+            // Load-time host-placement neutralization (adobe-output-geometry-recompute-once):
+            // when the clip aspect differs from the sequence aspect, the host's Motion owns all
+            // orientation, so neutralize any rotation baked into the .gyroflow and output at the
+            // source/clip geometry — making a rotated-project clip behave like a rotation-free one.
+            // This was previously done on every rendered frame in premiere.rs, gated by an
+            // `output_size != render_buffer` check that is unsatisfiable at host proxy resolution
+            // (constrained_output_size scales the proxy request back up to the native frame), so a
+            // full recompute fired per frame. Doing it here, once, in the cache-miss build lets the
+            // §11.4 post-mutation snapshot fire the single recompute; steady-state frames are cache
+            // hits with no geometry work. Gated by a flag only the Adobe Premiere path sets (per
+            // call, on aspect mismatch); OpenFX / frei0r / AE leave it false → byte-unchanged.
+            //
+            // Order matches the proven per-frame recipe: zero Params::Rotation + rebuild the
+            // keyframe cache (so the cached VideoRotation@t=0 read by frame_transform becomes 0),
+            // then zero core video_rotation BEFORE re-setting output_size so constrained_output_size
+            // does not transpose the source bounds back into a portrait letterbox. get_f64(Output
+            // Width/Height) already returns source_size on mismatch (parameters.rs), which
+            // constrained_output_size scales up to the stable native landscape frame.
+            if self.host_owns_orientation {
+                let _ = params.set_f64(Params::Rotation, 0.0);
+                let ugk = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
+                self.cache_keyframes(params, ugk, self.num_frames, self.fps.max(1.0));
+                stab.params.write().video_rotation = 0.0;
+                stab.set_output_size(params.get_f64(Params::OutputWidth)? as _, params.get_f64(Params::OutputHeight)? as _);
+                log::info!(target: "stab.load", "[adobe-geom] host-placement neutralization at load: output_size={:?}", stab.params.read().output_size);
             }
 
             self.set_keyframe_provider(&stab);

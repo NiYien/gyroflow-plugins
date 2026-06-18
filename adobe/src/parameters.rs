@@ -89,6 +89,13 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
         }
         ParameterType::Text { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
+            // The loaded-project name is shown in Adobe via the custom Status panel (ui.rs draws
+            // "Project: …"), so the standard LoadedProject text param is a redundant always-empty
+            // field here (set_string is a no-op for it — parameters.rs `set_string`). Hide it
+            // (NO_ECW_UI), consistent with its already-hidden LoadedPreset/LoadedLens siblings.
+            // OpenFX has no custom panel and keeps it visible (the shared param def stays
+            // hidden:false there; only Adobe force-hides it, like InputRotation below).
+            let hidden = hidden || id == "LoadedProject";
             params.add_customized(p, label, ae::ArbitraryDef::setup(|f| {
                 f.set_default::<ArbString>(ArbString::default()).unwrap();
             }), |param| {

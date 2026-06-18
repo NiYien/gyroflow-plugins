@@ -126,6 +126,8 @@ impl CrossThreadInstance {
             // Adobe never enables the OpenFX-only load-time InputRotation step; with the flag
             // off the shared stab-manager load path is byte-identical to before that step existed.
             apply_input_rotation_on_load:   false,
+            // Re-decided per render call by the Premiere GPU path (set on aspect mismatch).
+            host_owns_orientation:          false,
             original_project_rotation:      None,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false,
@@ -765,17 +767,6 @@ impl AdobePluginInstance for CrossThreadInstance {
                     extra.set_max_result_rect(extra.result_rect());
                     extra.set_returns_extra_pixels(true);
 
-                    // [adobe-ae-output-geometry §1] Diagnostic: pin the AE buffer/ref/output dims for the
-                    // landscape-footage-in-portrait-comp scenario (whether the portrait quantity is the
-                    // result rect, the output buffer, or the stab output_size). Remove once the fix is
-                    // pinned (that change's Task §4.4).
-                    {
-                        let (seq, src) = { let s = stored.read(); (s.sequence_size, s.source_size) };
-                        let rr = extra.result_rect();
-                        log::info!("[adobe-geom-ae] SmartPreRender in_size=({},{}) ref=({},{}) seq={seq:?} src={src:?} out_wh=({w},{h}) result_rect=({},{},{},{}) ds=({sx},{sy})",
-                            in_data.width(), in_data.height(), in_result.ref_width, in_result.ref_height, rr.left, rr.top, rr.right, rr.bottom);
-                    }
-
                     let full_rect = ae::Rect { left: 0, top: 0, right: w as _, bottom: h as _ };
 
                     if let Some(stab) = _self.stab_manager(&mut params, plugin.global, full_rect) {
@@ -816,14 +807,6 @@ impl AdobePluginInstance for CrossThreadInstance {
                 let (nw, nh) = ((params.get_f64(Params::OutputWidth).unwrap() * sx).round() as u32, (params.get_f64(Params::OutputHeight).unwrap() * sy).round() as u32);
                 plugin.out_data.set_width(nw as _);
                 plugin.out_data.set_height(nh as _);
-
-                // [adobe-ae-output-geometry §1] Diagnostic: pin the AE FrameSetup output buffer. Remove with §4.4.
-                {
-                    let (seq, src) = { let s = _self.stored.read(); (s.sequence_size, s.source_size) };
-                    let eh = out_layer.extent_hint();
-                    log::info!("[adobe-geom-ae] FrameSetup out_buffer=({nw},{nh}) extent_hint=({},{},{},{}) seq={seq:?} src={src:?} ds=({sx},{sy})",
-                        eh.left, eh.top, eh.right, eh.bottom);
-                }
 
                 if let Some(stab) = _self.stab_manager(&mut params, plugin.global, out_layer.extent_hint()) {
                     plugin.out_data.set_frame_data::<RenderData>(RenderData { stab, stored })

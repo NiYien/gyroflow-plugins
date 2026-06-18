@@ -1500,6 +1500,9 @@ impl Execute for GyroflowPlugin {
                         // until the first call. Rotation capture happens on the first cache-miss
                         // import (openfx-restore-rotation-order).
                         apply_input_rotation_on_load: false,
+                        // OpenFX never enables the Adobe-only host-placement neutralization step
+                        // (host owns orientation); flag off → shared stab-manager path unchanged.
+                        host_owns_orientation:        false,
                         original_project_rotation:    None,
                         keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                             use_gyroflows_keyframes: param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
