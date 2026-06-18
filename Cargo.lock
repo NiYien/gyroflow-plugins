@@ -3211,7 +3211,7 @@ dependencies = [
 [[package]]
 name = "gyroflow-core"
 version = "1.6.3"
-source = "git+https://github.com/NiYien/gyroflow.git?branch=niyien#505ec0e7ca4d53f94d24eedf0c7921aff8619ce0"
+source = "git+https://github.com/NiYien/gyroflow.git?branch=niyien#f77b0dcd535a4134914b8aaf948e05b61589a7c3"
 dependencies = [
  "ahrs",
  "akaze",
@@ -4564,7 +4564,7 @@ dependencies = [
 [[package]]
 name = "neuflow-trace-shared"
 version = "0.1.0"
-source = "git+https://github.com/NiYien/gyroflow.git?branch=niyien#505ec0e7ca4d53f94d24eedf0c7921aff8619ce0"
+source = "git+https://github.com/NiYien/gyroflow.git?branch=niyien#f77b0dcd535a4134914b8aaf948e05b61589a7c3"
 
 [[package]]
 name = "new_debug_unreachable"
@@ -5919,7 +5919,7 @@ dependencies = [
 [[package]]
 name = "rs-sync"
 version = "0.1.0"
-source = "git+https://github.com/NiYien/rs-sync.git?rev=0644253#0644253446c1f3630860c51380d81e4b06c318a6"
+source = "git+https://github.com/NiYien/rs-sync.git?rev=25f4e3c#25f4e3c01ac32c28deab0104715cd55c4fc110ba"
 dependencies = [
  "argmin",
  "argmin-math",
@@ -6433,7 +6433,7 @@ source = "git+https://github.com/Rust-GPU/rust-gpu?rev=854e9ba#854e9ba7da26d52ca
 [[package]]
 name = "stabilize_spirv"
 version = "0.0.0"
-source = "git+https://github.com/NiYien/gyroflow.git?branch=niyien#505ec0e7ca4d53f94d24eedf0c7921aff8619ce0"
+source = "git+https://github.com/NiYien/gyroflow.git?branch=niyien#f77b0dcd535a4134914b8aaf948e05b61589a7c3"
 dependencies = [
  "spirv-std",
 ]
