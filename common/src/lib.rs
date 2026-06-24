@@ -314,6 +314,50 @@ impl Default for GyroflowPluginBase {
     }
 }
 
+// Image-sequence project-resolution helpers. The gyroflow app folds a numbered
+// frame folder (DNG/PNG/JPG/EXR) into one ffmpeg image2 job named after the `%0Nd`
+// pattern and writes the project as `{prefix}%0{pad}d.gyroflow`. NLE hosts, however,
+// report a concrete first-frame path (`A001_000001.dng`). These helpers reverse the
+// app's fold rule so `get_project_path` can find the pattern project.
+
+// Byte-for-byte the app's `IMAGE_SEQUENCE_EXTS` (gyroflow `render_queue.rs`); the app
+// does not fold `.jpeg` (only `.jpg`), so neither do we.
+fn is_image_sequence_ext(ext: &str) -> bool {
+    ["dng", "png", "jpg", "exr"].iter().any(|x| x.eq_ignore_ascii_case(ext))
+}
+
+// Split a stem into (prefix, trailing-digit-run); `None` when it does not end in an
+// ASCII digit. Mirrors gyroflow `render_queue.rs::split_image_sequence_name` digit
+// extraction (digits/prefix only; extension handling lives in the caller).
+fn split_trailing_digits(stem: &str) -> Option<(&str, &str)> {
+    let digits_start = stem
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(i, _)| i)?;
+    let digits = &stem[digits_start..];
+    if digits.is_empty() {
+        return None;
+    }
+    Some((&stem[..digits_start], digits))
+}
+
+// Derive the app's pattern project *filename* for an image-sequence clip path, e.g.
+// `…/A001_000001.dng` -> `A001_%06d.gyroflow`. `None` for non-sequence extensions or
+// names without a trailing frame number. Pure (no filesystem access); the pad width is
+// the digit count, so the result is independent of which frame the host reports.
+fn image_sequence_project_filename(file_path: &str) -> Option<String> {
+    let path = std::path::Path::new(file_path);
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    if !is_image_sequence_ext(ext) {
+        return None;
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    let (prefix, digits) = split_trailing_digits(stem)?;
+    Some(format!("{prefix}%0{}d.gyroflow", digits.len()))
+}
+
 impl GyroflowPluginBase {
     /// If `disable_stretch` is true, inject a `plugin_disable_stretch` flag into gyroflow JSON data
     /// so that the setting persists when the data is embedded in a preset or project.
@@ -373,9 +417,23 @@ impl GyroflowPluginBase {
     }
 
     pub fn get_project_path(file_path: &str) -> Option<String> {
+        // Candidate 1: exact same-stem project (`clip.mp4` -> `clip.gyroflow`).
         let mut project_path = std::path::Path::new(file_path).with_extension("gyroflow");
         if !project_path.exists() {
-            // Find first project path that begins with the file name
+            // Candidate 2: image-sequence pattern project. Reverse the app's fold rule so a
+            // DNG/PNG/JPG/EXR sequence reported by its first frame (`A001_000001.dng`) resolves
+            // to the app's pattern-named project (`A001_%06d.gyroflow`). Tried before the prefix
+            // scan below, which structurally cannot reach a `%0Nd` name.
+            if let Some(pattern_name) = image_sequence_project_filename(file_path) {
+                let candidate = match project_path.parent() {
+                    Some(parent) => parent.join(&pattern_name),
+                    None => std::path::PathBuf::from(&pattern_name),
+                };
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+            // Candidate 3: first project path that begins with the file name
             if let Some(parent) = project_path.parent() {
                 if let Ok(paths) = std::fs::read_dir(parent) {
                     if let Some(fname) = project_path.with_extension("").file_name().map(|x| x.to_string_lossy().to_string()) {
@@ -1642,6 +1700,135 @@ impl ToString for Params {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    // --- image-sequence project resolution (plugin-image-sequence-project-match) ---
+
+    // Unique temp dir without a tempfile dev-dependency.
+    fn seq_tmp() -> std::path::PathBuf {
+        use std::sync::atomic::{ AtomicU64, Ordering };
+        static N: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "gfp_seqtest_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    fn touch(p: &std::path::Path) { std::fs::write(p, b"{}").unwrap(); }
+    fn proj_for(dir: &std::path::Path, frame: &str) -> Option<String> {
+        GyroflowPluginBase::get_project_path(&dir.join(frame).to_string_lossy())
+    }
+    fn expect_file(dir: &std::path::Path, name: &str) -> String {
+        dir.join(name).to_string_lossy().to_string()
+    }
+
+    // Pure derivation (no filesystem): split_trailing_digits.
+    #[test]
+    fn split_trailing_digits_extracts_prefix_and_run() {
+        assert_eq!(split_trailing_digits("A001_000001"), Some(("A001_", "000001")));
+        assert_eq!(split_trailing_digits("000123"), Some(("", "000123")));
+        assert_eq!(split_trailing_digits("clip"), None);
+        assert_eq!(split_trailing_digits("A001_"), None);
+    }
+
+    // Pure derivation (no filesystem): image_sequence_project_filename + ext gate.
+    #[test]
+    fn pattern_filename_derivation_and_ext_gate() {
+        // Pad width follows the digit count, not the frame value (D4).
+        assert_eq!(image_sequence_project_filename("x/A001_000137.dng").as_deref(), Some("A001_%06d.gyroflow"));
+        // All-digit name → empty prefix.
+        assert_eq!(image_sequence_project_filename("x/000123.DNG").as_deref(), Some("%06d.gyroflow"));
+        // Case-insensitive extension.
+        assert_eq!(image_sequence_project_filename("x/frame_12.JPG").as_deref(), Some("frame_%02d.gyroflow"));
+        // `.jpeg` is NOT in the app's fold set → no candidate.
+        assert_eq!(image_sequence_project_filename("x/frame_12.jpeg"), None);
+        // Ordinary video extension → no candidate.
+        assert_eq!(image_sequence_project_filename("x/shot_0001.mp4"), None);
+        // No trailing digits → no candidate.
+        assert_eq!(image_sequence_project_filename("x/clip.dng"), None);
+        // A stem ending in digits is folded even when short — matches the app's split rule
+        // (`A001` -> prefix `A`, 3 digits), so a real `A001…A005` run would pattern to `A%03d`.
+        assert_eq!(image_sequence_project_filename("x/A001.dng").as_deref(), Some("A%03d.gyroflow"));
+    }
+
+    // 3.1 First-frame DNG resolves to the pattern project.
+    #[test]
+    fn first_frame_dng_resolves_pattern_project() {
+        let dir = seq_tmp();
+        touch(&dir.join("A001_%06d.gyroflow"));
+        assert_eq!(proj_for(&dir, "A001_000001.dng"), Some(expect_file(&dir, "A001_%06d.gyroflow")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.2 Exact same-stem project wins over the pattern project.
+    #[test]
+    fn exact_stem_wins_over_pattern() {
+        let dir = seq_tmp();
+        touch(&dir.join("A001_000001.gyroflow"));
+        touch(&dir.join("A001_%06d.gyroflow"));
+        assert_eq!(proj_for(&dir, "A001_000001.dng"), Some(expect_file(&dir, "A001_000001.gyroflow")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.3 A non-first frame resolves to the same pattern project.
+    #[test]
+    fn non_first_frame_resolves_same_pattern() {
+        let dir = seq_tmp();
+        touch(&dir.join("A001_%06d.gyroflow"));
+        assert_eq!(proj_for(&dir, "A001_000137.dng"), Some(expect_file(&dir, "A001_%06d.gyroflow")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.4 All-digit stem.
+    #[test]
+    fn all_digit_stem_resolves_pattern() {
+        let dir = seq_tmp();
+        touch(&dir.join("%06d.gyroflow"));
+        assert_eq!(proj_for(&dir, "000123.dng"), Some(expect_file(&dir, "%06d.gyroflow")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.5 Ordinary single-file video resolves to its same-stem project (unchanged).
+    #[test]
+    fn ordinary_video_resolves_same_stem() {
+        let dir = seq_tmp();
+        touch(&dir.join("clip.gyroflow"));
+        assert_eq!(proj_for(&dir, "clip.mp4"), Some(expect_file(&dir, "clip.gyroflow")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.6 Digit-suffixed non-sequence video is not reverse-derived: a stray
+    // `shot_%04d.gyroflow` must NOT be matched for a `.mp4` clip.
+    #[test]
+    fn digit_suffixed_mp4_not_reverse_derived() {
+        let dir = seq_tmp();
+        touch(&dir.join("shot_%04d.gyroflow"));
+        assert_eq!(proj_for(&dir, "shot_0001.mp4"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.7 Existing starts_with fallback preserved (append-suffix legacy name).
+    #[test]
+    fn starts_with_fallback_preserved() {
+        let dir = seq_tmp();
+        touch(&dir.join("clip_stabilized.gyroflow"));
+        assert_eq!(proj_for(&dir, "clip.mp4"), Some(expect_file(&dir, "clip_stabilized.gyroflow")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 3.8 No candidate exists → None.
+    #[test]
+    fn no_candidate_returns_none() {
+        let dir = seq_tmp();
+        assert_eq!(proj_for(&dir, "A001_000001.dng"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[derive(Default)]
     struct TestParams {
