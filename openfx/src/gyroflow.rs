@@ -1508,6 +1508,9 @@ impl Execute for GyroflowPlugin {
                         // (host owns orientation); flag off → shared stab-manager path unchanged.
                         host_owns_orientation:        false,
                         original_project_rotation:    None,
+                        // Captured during cache-miss builds but never consumed by OpenFX (the
+                        // Premiere-only media pre-rotation compensation reads it).
+                        container_media_rotation:     None,
                         keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                             use_gyroflows_keyframes: param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                             cached_keyframes:        KeyframeManager::default()

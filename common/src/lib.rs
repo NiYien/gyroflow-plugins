@@ -709,6 +709,16 @@ pub struct GyroflowPluginBaseInstance {
     // "Original project rotation survives restore").
     #[serde(skip)]
     pub original_project_rotation: Option<f64>,
+
+    // Raw container rotation metadata (tkhd-style degrees, NOT normalized for display) of the
+    // source video, captured during the cache-miss build in `stab_manager` (bare-video branch:
+    // `load_video_file` metadata; .gyroflow branch: the `always_set_input_rotation` probe).
+    // `None` when the source file is unreadable (e.g. cross-platform project paths) or the
+    // probe was skipped. Consumed by the Premiere render path to detect host media pre-rotation
+    // (adobe-media-rotation-compensation). Reset at every cache-miss build entry so a stale
+    // value never leaks across project switches. Not persisted: re-derived from the source.
+    #[serde(skip)]
+    pub container_media_rotation: Option<i32>,
 }
 impl Clone for GyroflowPluginBaseInstance {
     fn clone(&self) -> Self {
@@ -731,6 +741,7 @@ impl Clone for GyroflowPluginBaseInstance {
             apply_input_rotation_on_load:   self.apply_input_rotation_on_load,
             host_owns_orientation:          self.host_owns_orientation,
             original_project_rotation:      self.original_project_rotation,
+            container_media_rotation:       self.container_media_rotation,
             keyframable_params:             Arc::new(RwLock::new(self.keyframable_params.read().clone())),
         }
     }
@@ -756,6 +767,7 @@ impl Default for GyroflowPluginBaseInstance {
             apply_input_rotation_on_load:   false,
             host_owns_orientation:          false,
             original_project_rotation:      None,
+            container_media_rotation:       None,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false, // TODO param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                 cached_keyframes:         KeyframeManager::default()
@@ -881,6 +893,89 @@ pub fn apply_input_rotation_to_stab(
     stab.set_output_size(output_size.0, output_size.1);
 
     Some(target_rotation)
+}
+
+/// Diagnostic kill-switch for the Premiere media pre-rotation compensation
+/// (adobe-media-rotation-compensation). `GYROFLOW_ADOBE_MEDIA_ROTATION=0|off|false` restores the
+/// pre-change render behavior (no inference, original neutralization condition). Read once.
+pub fn adobe_media_rotation_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        match std::env::var("GYROFLOW_ADOBE_MEDIA_ROTATION") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                let off = v == "0" || v == "off" || v == "false";
+                if off { log::info!("Adobe media-rotation compensation disabled via GYROFLOW_ADOBE_MEDIA_ROTATION"); }
+                !off
+            }
+            Err(_) => true,
+        }
+    })
+}
+
+/// Infer whether the host (Premiere) pre-rotated the input buffer according to the source
+/// container's rotation metadata, and return the display rotation (degrees, same convention as
+/// `video_rotation` / OFX InputRotation) to feed the kernel-level input rotation
+/// (`BufferDescription.rotation`). `None` = do not compensate (buffer arrives un-rotated).
+///
+/// Signals (design D1/D5/D7 of adobe-media-rotation-compensation):
+/// - `container_raw_rotation` — raw container degrees captured at build time; `Some(0)` means
+///   "no metadata" (host never pre-rotates), `None` means "source unreadable" (degraded mode).
+/// - buffer-vs-source aspect transposition (tolerance-based, proxy-resolution safe) confirms an
+///   actual 90/270 pre-rotation; squarish sources give no signal and fall back to trusting the
+///   metadata (modern Premiere always applies it). 180 has no size signal either — trusted.
+/// - Degraded mode (`None`): only the transposition signal + a sideways project `video_rotation`.
+pub fn infer_host_media_prerotation(
+    container_raw_rotation: Option<i32>,
+    video_size: (usize, usize),
+    video_rotation: f64,
+    in_size: (usize, usize),
+) -> Option<f32> {
+    if video_size.0 == 0 || video_size.1 == 0 || in_size.0 == 0 || in_size.1 == 0 {
+        return None;
+    }
+
+    let src_aspect = video_size.0 as f64 / video_size.1 as f64;
+    let transposed_aspect = video_size.1 as f64 / video_size.0 as f64;
+    let in_aspect = in_size.0 as f64 / in_size.1 as f64;
+    // Squarish sources: transposed and source aspect are indistinguishable within tolerance.
+    let squarish = (src_aspect - transposed_aspect).abs() / src_aspect.max(transposed_aspect) < 0.02;
+    let rel = |a: f64, b: f64| (a - b).abs() / b.max(1e-9);
+    let matches_transposed = !squarish
+        && rel(in_aspect, transposed_aspect) < 0.05
+        && rel(in_aspect, transposed_aspect) < rel(in_aspect, src_aspect);
+
+    // Sign convention, calibrated on device (design D8, C6505 2026-07-02): Premiere needs the
+    // RAW direction — i.e. the inverse of the display rotation ((360 - display) % 360) — unlike
+    // the OFX/Resolve path which feeds the display-side InputRotation degrees directly. Feeding
+    // the display direction produced frames flipped by exactly 180° with otherwise correct
+    // geometry (90<->270 swap keeps the transposed size mapping but reverses content direction).
+    // Working hypothesis: Premiere's vertically-flipped GPU framebuffer reverses rotation
+    // handedness in the kernel's input-rotation mapping.
+    let flip = |display: i32| -> f32 { ((360 - display.rem_euclid(360)) % 360) as f32 };
+
+    match container_raw_rotation {
+        Some(raw) if raw.rem_euclid(360) == 0 => None,
+        Some(raw) => {
+            // Same normalize convention as the InputRotation default derivation above.
+            let display = (360 - raw.rem_euclid(360)) % 360;
+            match display {
+                90 | 270 => {
+                    if matches_transposed || squarish { Some(flip(display)) } else { None }
+                }
+                180 => Some(180.0),
+                // Non-quarter-turn containers are unexpected — do not guess.
+                _ => None,
+            }
+        }
+        None => {
+            // Source unreadable at build time: the only signal left is the buffer transposition;
+            // trust the project rotation when it is sideways (app derives it from the same
+            // container metadata by default).
+            let vr = (video_rotation.round() as i32).rem_euclid(360);
+            if matches_transposed && (vr == 90 || vr == 270) { Some(flip(vr)) } else { None }
+        }
+    }
 }
 
 impl GyroflowPluginBaseInstance {
@@ -1074,6 +1169,8 @@ impl GyroflowPluginBaseInstance {
             stab
         } else {
             log::info!("new stab manager for key: {key}");
+            // Re-derived below from the source of this build; must not leak across project switches.
+            self.container_media_rotation = None;
             let mut stab = StabilizationManager::default();
             {
                 // Find first lens profile database with loaded profiles
@@ -1126,6 +1223,7 @@ impl GyroflowPluginBaseInstance {
                 let filesize = file.size;
                 match stab.load_video_file(file.get_file(), filesize, &url, None, true) {
                     Ok(md) => {
+                        self.container_media_rotation = Some(md.rotation);
                         if out_size != (0, 0) {
                             stab.params.write().output_size = out_size; // Default to timeline output size
                         }
@@ -1189,36 +1287,74 @@ impl GyroflowPluginBaseInstance {
                     }
                 }
             } else {
+                // §11.7 extension: throttle the rebuild storm for failing .gyroflow builds too.
+                // Without this, any build failure below re-runs the full import (gyro integration
+                // + fov compute, hundreds of ms) on every host render request.
+                if let Some(cached_msg) = check_not_found_cache(&path) {
+                    self.update_loaded_state(params, false);
+                    return Err(format!("gyroflow project load (cached failure, retry throttled): {cached_msg}").into());
+                }
                 let project_data = {
                     if params.get_bool(Params::IncludeProjectData)? && !params.get_string(Params::ProjectData)?.is_empty() {
                         params.get_string(Params::ProjectData)?
-                    } else if let Ok(data) = std::fs::read_to_string(&path) {
-                        if params.get_bool(Params::IncludeProjectData)? {
-                            params.set_string(Params::ProjectData, &data)?;
-                        } else {
-                            params.set_string(Params::ProjectData, "")?;
-                        }
-                        data
                     } else {
-                        "".to_string()
+                        match std::fs::read_to_string(&path) {
+                            Ok(data) => {
+                                if params.get_bool(Params::IncludeProjectData)? {
+                                    params.set_string(Params::ProjectData, &data)?;
+                                } else {
+                                    params.set_string(Params::ProjectData, "")?;
+                                }
+                                data
+                            }
+                            Err(e) => {
+                                // Previously a silent fallback to "" that failed later inside
+                                // import_gyroflow_data with a misleading error. Fail here with the
+                                // real cause and record it for the throttle.
+                                let msg = format!("cannot read project file: {e}");
+                                record_not_found(&path, msg.clone());
+                                self.update_loaded_state(params, false);
+                                return Err(msg.into());
+                            }
+                        }
                     }
                 };
                 let mut is_preset = false;
                 stab.import_gyroflow_data(project_data.as_bytes(), true, Some(&filesystem::path_to_url(&path)), |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, true).map_err(|e| {
+                    let msg = format!("load_gyro_data error: {e}");
+                    record_not_found(&path, msg.clone());
                     self.update_loaded_state(params, false);
-                    format!("load_gyro_data error: {e}")
+                    msg
                 })?;
                 params.set_string(Params::LoadedProject, &filesystem::get_filename(&filesystem::path_to_url(&path)))?;
 
                 if self.always_set_input_rotation {
+                    // Container-rotation probe. The source video is NOT required here — frames come
+                    // from the host and the project already carries video_rotation — so a missing
+                    // file (e.g. a cross-platform project path like /Volumes/... on Windows) must
+                    // degrade to warn + skip. Bailing out with `?` would keep the manager out of the
+                    // cache and turn every host render request into a full rebuild, freezing the
+                    // host (adobe-media-rotation-compensation).
                     let url = stab.input_file.read().url.clone();
-                    let mut file = filesystem::open_file(&url, false, false)?;
-                    let filesize = file.size;
-                    if let Ok(video_md) = gyroflow_core::util::get_video_metadata(file.get_file(), filesize, &url) {
-                        if video_md.rotation != 0 && self.reload_values_from_project {
-                            let r = ((360 - video_md.rotation) % 360) as f64;
-                            params.set_i32(Params::InputRotation, input_rotation_index_from_deg(r))?;
-                            stab.params.write().video_rotation = r;
+                    match filesystem::open_file(&url, false, false) {
+                        Ok(mut file) => {
+                            let filesize = file.size;
+                            match gyroflow_core::util::get_video_metadata(file.get_file(), filesize, &url) {
+                                Ok(video_md) => {
+                                    self.container_media_rotation = Some(video_md.rotation);
+                                    if video_md.rotation != 0 && self.reload_values_from_project {
+                                        let r = ((360 - video_md.rotation) % 360) as f64;
+                                        params.set_i32(Params::InputRotation, input_rotation_index_from_deg(r))?;
+                                        stab.params.write().video_rotation = r;
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("Container rotation probe: get_video_metadata failed for {url}: {e:?}; skipping (project video_rotation stays in effect)");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Container rotation probe: cannot open source video {url} ({e}); skipping (project video_rotation stays in effect)");
                         }
                     }
                 }
@@ -1390,13 +1526,22 @@ impl GyroflowPluginBaseInstance {
             // does not transpose the source bounds back into a portrait letterbox. get_f64(Output
             // Width/Height) already returns source_size on mismatch (parameters.rs), which
             // constrained_output_size scales up to the stable native landscape frame.
-            if self.host_owns_orientation {
+            // adobe-media-rotation-compensation D3: when the container carries rotation metadata,
+            // Premiere's media pipeline (not Motion) owns orientation and pre-rotates the buffer
+            // before the effect — neutralizing here would zero video_rotation and force the source
+            // geometry onto an already-rotated buffer. Yield to the kernel-level compensation in
+            // the render path instead. Metadata-free sources keep the original condition verbatim.
+            let host_prerotates_media = adobe_media_rotation_enabled()
+                && self.container_media_rotation.map_or(false, |r| r.rem_euclid(360) != 0);
+            if self.host_owns_orientation && !host_prerotates_media {
                 let _ = params.set_f64(Params::Rotation, 0.0);
                 let ugk = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
                 self.cache_keyframes(params, ugk, self.num_frames, self.fps.max(1.0));
                 stab.params.write().video_rotation = 0.0;
                 stab.set_output_size(params.get_f64(Params::OutputWidth)? as _, params.get_f64(Params::OutputHeight)? as _);
                 log::info!(target: "stab.load", "[adobe-geom] host-placement neutralization at load: output_size={:?}", stab.params.read().output_size);
+            } else if self.host_owns_orientation {
+                log::info!(target: "stab.load", "[adobe-geom] neutralization suppressed: host pre-rotates media (container rotation={:?})", self.container_media_rotation);
             }
 
             self.set_keyframe_provider(&stab);
@@ -1451,6 +1596,8 @@ impl GyroflowPluginBaseInstance {
             // would otherwise pin the disabled stab manager (lens permanently stretched=1.0) under
             // the disable=false key, making toggling DisableStretch off look identical to on.
             let key = format!("{path}{disable_stretch}{instance_id}");
+            // Successful build — clear any throttle record so a fixed project reloads immediately.
+            clear_not_found(&path);
             // Insert to static global cache
             manager_cache.lock().put(key.to_owned(), stab.clone());
             // Cache it in this instance as well
@@ -1700,6 +1847,93 @@ impl ToString for Params {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    // --- host media pre-rotation inference (adobe-media-rotation-compensation) ---
+
+    // FX3 portrait case (A004): raw=90 container (display 270), host hands a transposed buffer
+    // -> compensate in the RAW direction (design D8 sign calibration): (360-270)%360 = 90.
+    #[test]
+    fn prerotation_metadata_90_transposed_buffer_compensates() {
+        assert_eq!(infer_host_media_prerotation(Some(90), (3840, 2160), 270.0, (2160, 3840)), Some(90.0));
+    }
+
+    // Proxy resolution: quarter-res buffer keeps the transposed aspect -> same verdict.
+    #[test]
+    fn prerotation_proxy_buffer_keeps_verdict() {
+        assert_eq!(infer_host_media_prerotation(Some(90), (3840, 2160), 270.0, (540, 960)), Some(90.0));
+    }
+
+    // No rotation metadata: the host never pre-rotates -> never compensate, regardless of buffer.
+    #[test]
+    fn prerotation_no_metadata_never_compensates() {
+        assert_eq!(infer_host_media_prerotation(Some(0), (3840, 2160), 0.0, (3840, 2160)), None);
+        assert_eq!(infer_host_media_prerotation(Some(0), (3840, 2160), 270.0, (2160, 3840)), None);
+    }
+
+    // Metadata present but the buffer arrives at source aspect (host did not pre-rotate):
+    // fall back to the pre-change behavior (pipeline rotates via video_rotation).
+    #[test]
+    fn prerotation_metadata_but_unrotated_buffer_no_compensation() {
+        assert_eq!(infer_host_media_prerotation(Some(90), (3840, 2160), 270.0, (3840, 2160)), None);
+        assert_eq!(infer_host_media_prerotation(Some(90), (3840, 2160), 270.0, (1920, 1080)), None);
+    }
+
+    // Degraded mode (source unreadable, container rotation unknown): transposed buffer + sideways
+    // project rotation -> compensate with the raw-direction inverse of video_rotation
+    // (C6505 device calibration: vr=90 project rendered 180°-flipped until fed 270).
+    #[test]
+    fn prerotation_degraded_mode_uses_parity_and_project_rotation() {
+        assert_eq!(infer_host_media_prerotation(None, (3840, 2160), 270.0, (2160, 3840)), Some(90.0));
+        assert_eq!(infer_host_media_prerotation(None, (3840, 2160), 90.0, (1080, 1920)), Some(270.0));
+        assert_eq!(infer_host_media_prerotation(None, (3840, 2160), 0.0, (2160, 3840)), None);
+        assert_eq!(infer_host_media_prerotation(None, (3840, 2160), 180.0, (2160, 3840)), None);
+        assert_eq!(infer_host_media_prerotation(None, (3840, 2160), 270.0, (3840, 2160)), None);
+    }
+
+    // Squarish source: no transposition signal -> trust the metadata (D7).
+    #[test]
+    fn prerotation_squarish_source_trusts_metadata() {
+        assert_eq!(infer_host_media_prerotation(Some(90), (2160, 2160), 270.0, (2160, 2160)), Some(90.0));
+        assert_eq!(infer_host_media_prerotation(None, (2160, 2160), 270.0, (2160, 2160)), None);
+    }
+
+    // 180: no size signal either way -> trust the metadata (D7).
+    #[test]
+    fn prerotation_180_trusts_metadata() {
+        assert_eq!(infer_host_media_prerotation(Some(180), (3840, 2160), 180.0, (3840, 2160)), Some(180.0));
+    }
+
+    // Degenerate sizes must not divide by zero or guess.
+    #[test]
+    fn prerotation_degenerate_sizes_are_none() {
+        assert_eq!(infer_host_media_prerotation(Some(90), (0, 0), 270.0, (2160, 3840)), None);
+        assert_eq!(infer_host_media_prerotation(Some(90), (3840, 2160), 270.0, (0, 0)), None);
+    }
+
+    // --- .gyroflow build-failure throttle (adobe-media-rotation-compensation, §11.7 extension) ---
+
+    // record -> hit within TTL; clear -> miss. Unique keys keep parallel tests independent
+    // (NOT_FOUND_CACHE is process-global).
+    #[test]
+    fn gyroflow_failure_throttle_records_and_clears() {
+        let path = "Z:\\__nonexistent__\\throttle_test_a.gyroflow";
+        assert_eq!(check_not_found_cache(path), None);
+        record_not_found(path, "cannot read project file: boom".into());
+        assert_eq!(check_not_found_cache(path).as_deref(), Some("cannot read project file: boom"));
+        clear_not_found(path);
+        assert_eq!(check_not_found_cache(path), None);
+    }
+
+    // A successful rebuild for one path must not clear another path's record.
+    #[test]
+    fn gyroflow_failure_throttle_is_per_path() {
+        let bad = "Z:\\__nonexistent__\\throttle_test_b_bad.gyroflow";
+        let good = "Z:\\__nonexistent__\\throttle_test_b_good.gyroflow";
+        record_not_found(bad, "broken".into());
+        clear_not_found(good);
+        assert_eq!(check_not_found_cache(bad).as_deref(), Some("broken"));
+        clear_not_found(bad);
+    }
 
     // --- image-sequence project resolution (plugin-image-sequence-project-match) ---
 

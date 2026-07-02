@@ -188,7 +188,11 @@ impl pr::GpuFilter for PremiereGPU {
                         && ((seq.0 as f64 / seq.1 as f64) - (src_out.0 as f64 / src_out.1 as f64)).abs() > 0.01;
                 }
 
-                if let Ok(stab) = base_inst.stab_manager(&mut params, &super::global_inst().gyroflow.manager_cache, (out_size.0 as _, out_size.1 as _), false) {
+                match base_inst.stab_manager(&mut params, &super::global_inst().gyroflow.manager_cache, (out_size.0 as _, out_size.1 as _), false) {
+                Ok(stab) => {
+                    // Copy out now (filled during the cache-miss build above) — `inst` is behind a
+                    // guard, so keeping `base_inst` alive would conflict with `inst.stored` below.
+                    let container_media_rotation = base_inst.container_media_rotation;
                     /*{
                         let duration_ms = stab.params.read().duration_ms;
                         let old_range = stab.trim_ranges().first().cloned().unwrap_or((0.0, 1.0));
@@ -251,9 +255,36 @@ impl pr::GpuFilter for PremiereGPU {
                         _ => panic!("Invalid GPU framework")
                     };
 
-                    // Adobe has no Input Rotation control (removed) — the host's Motion/Transform owns
-                    // all orientation, so the source buffer is always fed un-rotated.
-                    let input_rotation = 0.0_f32;
+                    // Adobe has no Input Rotation control (removed). Orientation is inferred
+                    // instead (adobe-media-rotation-compensation): sources carrying container
+                    // rotation metadata are pre-rotated by Premiere's media pipeline BEFORE they
+                    // reach the effect, so the already-rotated buffer must be declared to the
+                    // kernel (input rotation) for undistortion to run in the un-rotated frame
+                    // coordinate system. Metadata-free sources (host Motion owns orientation)
+                    // keep the original un-rotated assumption.
+                    let host_prerotation = if gyroflow_plugin_base::adobe_media_rotation_enabled() {
+                        let (video_size, video_rotation) = {
+                            let p = stab.params.read();
+                            (p.size, p.video_rotation)
+                        };
+                        let inferred = gyroflow_plugin_base::infer_host_media_prerotation(
+                            container_media_rotation,
+                            video_size,
+                            video_rotation,
+                            (in_size.0 as usize, in_size.1 as usize),
+                        );
+                        if let Some(r) = inferred {
+                            let mut stored = inst.stored.write();
+                            if stored.last_logged_prerotation != Some(r) {
+                                stored.last_logged_prerotation = Some(r);
+                                log::info!("host media pre-rotation compensation: {r} deg (container={container_media_rotation:?}, video_size={video_size:?}, in_size={in_size:?})");
+                            }
+                        }
+                        inferred
+                    } else {
+                        None
+                    };
+                    let input_rotation = host_prerotation.unwrap_or(0.0_f32);
 
                     let mut buffers = Buffers {
                         input:  BufferDescription { size: src_size,  rect: None,           data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false },
@@ -266,8 +297,12 @@ impl pr::GpuFilter for PremiereGPU {
                     } {
                         log::error!("Failed to process pixels: {e:?}");
                     }
-                } else {
-                    log::error!("Key not found: {key}");
+                }
+                // Previously logged as the misleading "Key not found" — this is a build/load
+                // failure of the stab manager, not a cache lookup miss. Keep the key for context.
+                Err(e) => {
+                    log::error!("stab_manager failed for key {key}: {e}");
+                }
                 }
             }
         }

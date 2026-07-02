@@ -62,6 +62,10 @@ pub struct StoredParams {
     /// source frame instead of the sequence. See adobe-output-geometry-fix.
     #[serde(skip)]
     pub source_size: (usize, usize),
+    /// Last host-prerotation compensation angle logged by the Premiere GPU render path, used only
+    /// to de-duplicate the per-hit INFO line (adobe-media-rotation-compensation). Transient.
+    #[serde(skip)]
+    pub last_logged_prerotation: Option<f32>,
     pub media_fps: f64,
     pub media_fps_ticks: i64,
     pub pending_params_f64: HashMap<Params, f64>,
@@ -81,6 +85,7 @@ impl Default for StoredParams {
             instance_id: instance_id.clone(),
             sequence_size: (0, 0),
             source_size: (0, 0),
+            last_logged_prerotation: None,
             media_fps: 0.0,
             media_fps_ticks: 0,
             pending_params_f64: HashMap::new(),
@@ -129,6 +134,8 @@ impl CrossThreadInstance {
             // Re-decided per render call by the Premiere GPU path (set on aspect mismatch).
             host_owns_orientation:          false,
             original_project_rotation:      None,
+            // Captured during the cache-miss build in stab_manager (container metadata probe).
+            container_media_rotation:       None,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false,
                 cached_keyframes:         KeyframeManager::default()
