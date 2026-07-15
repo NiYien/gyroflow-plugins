@@ -1247,6 +1247,8 @@ impl GyroflowPluginBaseInstance {
                                     rfd::MessageDialog::new()
                                         .set_description(crate::i18n::tf("dialog.failed_load_preset", &[("error", &format!("{e:?}"))]))
                                         .show();
+                                } else {
+                                    clear_imported_project_trim(&stab);
                                 }
                             }
                         }
@@ -1274,6 +1276,7 @@ impl GyroflowPluginBaseInstance {
                                 self.update_loaded_state(params, false);
                                 format!("load_gyro_data error: {e}")
                             })?;
+                            clear_imported_project_trim(&stab);
                         } else {
                             log::error!("An error occured: {e:?}");
                             self.update_loaded_state(params, false);
@@ -1326,6 +1329,7 @@ impl GyroflowPluginBaseInstance {
                     self.update_loaded_state(params, false);
                     msg
                 })?;
+                clear_imported_project_trim(&stab);
                 params.set_string(Params::LoadedProject, &filesystem::get_filename(&filesystem::path_to_url(&path)))?;
 
                 if self.always_set_input_rotation {
@@ -1831,6 +1835,55 @@ pub fn hash_string(s: &str) -> u64 {
     hasher.finish()
 }
 
+// --- plugins-ignore-project-trim ---
+// In an NLE the host timeline governs which part of the clip is rendered; a trim
+// imported from a `.gyroflow` project must not leak into the stabilization state:
+// adaptive zoom substitutes max_fov for every out-of-trim frame (core
+// fov_iterative "range fix") while rotation + lens correction still warp those
+// frames, which renders as irregular black borders. `trim_range_only` smoothing
+// is trim-dependent too. Every `import_gyroflow_data` call site in `stab_manager`
+// must call this right after a successful import.
+
+/// Returns true when `GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM` requests the old
+/// (trim-honoring) behavior. Accepts `1|true|yes|on`, case-insensitive.
+fn keep_project_trim_requested(env_value: Option<&str>) -> bool {
+    match env_value {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "on"
+        }
+        None => false,
+    }
+}
+
+/// Clears trim ranges that `import_gyroflow_data` restored from the project.
+/// Returns the number of ranges cleared (0 = nothing to do, zero cost).
+/// When a non-empty trim is cleared, the fov curve computed during the blocking
+/// import is already poisoned by the trim, so this triggers the same explicit
+/// invalidate + blocking recompute pair the post-mutation path uses.
+pub fn clear_imported_project_trim(stab: &StabilizationManager) -> usize {
+    clear_imported_project_trim_impl(
+        stab,
+        std::env::var("GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM").ok().as_deref(),
+    )
+}
+
+fn clear_imported_project_trim_impl(stab: &StabilizationManager, keep_env: Option<&str>) -> usize {
+    let ranges = stab.params.read().trim_ranges.len();
+    if ranges == 0 {
+        return 0;
+    }
+    if keep_project_trim_requested(keep_env) {
+        log::info!("GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM set — keeping {ranges} project trim range(s)");
+        return 0;
+    }
+    stab.set_trim_ranges(Vec::new());
+    log::info!("cleared {ranges} project trim range(s) on import — NLE host timeline governs the render range");
+    stab.invalidate_smoothing();
+    stab.recompute_blocking();
+    ranges
+}
+
 impl std::str::FromStr for Params {
     type Err = serde_json::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -1847,6 +1900,51 @@ impl ToString for Params {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    // --- imported project trim isolation (plugins-ignore-project-trim) ---
+
+    // Minimal project JSON restoring a trim via the (deprecated) normalized
+    // `trim_ranges` field — it needs no duration to round-trip, which keeps the
+    // fixture free of video metadata.
+    fn import_minimal_project(trim: Option<&str>) -> StabilizationManager {
+        let stab = StabilizationManager::default();
+        let trim_field = trim.map(|t| format!("\"trim_ranges\": {t},")).unwrap_or_default();
+        let json = format!("{{ \"version\": 2, \"videofile\": \"\", {trim_field} \"stabilization\": {{}} }}");
+        let mut is_preset = false;
+        stab.import_gyroflow_data(json.as_bytes(), true, None, |_| (), Arc::new(AtomicBool::new(false)), &mut is_preset, true)
+            .expect("minimal project import");
+        stab
+    }
+
+    #[test]
+    fn imported_trim_is_cleared_and_counted() {
+        let stab = import_minimal_project(Some("[[0.2, 0.5]]"));
+        assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.5)], "import must restore the trim first");
+        assert_eq!(clear_imported_project_trim_impl(&stab, None), 1);
+        assert!(stab.params.read().trim_ranges.is_empty());
+    }
+
+    #[test]
+    fn project_without_trim_is_a_noop() {
+        let stab = import_minimal_project(None);
+        assert!(stab.params.read().trim_ranges.is_empty());
+        assert_eq!(clear_imported_project_trim_impl(&stab, None), 0);
+    }
+
+    #[test]
+    fn keep_env_retains_trim() {
+        let stab = import_minimal_project(Some("[[0.2, 0.5]]"));
+        assert_eq!(clear_imported_project_trim_impl(&stab, Some("1")), 0);
+        assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.5)]);
+        // Gate parsing: accepted spellings vs. everything else.
+        for v in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert!(keep_project_trim_requested(Some(v)), "{v:?} must enable the gate");
+        }
+        for v in ["0", "off", "false", "", "no"] {
+            assert!(!keep_project_trim_requested(Some(v)), "{v:?} must not enable the gate");
+        }
+        assert!(!keep_project_trim_requested(None));
+    }
 
     // --- host media pre-rotation inference (adobe-media-rotation-compensation) ---
 
