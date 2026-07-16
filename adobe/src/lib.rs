@@ -137,7 +137,7 @@ impl CrossThreadInstance {
             // Captured during the cache-miss build in stab_manager (container metadata probe).
             container_media_rotation:       None,
             // Set per render call by the Premiere GPU path only (adobe-rotated-anamorphic-full-frame).
-            premiere_transposed_anamorphic: false,
+            premiere_rotated_anamorphic:    false,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false,
                 cached_keyframes:         KeyframeManager::default()

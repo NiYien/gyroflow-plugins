@@ -59,7 +59,6 @@ struct ComputeInputsSnapshot {
     size: (usize, usize),
     output_size: (usize, usize),
     video_rotation: f64,
-    transposed_anamorphic_output: bool,
     adaptive_zoom_window: f64,
     adaptive_zoom_method: i32,
     input_horizontal_stretch: f64,
@@ -104,7 +103,6 @@ fn snapshot_compute_inputs(stab: &StabilizationManager) -> ComputeInputsSnapshot
         size: p.size,
         output_size: p.output_size,
         video_rotation: p.video_rotation,
-        transposed_anamorphic_output: p.transposed_anamorphic_output,
         adaptive_zoom_window: p.adaptive_zoom_window,
         adaptive_zoom_method: p.adaptive_zoom_method,
         input_horizontal_stretch: lens.input_horizontal_stretch,
@@ -155,7 +153,6 @@ impl ComputeInputsSnapshot {
         if self.size != other.size { out.push("size"); }
         if self.output_size != other.output_size { out.push("output_size"); }
         if self.video_rotation != other.video_rotation { out.push("video_rotation"); }
-        if self.transposed_anamorphic_output != other.transposed_anamorphic_output { out.push("transposed_anamorphic_output"); }
         if self.adaptive_zoom_window != other.adaptive_zoom_window { out.push("adaptive_zoom_window"); }
         if self.adaptive_zoom_method != other.adaptive_zoom_method { out.push("adaptive_zoom_method"); }
         if self.input_horizontal_stretch != other.input_horizontal_stretch { out.push("input_horizontal_stretch"); }
@@ -723,7 +720,7 @@ pub struct GyroflowPluginBaseInstance {
     #[serde(skip)]
     pub container_media_rotation: Option<i32>,
 
-    // Gate for the transposed-anamorphic-output step in `stab_manager`
+    // Gate for the rotated-anamorphic-full-frame step in `stab_manager`
     // (adobe-rotated-anamorphic-full-frame). Only the Adobe Premiere render path
     // sets this (per call, before `stab_manager`), mirroring `host_owns_orientation`;
     // OpenFX / frei0r / AE never set it, keeping their load path byte-identical.
@@ -731,7 +728,7 @@ pub struct GyroflowPluginBaseInstance {
     // rotation 90/270 + lens raw stretch ≠ 1) are evaluated inside `stab_manager`.
     // Not persisted: re-decided on every render call.
     #[serde(skip)]
-    pub premiere_transposed_anamorphic: bool,
+    pub premiere_rotated_anamorphic: bool,
 }
 impl Clone for GyroflowPluginBaseInstance {
     fn clone(&self) -> Self {
@@ -755,7 +752,7 @@ impl Clone for GyroflowPluginBaseInstance {
             host_owns_orientation:          self.host_owns_orientation,
             original_project_rotation:      self.original_project_rotation,
             container_media_rotation:       self.container_media_rotation,
-            premiere_transposed_anamorphic: self.premiere_transposed_anamorphic,
+            premiere_rotated_anamorphic:    self.premiere_rotated_anamorphic,
             keyframable_params:             Arc::new(RwLock::new(self.keyframable_params.read().clone())),
         }
     }
@@ -782,7 +779,7 @@ impl Default for GyroflowPluginBaseInstance {
             host_owns_orientation:          false,
             original_project_rotation:      None,
             container_media_rotation:       None,
-            premiere_transposed_anamorphic: false,
+            premiere_rotated_anamorphic:    false,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                 use_gyroflows_keyframes:  false, // TODO param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                 cached_keyframes:         KeyframeManager::default()
@@ -928,7 +925,7 @@ pub fn adobe_media_rotation_enabled() -> bool {
     })
 }
 
-/// Diagnostic kill-switch for the Premiere transposed-anamorphic-output step
+/// Diagnostic kill-switch for the Premiere rotated-anamorphic-full-frame step
 /// (adobe-rotated-anamorphic-full-frame). `GYROFLOW_ADOBE_ANAMORPHIC_FULL_FRAME=0|off|false`
 /// restores the pre-change behavior (anamorphic rotated clips keep the cropped framing).
 /// Read once.
@@ -939,7 +936,7 @@ pub fn adobe_anamorphic_full_frame_enabled() -> bool {
             Ok(v) => {
                 let v = v.trim().to_ascii_lowercase();
                 let off = v == "0" || v == "off" || v == "false";
-                if off { log::info!("Adobe transposed-anamorphic-output disabled via GYROFLOW_ADOBE_ANAMORPHIC_FULL_FRAME"); }
+                if off { log::info!("Adobe rotated-anamorphic-full-frame disabled via GYROFLOW_ADOBE_ANAMORPHIC_FULL_FRAME"); }
                 !off
             }
             Err(_) => true,
@@ -947,7 +944,7 @@ pub fn adobe_anamorphic_full_frame_enabled() -> bool {
     })
 }
 
-/// Gating predicate for the transposed-anamorphic-output step
+/// Gating predicate for the rotated-anamorphic-full-frame step
 /// (adobe-rotated-anamorphic-full-frame): all three must hold —
 /// the host is eligible (only the Premiere render path sets it), the source
 /// container carries a quarter-turn rotation (Premiere's media pipeline
@@ -955,7 +952,7 @@ pub fn adobe_anamorphic_full_frame_enabled() -> bool {
 /// (raw stretch mirrors, which survive `disable_lens_stretch`).
 /// Landscape anamorphic clips (rotation 0/None) and non-anamorphic rotated
 /// clips (stretch 1) stay on the unchanged path.
-pub fn should_transpose_anamorphic_output(
+pub fn should_render_rotated_anamorphic_full_frame(
     host_eligible: bool,
     container_rotation: Option<i32>,
     h_stretch_raw: f64,
@@ -1542,41 +1539,48 @@ impl GyroflowPluginBaseInstance {
             // inside that block.
             let pre_snapshot = snapshot_compute_inputs(&stab);
 
+            // adobe-rotated-anamorphic-full-frame: Premiere renders rotated anamorphic
+            // sources as a squeezed full frame. Keep the DESKTOP pipeline intact —
+            // lens stretch stays active (isotropic camera matrix, self-consistent
+            // add-back everywhere) and the project's desqueezed output_size is
+            // preserved below — and let the kernel's per-axis output-rect mapping
+            // squeeze the desqueezed frame into the fixed source-geometry buffer.
+            // Disabling the stretch here instead would leave the camera matrix
+            // anisotropic in un-rotated buffer axes; after the quarter-turn rotation
+            // the output projection puts that anisotropy on the wrong axis (framing
+            // collapses by 1/stretch²) and the kernel's add-back reconstruction
+            // diverges from the fov model (floating letterbox bars) — see the
+            // change's design.md D6. Landscape anamorphic, non-anamorphic and
+            // non-Premiere paths resolve to `false` → byte-identical behavior.
+            let rotated_anamorphic_full_frame = adobe_anamorphic_full_frame_enabled() && {
+                let lens = stab.lens.read();
+                let h_raw = lens.input_horizontal_stretch_raw().unwrap_or(lens.input_horizontal_stretch);
+                let v_raw = lens.input_vertical_stretch_raw().unwrap_or(lens.input_vertical_stretch);
+                should_render_rotated_anamorphic_full_frame(
+                    self.premiere_rotated_anamorphic,
+                    self.container_media_rotation,
+                    h_raw,
+                    v_raw,
+                )
+            };
+            if rotated_anamorphic_full_frame && disable_stretch {
+                // A stale DisableStretch (auto-set by the lens check above, by a
+                // pre-change build persisted in pending params, or by the PAR probe)
+                // would re-create the mismatched-anisotropy state — force the stretch
+                // back on and keep the stored param consistent. The cache-key
+                // recompute below picks up the flip.
+                disable_stretch = false;
+                let _ = params.set_bool(Params::DisableStretch, false);
+                log::info!(target: "stab.load", "[adobe-geom] rotated anamorphic full frame: stale DisableStretch cleared");
+            }
+
             // Check if loaded preset/project/lens data contains the plugin_disable_stretch flag
-            self.maybe_auto_disable_stretch_from_embedded_data(params, &mut disable_stretch)?;
+            if !rotated_anamorphic_full_frame {
+                self.maybe_auto_disable_stretch_from_embedded_data(params, &mut disable_stretch)?;
+            }
 
             if disable_stretch {
                 stab.disable_lens_stretch(self.anamorphic_adjust_size);
-            }
-
-            // adobe-rotated-anamorphic-full-frame: Premiere renders anamorphic
-            // sources as a squeezed full frame into the fixed source-geometry
-            // buffer (the host owns the desqueeze). For quarter-turn rotated
-            // containers the stretch-disabled camera matrix is anisotropic in
-            // un-rotated buffer axes, so the core output projection must move
-            // that anisotropy to the transposed axis or the framing collapses
-            // by 1/stretch² (see the change's design.md). Landscape anamorphic,
-            // non-anamorphic and non-Premiere paths resolve to `false`, which
-            // is also the core-side default → byte-identical behavior.
-            {
-                let (h_raw, v_raw) = {
-                    let lens = stab.lens.read();
-                    (
-                        lens.input_horizontal_stretch_raw().unwrap_or(lens.input_horizontal_stretch),
-                        lens.input_vertical_stretch_raw().unwrap_or(lens.input_vertical_stretch),
-                    )
-                };
-                let transpose = adobe_anamorphic_full_frame_enabled()
-                    && should_transpose_anamorphic_output(
-                        self.premiere_transposed_anamorphic,
-                        self.container_media_rotation,
-                        h_raw,
-                        v_raw,
-                    );
-                stab.set_transposed_anamorphic_output(transpose);
-                if transpose {
-                    log::info!(target: "stab.load", "[adobe-geom] transposed anamorphic output enabled: container_rotation={:?} stretch_raw=({h_raw:.4},{v_raw:.4}) output_size={:?}", self.container_media_rotation, stab.params.read().output_size);
-                }
             }
 
             stab.set_fov_overview(params.get_bool(Params::ToggleOverview)?);
@@ -1639,6 +1643,20 @@ impl GyroflowPluginBaseInstance {
                 log::info!(target: "stab.load", "[adobe-geom] host-placement neutralization at load: output_size={:?}", stab.params.read().output_size);
             } else if self.host_owns_orientation {
                 log::info!(target: "stab.load", "[adobe-geom] neutralization suppressed: host pre-rotates media (container rotation={:?})", self.container_media_rotation);
+            }
+
+            // adobe-rotated-anamorphic-full-frame: the OutputWidth/Height getter derives
+            // from sequence/source geometry and can never return the project's desqueezed
+            // output size — restore it (captured right after import) so the fov trajectory
+            // and framing stay identical to the desktop app. The kernel then maps this
+            // logical output onto the full output rect per axis, squeezing the desqueezed
+            // frame into the source-geometry buffer; the user desqueezes in the host
+            // (Motion Scale Width × squeeze). Runs after the neutralization block so no
+            // later set_output_size can clobber it (neutralization is suppressed for
+            // pre-rotated media anyway — this ordering is defensive).
+            if rotated_anamorphic_full_frame && self.original_output_size.0 > 0 && self.original_output_size.1 > 0 {
+                stab.set_output_size(self.original_output_size.0, self.original_output_size.1);
+                log::info!(target: "stab.load", "[adobe-geom] rotated anamorphic full frame: stretch kept, output_size restored to {:?} (container_rotation={:?})", stab.params.read().output_size, self.container_media_rotation);
             }
 
             self.set_keyframe_provider(&stab);
@@ -2691,25 +2709,25 @@ mod tests {
     // Truth table: host_eligible × container_rotation × raw stretch. Only the full
     // conjunction gates in; every other combination must stay on the unchanged path.
     #[test]
-    fn transpose_anamorphic_gating_truth_table() {
+    fn rotated_anamorphic_gating_truth_table() {
         // DSC_3172 case: Premiere + rotation 270 + v-stretch 1.5 → gate in.
-        assert!(should_transpose_anamorphic_output(true, Some(270), 1.0, 1.5));
+        assert!(should_render_rotated_anamorphic_full_frame(true, Some(270), 1.0, 1.5));
         // Rotation 90 and h-stretch also gate in.
-        assert!(should_transpose_anamorphic_output(true, Some(90), 1.33, 1.0));
+        assert!(should_render_rotated_anamorphic_full_frame(true, Some(90), 1.33, 1.0));
         // Negative raw degrees normalize (e.g. -90 → 270).
-        assert!(should_transpose_anamorphic_output(true, Some(-90), 1.0, 1.5));
+        assert!(should_render_rotated_anamorphic_full_frame(true, Some(-90), 1.0, 1.5));
 
         // Host not eligible (OpenFX / frei0r / AE never set the instance flag).
-        assert!(!should_transpose_anamorphic_output(false, Some(270), 1.0, 1.5));
+        assert!(!should_render_rotated_anamorphic_full_frame(false, Some(270), 1.0, 1.5));
         // Landscape anamorphic: no container rotation → PAR-conform workflow untouched.
-        assert!(!should_transpose_anamorphic_output(true, Some(0), 1.0, 1.5));
-        assert!(!should_transpose_anamorphic_output(true, None, 1.0, 1.5));
+        assert!(!should_render_rotated_anamorphic_full_frame(true, Some(0), 1.0, 1.5));
+        assert!(!should_render_rotated_anamorphic_full_frame(true, None, 1.0, 1.5));
         // 180° is not a quarter turn — anisotropy axes don't swap.
-        assert!(!should_transpose_anamorphic_output(true, Some(180), 1.0, 1.5));
+        assert!(!should_render_rotated_anamorphic_full_frame(true, Some(180), 1.0, 1.5));
         // Non-anamorphic rotated clip (C6505 case): stretch 1 on both axes.
-        assert!(!should_transpose_anamorphic_output(true, Some(270), 1.0, 1.0));
+        assert!(!should_render_rotated_anamorphic_full_frame(true, Some(270), 1.0, 1.0));
         // Uninitialized stretch fields (0.0) normalize to 1.0 → no gate.
-        assert!(!should_transpose_anamorphic_output(true, Some(270), 0.0, 0.0));
+        assert!(!should_render_rotated_anamorphic_full_frame(true, Some(270), 0.0, 0.0));
     }
 }
 
