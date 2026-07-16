@@ -9,6 +9,13 @@ version = "2.1.2"
 ofx = { git = "https://github.com/AdrianEddy/ofx-rs.git", rev = "0b15219" }
 ofx_sys = { git = "https://github.com/AdrianEddy/ofx-rs.git", rev = "0b15219" }
 
+# TEMPORARY (adobe-rotated-anamorphic-full-frame): build against the local gyroflow
+# checkout — the change needs a gyroflow-core edit that is not on GitHub yet.
+# Before release/CI: push the gyroflow niyien branch, remove this patch section,
+# then `cargo update -p gyroflow-core`.
+[patch."https://github.com/NiYien/gyroflow.git"]
+gyroflow-core = { path = "../gyroflow/src/core" }
+
 [profile.deploy]
 inherits = "release"
 codegen-units = 1

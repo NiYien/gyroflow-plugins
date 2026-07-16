@@ -188,6 +188,12 @@ impl pr::GpuFilter for PremiereGPU {
                         && ((seq.0 as f64 / seq.1 as f64) - (src_out.0 as f64 / src_out.1 as f64)).abs() > 0.01;
                 }
 
+                // adobe-rotated-anamorphic-full-frame: mark this instance as Premiere-eligible
+                // for the transposed-anamorphic-output step. Host eligibility only — the
+                // per-project conditions (container rotation 90/270 + lens raw stretch ≠ 1)
+                // and the env kill-switch are evaluated inside stab_manager's cache-miss build.
+                base_inst.premiere_transposed_anamorphic = true;
+
                 match base_inst.stab_manager(&mut params, &super::global_inst().gyroflow.manager_cache, (out_size.0 as _, out_size.1 as _), false) {
                 Ok(stab) => {
                     // Copy out now (filled during the cache-miss build above) — `inst` is behind a

@@ -1511,6 +1511,10 @@ impl Execute for GyroflowPlugin {
                         // Captured during cache-miss builds but never consumed by OpenFX (the
                         // Premiere-only media pre-rotation compensation reads it).
                         container_media_rotation:     None,
+                        // OpenFX never enables the Premiere-only transposed-anamorphic-output
+                        // step (adobe-rotated-anamorphic-full-frame); the shared stab-manager
+                        // gating resolves to false → load path byte-identical.
+                        premiere_transposed_anamorphic: false,
                         keyframable_params: Arc::new(RwLock::new(KeyframableParams {
                             use_gyroflows_keyframes: param_set.parameter::<Bool>("UseGyroflowsKeyframes")?.get_value()?,
                             cached_keyframes:        KeyframeManager::default()
