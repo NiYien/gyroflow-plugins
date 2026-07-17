@@ -83,16 +83,29 @@ impl CurrentFileInfo {
             // come first to preserve the pre-existing parse-by-line-count expectation. The next 4
             // lines carry the host-input-sizing setting: useCustomSettings (timeline-level toggle),
             // the timeline override or project default for `timelineInputResMismatchBehavior`, and
-            // the project's timelineResolutionWidth/Height (used as `stab.params.size` in Stretch).
+            // timelineResolutionWidth/Height (used as `stab.params.size` in Stretch and for the
+            // FillCrop/CenterCrop crop geometry). The resolution honors the same timeline
+            // custom-settings override as the mismatch mode: a custom timeline can have a different
+            // resolution than the project (e.g. a portrait 1080x1920 timeline in a 1920x1080
+            // project), and the project-level read returned the wrong dimensions there. Empty
+            // timeline-level values (older Resolve / missing keys) fall back to the project read.
             // Empty-string fallbacks (older Resolve versions / missing keys) keep the line count.
+            //
+            // Known host caveat (Resolve 21.0.0.47): timeline-settings-dialog edits update the UI
+            // model and the renderer but NOT the snapshot store GetSetting reads from — the
+            // snapshot only refreshes on project load, on a scripting-API SetSetting write, or
+            // when the user toggles the dialog's "Use Project Settings" checkbox off/on. Until
+            // Blackmagic fixes it, a stale mismatch mode here is expected after in-session dialog
+            // edits; there is no read path to the live value.
             let script = "proj = Resolve():GetProjectManager():GetCurrentProject();\
                               tl = proj:GetCurrentTimeline();\
                               p = tl:GetCurrentVideoItem():GetMediaPoolItem():GetClipProperty();\
                               print(p['FPS']);print(p['Frames']);print(p['Duration']);print(p['PAR']);print(p['Resolution']);print(p['File Path']);\
                               ucs = tl:GetSetting('useCustomSettings') or '';\
                               if ucs == '1' then mm = tl:GetSetting('timelineInputResMismatchBehavior') or ''; else mm = proj:GetSetting('timelineInputResMismatchBehavior') or ''; end;\
-                              tw = proj:GetSetting('timelineResolutionWidth') or '';\
-                              th = proj:GetSetting('timelineResolutionHeight') or '';\
+                              tw = ''; th = '';\
+                              if ucs == '1' then tw = tl:GetSetting('timelineResolutionWidth') or ''; th = tl:GetSetting('timelineResolutionHeight') or ''; end;\
+                              if tw == '' or th == '' then tw = proj:GetSetting('timelineResolutionWidth') or ''; th = proj:GetSetting('timelineResolutionHeight') or ''; end;\
                               print(ucs);print(mm);print(tw);print(th);";
             if let Ok(out) = cmd.args(["-q", "-l", "lua", "-x", &script]).output() {
                 let stdout = String::from_utf8(out.stdout).unwrap_or_default();

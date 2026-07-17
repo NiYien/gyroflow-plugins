@@ -44,6 +44,79 @@ pub fn frame_from_timetype(time: TimeType) -> f64 {
     }
 }
 
+/// Diagnostic kill-switch for the anamorphic physical-aspect band guesses
+/// (ofx-anamorphic-band-guess). `GYROFLOW_OFX_ANAMORPHIC_BAND=0|off|false`
+/// restores the stretch-blind (pre-change) input/output band guesses.
+/// Read once.
+fn ofx_anamorphic_band_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        match std::env::var("GYROFLOW_OFX_ANAMORPHIC_BAND") {
+            Ok(v) => {
+                let v = v.trim().to_ascii_lowercase();
+                let off = v == "0" || v == "off" || v == "false";
+                if off { log::info!("OpenFX anamorphic physical-aspect band guesses disabled via GYROFLOW_OFX_ANAMORPHIC_BAND"); }
+                !off
+            }
+            Err(_) => true,
+        }
+    })
+}
+
+/// Physical (buffer-space) aspect ratios for the input content-band and output aspect-fit
+/// guesses (ofx-anamorphic-band-guess). The host buffer holds physical squeezed pixels —
+/// the clip PAR is applied only at display time — so both guesses must divide the lens
+/// anamorphic stretch back out of the logical sizes:
+/// - `params.size` carries the stretch only after `disable_lens_stretch(adjust_size=true)`
+///   (auto-enabled when an anamorphic lens loads on OpenFX) baked it in and reset the live
+///   lens stretch to 1.0; the `_raw` mirrors keep the original λ. The stretch baked into
+///   `size` is therefore `raw / live` per storage axis (1.0 while the stretch is still
+///   active and `size` is the raw storage size).
+/// - `output_size` is the desqueezed logical output in display orientation; the host PAR
+///   widening always corresponds to the full raw stretch, mapped through InputRotation
+///   (storage-vertical becomes display-horizontal under 90/270).
+/// Returns `(org_ratio, output_aspect)`. Stretch factors ≤ 0.01 are treated as 1.0, so
+/// non-anamorphic sources reproduce the stretch-blind ratios exactly.
+/// Storage-axis stretch factors baked into `stab.params.size` (raw λ ÷ live), guarded and
+/// kill-switch aware. (1.0, 1.0) for non-anamorphic lenses, when the stretch is still live
+/// (size is the raw storage size), or when `GYROFLOW_OFX_ANAMORPHIC_BAND=0`.
+fn lens_baked_stretch(stab: &StabilizationManager) -> (f64, f64) {
+    if !ofx_anamorphic_band_enabled() {
+        return (1.0, 1.0);
+    }
+    let lens = stab.lens.read();
+    let guard = |s: f64| if s > 0.01 { s } else { 1.0 };
+    let live = (guard(lens.input_horizontal_stretch), guard(lens.input_vertical_stretch));
+    let raw = (
+        guard(lens.input_horizontal_stretch_raw().unwrap_or(live.0)),
+        guard(lens.input_vertical_stretch_raw().unwrap_or(live.1)),
+    );
+    (raw.0 / live.0, raw.1 / live.1)
+}
+
+fn physical_band_aspects(
+    size: (usize, usize),
+    output_size: (usize, usize),
+    rotated_90_270: bool,
+    live_stretch: (f64, f64),
+    raw_stretch: (f64, f64),
+) -> (f64, f64) {
+    let guard = |s: f64| if s > 0.01 { s } else { 1.0 };
+    let (live_h, live_v) = (guard(live_stretch.0), guard(live_stretch.1));
+    let (raw_h, raw_v) = (guard(raw_stretch.0), guard(raw_stretch.1));
+    // Degenerate (zero) dimensions keep the stretch-blind semantics: numerator unclamped so a
+    // zero size/output component yields ratio 0.0 (which the aspect-fit gate treats as
+    // "disabled", same as before this change); only denominators are clamped.
+    let phys_w_num = size.0 as f64 / (raw_h / live_h);
+    let phys_h_num = size.1 as f64 / (raw_v / live_v);
+    let phys_w_den = size.0.max(1) as f64 / (raw_h / live_h);
+    let phys_h_den = size.1.max(1) as f64 / (raw_v / live_v);
+    let org_ratio = if rotated_90_270 { phys_h_num / phys_w_den } else { phys_w_num / phys_h_den };
+    let (out_h_squeeze, out_v_squeeze) = if rotated_90_270 { (raw_v, raw_h) } else { (raw_h, raw_v) };
+    let output_aspect = (output_size.0 as f64 / out_h_squeeze) / (output_size.1.max(1) as f64 / out_v_squeeze);
+    (org_ratio, output_aspect)
+}
+
 // OpenFX-only enum describing how the host has resized the source image into the timeline
 // buffer. `Auto` means "use whatever fuscript detected from Resolve's
 // `timelineInputResMismatchBehavior` setting; fall back to `Fit` when fuscript is unavailable
@@ -139,6 +212,46 @@ pub fn resolve_host_input_sizing(
 //
 // Returns `(crop_w, crop_h, crop_x, crop_y)`. If `source_size` is already at `timeline_aspect`
 // the function returns the full source unchanged (no-op).
+// Anamorphic-aware wrapper over `compute_crop_geometry` (ofx-anamorphic-band-guess).
+// `stab.params.size` carries the lens desqueeze baked in (`disable_lens_stretch(adjust_size)`),
+// but Resolve's input-sizing decision operates on the clip's physical storage pixels (clip PAR
+// is not applied when compositing into the effect buffer — proven by the source-native squeezed
+// buffers observed in Fit mode). Modeling the crop with the desqueezed size fabricates a crop
+// the host never performed (e.g. a squeezed 1080×1920 clip on a 1080×1920 timeline: desqueezed
+// aspect 0.84 vs 0.5625 → phantom 1.5× horizontal crop → pillarboxed render).
+//
+// Divides the baked stretch out, crops in physical space, and scales the result back to the
+// desqueezed space the stab params live in (display axes map through the rotation). Returns
+// `None` when the host performs no crop (physical display aspect already matches the timeline,
+// ±1 px rounding) — the caller must leave the stab state untouched in that case.
+pub fn compute_fillcrop_geometry_desqueezed(
+    source_size: (usize, usize),
+    baked_stretch: (f64, f64),
+    timeline_aspect: f64,
+    video_rotation_deg: f64,
+) -> Option<(usize, usize, usize, usize)> {
+    let (bh, bv) = baked_stretch;
+    let phys = (
+        ((source_size.0 as f64 / bh).round() as usize).max(1),
+        ((source_size.1 as f64 / bv).round() as usize).max(1),
+    );
+    let (pw, ph, px, py) = compute_crop_geometry(phys, timeline_aspect, video_rotation_deg);
+    let rotation = (((video_rotation_deg.round() as i64) % 360) + 360) % 360;
+    let rotated = rotation == 90 || rotation == 270;
+    let disp_phys = if rotated { (phys.1, phys.0) } else { phys };
+    if px == 0 && py == 0 && pw.abs_diff(disp_phys.0) <= 1 && ph.abs_diff(disp_phys.1) <= 1 {
+        return None;
+    }
+    // Storage-axis stretch factors mapped to display axes (crop values are display-oriented).
+    let (s_dw, s_dh) = if rotated { (bv, bh) } else { (bh, bv) };
+    Some((
+        (pw as f64 * s_dw).round() as usize,
+        (ph as f64 * s_dh).round() as usize,
+        (px as f64 * s_dw).round() as usize,
+        (py as f64 * s_dh).round() as usize,
+    ))
+}
+
 pub fn compute_crop_geometry(
     source_size: (usize, usize),
     timeline_aspect: f64,
@@ -485,6 +598,58 @@ impl InstanceData {
     // stab cache rebuilt the stab underneath us (different Arc identity) and rebases the
     // pre-mode snapshot from the freshly-loaded lens.
     //
+    // Undo any mode transform (FillCrop/CenterCrop/Stretch size/lens mutation) on the stab it
+    // was applied to, so a load-level transform (InputRotation) operates on the clean baseline
+    // and the next mode apply re-snapshots a baseline that already includes that transform.
+    // Without this, the rotation override runs on the mode-mutated state and the cleared
+    // snapshots adopt it as the new baseline — permanently baking in a crop computed for the
+    // pre-rotation aspect (C0016: landscape 1215×2160 crop kept after rotating to portrait,
+    // where the host no longer crops at all).
+    fn restore_host_input_sizing_baseline(&mut self) {
+        let Some(stab) = self.last_applied_stab.as_ref().and_then(|w| w.upgrade()) else { return; };
+        if let (Some(size), Some(out_size), Some(cm), Some(cd)) = (
+            self.pre_mode_size,
+            self.pre_mode_output_size,
+            self.pre_mode_camera_matrix.as_ref().cloned(),
+            self.pre_mode_calib_dimension,
+        ) {
+            // Compare-before-write: a no-op restore (Fit/identity instances) must stay a true
+            // no-op — no writes, no invalidation, no log.
+            let mut changed = false;
+            {
+                let mut params_lk = stab.params.write();
+                if params_lk.size != size || params_lk.output_size != out_size {
+                    params_lk.size = size;
+                    params_lk.output_size = out_size;
+                    changed = true;
+                }
+            }
+            {
+                let mut lens_lk = stab.lens.write();
+                if lens_lk.fisheye_params.camera_matrix != cm
+                    || lens_lk.calib_dimension.w != cd.0
+                    || lens_lk.calib_dimension.h != cd.1
+                {
+                    lens_lk.fisheye_params.camera_matrix = cm;
+                    lens_lk.calib_dimension = gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: cd.0, h: cd.1 };
+                    changed = true;
+                }
+            }
+            if changed {
+                // The restore mutated real geometry: refresh sizes and mark the lazily-recomputed
+                // kernel state stale (same flags the rotation override uses), so the next
+                // process_pixels rebuilds ComputeParams from the restored params even when the
+                // override that follows turns out to be a no-op.
+                stab.init_size();
+                stab.invalidate_smoothing();
+                stab.invalidate_blocking_zooming();
+                stab.invalidate_blocking_undistortion();
+                log::info!(target: "ofx",
+                    "host_input_sizing: baseline restored before input-rotation override (size={size:?} output_size={out_size:?})");
+            }
+        }
+    }
+
     // `timeline_w` / `timeline_h` are the OFX output buffer dimensions (= timeline pixel dims
     // on Edit/Color page). `timeline_aspect` is derived from them; Stretch mode uses the raw
     // values directly as the new `stab.params.size`.
@@ -529,6 +694,12 @@ impl InstanceData {
 
         // Always restore to the pre-mode baseline before applying the new mode's transform.
         // Without this, switching FillCrop -> Stretch would Stretch an already-cropped lens.
+        // Track whether the restore actually changed values: when the new mode's arm then does
+        // NOT mutate (Fit, or the FillCrop identity/None path), the recompute at the bottom must
+        // still run — otherwise the kernel keeps ComputeParams baked for the previous mode's
+        // dimensions while the live params are back at the baseline (stale-geometry renders on
+        // e.g. Stretch -> FillCrop-identity or FillCrop -> Fit transitions).
+        let mut restore_changed = false;
         if let (Some(size), Some(out_size), Some(cm), Some(cd)) = (
             self.pre_mode_size,
             self.pre_mode_output_size,
@@ -537,13 +708,22 @@ impl InstanceData {
         ) {
             {
                 let mut params_lk = stab.params.write();
-                params_lk.size = size;
-                params_lk.output_size = out_size;
+                if params_lk.size != size || params_lk.output_size != out_size {
+                    params_lk.size = size;
+                    params_lk.output_size = out_size;
+                    restore_changed = true;
+                }
             }
             {
                 let mut lens_lk = stab.lens.write();
-                lens_lk.fisheye_params.camera_matrix = cm;
-                lens_lk.calib_dimension = gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: cd.0, h: cd.1 };
+                if lens_lk.fisheye_params.camera_matrix != cm
+                    || lens_lk.calib_dimension.w != cd.0
+                    || lens_lk.calib_dimension.h != cd.1
+                {
+                    lens_lk.fisheye_params.camera_matrix = cm;
+                    lens_lk.calib_dimension = gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: cd.0, h: cd.1 };
+                    restore_changed = true;
+                }
             }
         }
 
@@ -560,29 +740,40 @@ impl InstanceData {
                         (p.size, p.video_rotation)
                     };
                     let timeline_aspect = timeline_w as f64 / timeline_h as f64;
-                    let (crop_w, crop_h, crop_x, crop_y) =
-                        compute_crop_geometry(source_size, timeline_aspect, video_rotation);
-                    if crop_w == 0 || crop_h == 0 {
-                        log::warn!(target: "ofx", "host_input_sizing: skipping crop — geometry resolved to zero");
-                        false
-                    } else {
-                        {
-                            let mut lens_lk = stab.lens.write();
-                            if lens_lk.fisheye_params.camera_matrix.len() >= 2 {
-                                lens_lk.fisheye_params.camera_matrix[0][2] -= crop_x as f64;
-                                lens_lk.fisheye_params.camera_matrix[1][2] -= crop_y as f64;
+                    // Anamorphic-aware crop model: crop in physical (squeezed) space, scale back
+                    // to the desqueezed space `stab.params` live in. `None` = the host performs
+                    // no crop (physical aspect matches the timeline) — leave the stab untouched;
+                    // the Fit-equivalent render path is already correct for that geometry.
+                    let baked_stretch = lens_baked_stretch(stab);
+                    match compute_fillcrop_geometry_desqueezed(source_size, baked_stretch, timeline_aspect, video_rotation) {
+                        None => {
+                            log::info!(target: "ofx",
+                                "host_input_sizing: mode={mode:?} no host crop (physical aspect matches timeline) — leaving stab untouched; source={source_size:?} baked_stretch={baked_stretch:?} video_rotation={video_rotation}");
+                            false
+                        }
+                        Some((crop_w, crop_h, crop_x, crop_y)) if crop_w == 0 || crop_h == 0 => {
+                            log::warn!(target: "ofx", "host_input_sizing: skipping crop — geometry resolved to zero");
+                            false
+                        }
+                        Some((crop_w, crop_h, crop_x, crop_y)) => {
+                            {
+                                let mut lens_lk = stab.lens.write();
+                                if lens_lk.fisheye_params.camera_matrix.len() >= 2 {
+                                    lens_lk.fisheye_params.camera_matrix[0][2] -= crop_x as f64;
+                                    lens_lk.fisheye_params.camera_matrix[1][2] -= crop_y as f64;
+                                }
+                                lens_lk.calib_dimension =
+                                    gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: crop_w, h: crop_h };
                             }
-                            lens_lk.calib_dimension =
-                                gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: crop_w, h: crop_h };
+                            {
+                                let mut params_lk = stab.params.write();
+                                params_lk.size = (crop_w, crop_h);
+                                params_lk.output_size = (crop_w, crop_h);
+                            }
+                            log::info!(target: "ofx",
+                                "host_input_sizing: mode={mode:?} crop=({crop_w}x{crop_h}) offset=({crop_x},{crop_y}) source={source_size:?} baked_stretch={baked_stretch:?} video_rotation={video_rotation}");
+                            true
                         }
-                        {
-                            let mut params_lk = stab.params.write();
-                            params_lk.size = (crop_w, crop_h);
-                            params_lk.output_size = (crop_w, crop_h);
-                        }
-                        log::info!(target: "ofx",
-                            "host_input_sizing: mode={mode:?} crop=({crop_w}x{crop_h}) offset=({crop_x},{crop_y}) source={source_size:?} video_rotation={video_rotation}");
-                        true
                     }
                 }
             }
@@ -604,12 +795,14 @@ impl InstanceData {
             }
         };
 
-        if did_mutate {
+        if did_mutate || restore_changed {
             stab.init_size();
             // Mode transitions reshape the stab's effective camera and resampling targets, so
             // invalidate smoothing/zooming caches that depend on those dimensions before the
             // recompute. `recompute_blocking` runs the full smoothing + zoom + undistort chain
-            // synchronously so the next `process_pixels` call sees consistent state.
+            // synchronously so the next `process_pixels` call sees consistent state. Also runs
+            // when only the restore changed values (non-mutating arm after a mutating mode),
+            // so the restored baseline geometry is actually recomputed into the kernel state.
             stab.invalidate_smoothing();
             stab.recompute_blocking();
         }
@@ -986,6 +1179,21 @@ impl Execute for GyroflowPlugin {
                 // unmutated and its rotation IS the project rotation).
                 let original_rotation = instance_data.plugin.original_project_rotation;
                 let project_rotation = *instance_data.project_video_rotation.get_or_insert_with(|| original_rotation.unwrap_or_else(|| stab.params.read().video_rotation));
+                // Same contract as the InstanceChanged(InputRotation) handler: when the override
+                // is about to act, it must operate on the clean baseline, not on a
+                // FillCrop/Stretch-mutated state (the snapshot-clearing below would otherwise
+                // adopt the mutated state as the new baseline). Precheck with the same pure
+                // decision the override uses so a no-op override never triggers a restore
+                // (restoring without clearing `applied_host_input_sizing` would silently drop
+                // an active crop). The restore does not touch `video_rotation`, so the precheck
+                // result is unaffected by it.
+                if !instance_data.is_fusion_page {
+                    let input_rotation_index = instance_data.params.get_i32(Params::InputRotation).unwrap_or(0);
+                    let current_video_rotation = stab.params.read().video_rotation;
+                    if input_rotation_target_rotation(project_rotation, current_video_rotation, input_rotation_index).is_some() {
+                        instance_data.restore_host_input_sizing_baseline();
+                    }
+                }
                 if apply_openfx_input_rotation_override(
                     instance_data.is_fusion_page,
                     project_rotation,
@@ -1112,17 +1320,35 @@ impl Execute for GyroflowPlugin {
                 let input_rotation_deg = input_rotation_deg_from_index(instance_data.params.get_i32(Params::InputRotation).unwrap_or(0));
                 let input_rotated_90_270 = matches!((input_rotation_deg.round().abs() as i64) % 180, 90);
 
+                // Lens stretch factors for the physical band guesses. The live fields are 1.0
+                // after `disable_lens_stretch` (auto-enabled on anamorphic lens load); the `_raw`
+                // mirrors keep the original λ — see `physical_band_aspects`. Lens lock is scoped
+                // before the params lock below.
+                let guard_stretch = |s: f64| if s > 0.01 { s } else { 1.0 };
+                let (live_stretch, raw_stretch) = if ofx_anamorphic_band_enabled() {
+                    let lens = stab.lens.read();
+                    let live = (guard_stretch(lens.input_horizontal_stretch), guard_stretch(lens.input_vertical_stretch));
+                    let raw = (
+                        guard_stretch(lens.input_horizontal_stretch_raw().unwrap_or(live.0)),
+                        guard_stretch(lens.input_vertical_stretch_raw().unwrap_or(live.1)),
+                    );
+                    (live, raw)
+                } else {
+                    ((1.0, 1.0), (1.0, 1.0))
+                };
+
                 let params = stab.params.read();
                 let fps = params.fps;
                 let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
-                let org_ratio = if input_rotated_90_270 {
-                    params.size.1 as f64 / params.size.0.max(1) as f64
-                } else {
-                    params.size.0 as f64 / params.size.1.max(1) as f64
-                };
-                // Aspect ratio of the core's logical output frame (`StabilizationManager` `output_size`).
-                // Used to letterbox/pillarbox the stabilized output into a mismatched host buffer.
-                let output_aspect = params.output_size.0 as f64 / params.output_size.1.max(1) as f64;
+                // Input content-band aspect and output aspect-fit ratio, both in physical
+                // buffer space (anamorphic stretch divided back out; identity for
+                // non-anamorphic sources). A physical-aspect match collapses the output rect
+                // to the full buffer and the kernel's per-axis rect mapping then squeezes the
+                // desqueezed logical output into it (the host clip PAR widens it on display).
+                let (org_ratio, output_aspect) = physical_band_aspects(params.size, params.output_size, input_rotated_90_270, live_stretch, raw_stretch);
+                if raw_stretch != (1.0, 1.0) {
+                    log::debug!("anamorphic band guess: live_stretch={live_stretch:?} raw_stretch={raw_stretch:?} rotated_90_270={input_rotated_90_270} size={:?} output_size={:?} org_ratio={org_ratio:.4} output_aspect={output_aspect:.4}", params.size, params.output_size);
+                }
                 let (has_accurate_timestamps, has_offsets) = {
                     let gyro = stab.gyro.read();
                     let md = gyro.file_metadata.read();
@@ -1829,6 +2055,11 @@ impl Execute for GyroflowPlugin {
                             instance_data.plugin.original_project_rotation,
                             instance_data.params.get_f64(Params::Rotation).unwrap_or_default(),
                         );
+                        // Undo any FillCrop/CenterCrop/Stretch mutation first: the rotation
+                        // override must operate on the clean baseline, and the snapshot-clearing
+                        // below would otherwise adopt the mode-mutated state as the new baseline
+                        // (baking in a crop computed for the pre-rotation aspect).
+                        instance_data.restore_host_input_sizing_baseline();
                         if apply_openfx_input_rotation_override_to_managers(
                             instance_data.is_fusion_page,
                             project_rotation,
@@ -1863,7 +2094,13 @@ impl Execute for GyroflowPlugin {
                         instance_data.pre_mode_calib_dimension = None;
                     }
                 } else {
-                    log::error!("Unknown param name: {:?}", in_args.get_name()?);
+                    let name = in_args.get_name()?;
+                    // Hidden paste-preserve shadow params (*ManuallyEdited) intentionally have no
+                    // handler arm — they only exist for snapshot/merge; keep them out of the
+                    // error log (pre-existing noise: "Unknown param name: InputRotationManuallyEdited").
+                    if !name.ends_with("ManuallyEdited") {
+                        log::error!("Unknown param name: {:?}", name);
+                    }
                 }
 
                 OK
@@ -2164,6 +2401,92 @@ mod tests {
     // openfx-restore-rotation-order; behavior unchanged). The IR-specific wrappers that used to
     // live here were removed when InputRotation joined the general paste-preserve framework.
     // ============================================================================================
+
+    // ============================================================================================
+    // FillCrop/CenterCrop anamorphic-aware crop geometry (ofx-anamorphic-band-guess): the crop
+    // model runs in physical (squeezed) pixel space — the space Resolve's input sizing actually
+    // operates in — and scales back to the desqueezed stab space. Identity crops return None.
+    // ============================================================================================
+
+    #[test]
+    fn fillcrop_vertical_anamorphic_matching_timeline_is_noop() {
+        // DSC_3172 on a portrait 1080×1920 timeline: physical display 1080×1920 == timeline
+        // aspect → the host performs no crop; the desqueezed-size model used to fabricate a
+        // phantom 1.5× horizontal crop here (pillarboxed render).
+        let crop = compute_fillcrop_geometry_desqueezed((1920, 1620), (1.0, 1.5), 1080.0 / 1920.0, 270.0);
+        assert_eq!(crop, None);
+    }
+
+    #[test]
+    fn fillcrop_landscape_anamorphic_on_portrait_timeline_scales_back() {
+        // R5MK2 (5760×2160 desqueezed, h=1.5) on a portrait 1080×1920 timeline: Resolve crops
+        // the physical 3840×2160 frame to a centered 1215×2160 slice; scaled back to the
+        // desqueezed space that is 1823×2160 at x-offset 1968.
+        let crop = compute_fillcrop_geometry_desqueezed((5760, 2160), (1.5, 1.0), 1080.0 / 1920.0, 0.0);
+        assert_eq!(crop, Some((1823, 2160, 1968, 0)));
+    }
+
+    #[test]
+    fn fillcrop_non_anamorphic_matches_raw_geometry() {
+        // Non-anamorphic ultrawide crop: identical numbers to the raw compute_crop_geometry.
+        let crop = compute_fillcrop_geometry_desqueezed((3840, 2160), (1.0, 1.0), 1080.0 / 1920.0, 0.0);
+        let raw = compute_crop_geometry((3840, 2160), 1080.0 / 1920.0, 0.0);
+        assert_eq!(crop, Some(raw));
+    }
+
+    #[test]
+    fn fillcrop_non_anamorphic_exact_match_is_noop() {
+        // Rotated FHD clip whose display orientation matches the portrait timeline exactly.
+        let crop = compute_fillcrop_geometry_desqueezed((1920, 1080), (1.0, 1.0), 1080.0 / 1920.0, 90.0);
+        assert_eq!(crop, None);
+    }
+
+    // ============================================================================================
+    // Physical band aspects (ofx-anamorphic-band-guess): the input content-band and output
+    // aspect-fit guesses divide the lens anamorphic stretch back out so they operate in the
+    // host buffer's physical pixel space.
+    // ============================================================================================
+
+    #[test]
+    fn physical_band_vertical_anamorphic_disabled_stretch() {
+        // DSC_3172 as-built: disable_lens_stretch(adjust_size=true) baked v=1.5 into size
+        // (1920,1080)→(1920,1620) and reset the live stretch to 1.0; raw mirrors keep 1.5.
+        // Buffer is 1080×1920 physical → both ratios must equal 0.5625.
+        let (org, out) = physical_band_aspects((1920, 1620), (1620, 1920), true, (1.0, 1.0), (1.0, 1.5));
+        assert!((org - 0.5625).abs() < 1e-9, "org_ratio={org}");
+        assert!((out - 0.5625).abs() < 1e-9, "output_aspect={out}");
+    }
+
+    #[test]
+    fn physical_band_vertical_anamorphic_active_stretch() {
+        // User un-checked DisableStretch: live stretch stays 1.5, size is the raw storage
+        // size (baked factor = raw/live = 1.0). Same physical ratios as the disabled path.
+        let (org, out) = physical_band_aspects((1920, 1080), (1620, 1920), true, (1.0, 1.5), (1.0, 1.5));
+        assert!((org - 0.5625).abs() < 1e-9, "org_ratio={org}");
+        assert!((out - 0.5625).abs() < 1e-9, "output_aspect={out}");
+    }
+
+    #[test]
+    fn physical_band_landscape_2x_anamorphic_disabled_stretch() {
+        // Landscape 2x anamorphic, stretch baked into size (1920,1080)→(3840,1080).
+        // Buffer is 1920×1080 physical → both ratios must equal 16:9.
+        let (org, out) = physical_band_aspects((3840, 1080), (3840, 1080), false, (1.0, 1.0), (2.0, 1.0));
+        let expected = 1920.0 / 1080.0;
+        assert!((org - expected).abs() < 1e-9, "org_ratio={org}");
+        assert!((out - expected).abs() < 1e-9, "output_aspect={out}");
+    }
+
+    #[test]
+    fn physical_band_non_anamorphic_identity() {
+        // No stretch (and the unset 0.0 form): ratios must match the stretch-blind values.
+        for stretch in [(1.0, 1.0), (0.0, 0.0)] {
+            let (org, out) = physical_band_aspects((1920, 1080), (1620, 1920), false, stretch, stretch);
+            assert!((org - 1920.0 / 1080.0).abs() < 1e-9, "org_ratio={org}");
+            assert!((out - 1620.0 / 1920.0).abs() < 1e-9, "output_aspect={out}");
+            let (org_r, _) = physical_band_aspects((1920, 1080), (1620, 1920), true, stretch, stretch);
+            assert!((org_r - 1080.0 / 1920.0).abs() < 1e-9, "rotated org_ratio={org_r}");
+        }
+    }
 
     #[test]
     fn target_rotation_maps_dropdown_and_restores_project_rotation() {
