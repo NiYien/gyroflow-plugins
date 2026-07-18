@@ -1663,8 +1663,14 @@ impl GyroflowPluginBaseInstance {
 
             if let Ok(im) = params.get_i32(Params::IntegrationMethod) {
                 let mut gyro = stab.gyro.write();
-                gyro.integration_method = im as usize;
-                gyro.apply_transforms();
+                let im = im as usize;
+                // apply_transforms reintegrates the full raw_imu — seconds on
+                // long recorder sessions — so only pay it when the method
+                // actually changes vs. what the imported project integrated with.
+                if gyro.integration_method != im {
+                    gyro.integration_method = im;
+                    gyro.apply_transforms();
+                }
             }
 
             if let Ok(zm) = params.get_i32(Params::ZoomMode) {
@@ -1696,8 +1702,29 @@ impl GyroflowPluginBaseInstance {
             let post_snapshot = snapshot_compute_inputs(&stab);
             if pre_snapshot != post_snapshot {
                 let diff = pre_snapshot.diff(&post_snapshot);
-                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?}");
-                stab.invalidate_smoothing();
+                // smoothing-perf-recompute-gating: only force-invalidate for
+                // fields that affect a leg but are NOT expressed through the
+                // core checksum gates (gyro/smoothing checksums for the
+                // smoothing leg, zooming::get_checksum for the zoom leg).
+                // Everything else lets the gated recompute_blocking decide,
+                // so a size/stretch-only host negotiation diff no longer
+                // reruns smoothing over the whole gyro timeline.
+                const SMOOTHING_UNCOVERED: &[&str] = &["keyframes"];
+                const ZOOM_UNCOVERED: &[&str] = &[
+                    "adaptive_zoom_method",
+                    "input_horizontal_stretch",
+                    "input_vertical_stretch",
+                    "input_horizontal_stretch_raw",
+                    "input_vertical_stretch_raw",
+                ];
+                let smoothing_uncovered = diff.iter().any(|f| SMOOTHING_UNCOVERED.contains(f));
+                let zoom_uncovered = diff.iter().any(|f| ZOOM_UNCOVERED.contains(f));
+                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?} force_smoothing={smoothing_uncovered} force_zooming={zoom_uncovered}");
+                if smoothing_uncovered {
+                    stab.invalidate_smoothing();
+                } else if zoom_uncovered {
+                    stab.invalidate_zooming();
+                }
                 stab.recompute_blocking();
             } else {
                 log::info!(target: "stab.load", "post-mutation recompute skipped, no input change");
