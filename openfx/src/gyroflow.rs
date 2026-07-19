@@ -63,10 +63,10 @@ fn ofx_anamorphic_band_enabled() -> bool {
     })
 }
 
-/// Physical (buffer-space) aspect ratios for the input content-band and output aspect-fit
-/// guesses (ofx-anamorphic-band-guess). The host buffer holds physical squeezed pixels —
-/// the clip PAR is applied only at display time — so both guesses must divide the lens
-/// anamorphic stretch back out of the logical sizes:
+/// Physical (source-native squeezed) aspect ratios for the input content-band and output
+/// aspect-fit guesses (ofx-anamorphic-band-guess). Both guesses divide the lens anamorphic
+/// stretch back out of the logical sizes. Resolve can also supply PAR-composited timeline
+/// buffers; `select_anamorphic_band_aspects` classifies that case after the buffer is loaded.
 /// - `params.size` carries the stretch only after `disable_lens_stretch(adjust_size=true)`
 ///   (auto-enabled when an anamorphic lens loads on OpenFX) baked it in and reset the live
 ///   lens stretch to 1.0; the `_raw` mirrors keep the original λ. The stretch baked into
@@ -115,6 +115,77 @@ fn physical_band_aspects(
     let (out_h_squeeze, out_v_squeeze) = if rotated_90_270 { (raw_v, raw_h) } else { (raw_h, raw_v) };
     let output_aspect = (output_size.0 as f64 / out_h_squeeze) / (output_size.1.max(1) as f64 / out_v_squeeze);
     (org_ratio, output_aspect)
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum BandAspectSpace {
+    LegacyLogical,
+    Physical,
+    HostParComposited,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct BandAspectSelection {
+    space: BandAspectSpace,
+    org_ratio: f64,
+    output_aspect: f64,
+}
+
+fn aspects_match_within_one_percent(left: f64, right: f64) -> bool {
+    left.is_finite()
+        && right.is_finite()
+        && left > 0.0
+        && right > 0.0
+        && ((left / right) - 1.0).abs() <= 0.01
+}
+
+fn select_anamorphic_band_aspects(
+    enabled: bool,
+    host_name: Option<&str>,
+    mode_is_fit: bool,
+    is_fusion_page: bool,
+    dont_draw_outside: bool,
+    is_preview_or_subscale: bool,
+    raw_stretch: (f64, f64),
+    logical_aspects: (f64, f64),
+    physical_aspects: (f64, f64),
+    source_buffer_size: (usize, usize),
+) -> BandAspectSelection {
+    let selection = |space, (org_ratio, output_aspect)| BandAspectSelection {
+        space,
+        org_ratio,
+        output_aspect,
+    };
+    if !enabled {
+        return selection(BandAspectSpace::LegacyLogical, logical_aspects);
+    }
+
+    let is_resolve = matches!(host_name, Some("DaVinciResolve" | "com.blackmagicdesign.resolve"));
+    let anamorphic = (raw_stretch.0 - 1.0).abs() > 0.01 || (raw_stretch.1 - 1.0).abs() > 0.01;
+    if !is_resolve
+        || !anamorphic
+        || !mode_is_fit
+        || is_fusion_page
+        || dont_draw_outside
+        || is_preview_or_subscale
+    {
+        return selection(BandAspectSpace::Physical, physical_aspects);
+    }
+
+    let (buffer_w, buffer_h) = source_buffer_size;
+    if buffer_w == 0 || buffer_h == 0 {
+        return selection(BandAspectSpace::Physical, physical_aspects);
+    }
+
+    let source_buffer_aspect = buffer_w as f64 / buffer_h as f64;
+    let logical_and_physical_are_distinct = (logical_aspects.0 - physical_aspects.0).abs() > 0.1;
+    if !logical_and_physical_are_distinct
+        || aspects_match_within_one_percent(source_buffer_aspect, physical_aspects.0)
+    {
+        selection(BandAspectSpace::Physical, physical_aspects)
+    } else {
+        selection(BandAspectSpace::HostParComposited, logical_aspects)
+    }
 }
 
 // OpenFX-only enum describing how the host has resized the source image into the timeline
@@ -1325,7 +1396,8 @@ impl Execute for GyroflowPlugin {
                 // mirrors keep the original λ — see `physical_band_aspects`. Lens lock is scoped
                 // before the params lock below.
                 let guard_stretch = |s: f64| if s > 0.01 { s } else { 1.0 };
-                let (live_stretch, raw_stretch) = if ofx_anamorphic_band_enabled() {
+                let anamorphic_band_enabled = ofx_anamorphic_band_enabled();
+                let (live_stretch, raw_stretch) = {
                     let lens = stab.lens.read();
                     let live = (guard_stretch(lens.input_horizontal_stretch), guard_stretch(lens.input_vertical_stretch));
                     let raw = (
@@ -1333,22 +1405,28 @@ impl Execute for GyroflowPlugin {
                         guard_stretch(lens.input_vertical_stretch_raw().unwrap_or(live.1)),
                     );
                     (live, raw)
-                } else {
-                    ((1.0, 1.0), (1.0, 1.0))
                 };
 
                 let params = stab.params.read();
                 let fps = params.fps;
                 let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
-                // Input content-band aspect and output aspect-fit ratio, both in physical
-                // buffer space (anamorphic stretch divided back out; identity for
-                // non-anamorphic sources). A physical-aspect match collapses the output rect
-                // to the full buffer and the kernel's per-axis rect mapping then squeezes the
-                // desqueezed logical output into it (the host clip PAR widens it on display).
-                let (org_ratio, output_aspect) = physical_band_aspects(params.size, params.output_size, input_rotated_90_270, live_stretch, raw_stretch);
-                if raw_stretch != (1.0, 1.0) {
-                    log::debug!("anamorphic band guess: live_stretch={live_stretch:?} raw_stretch={raw_stretch:?} rotated_90_270={input_rotated_90_270} size={:?} output_size={:?} org_ratio={org_ratio:.4} output_aspect={output_aspect:.4}", params.size, params.output_size);
-                }
+                // Preserve both spaces until the source buffer is available. The selector below
+                // gives source-native physical matches precedence, then applies the user-provided
+                // Resolve PAR contract to remaining main Edit/Color Fit buffers.
+                let logical_aspect_pair = physical_band_aspects(
+                    params.size,
+                    params.output_size,
+                    input_rotated_90_270,
+                    (1.0, 1.0),
+                    (1.0, 1.0),
+                );
+                let physical_aspect_pair = physical_band_aspects(
+                    params.size,
+                    params.output_size,
+                    input_rotated_90_270,
+                    live_stretch,
+                    raw_stretch,
+                );
                 let (has_accurate_timestamps, has_offsets) = {
                     let gyro = stab.gyro.read();
                     let md = gyro.file_metadata.read();
@@ -1411,6 +1489,8 @@ impl Execute for GyroflowPlugin {
                 } else {
                     instance_data.source_clip.get_image(time)?
                 };
+                let source_clip_pixel_aspect_ratio = instance_data.source_clip.get_pixel_aspect_ratio().ok();
+                let source_image_pixel_aspect_ratio = source_image.get_pixel_aspect_ratio().ok();
 
                 let source_rect: RectI = source_image.get_region_of_definition()?;
 
@@ -1422,14 +1502,35 @@ impl Execute for GyroflowPlugin {
                 if src_size.2 <= 0 { src_size.2 = src_size.0 * 4 * 4 }; // assuming 32-bit float
                 if out_size.2 <= 0 { out_size.2 = out_size.0 * 4 * 4 }; // assuming 32-bit float
 
-                let src_rect = GyroflowPluginBase::get_center_rect(src_size.0, src_size.1, org_ratio);
-
                 let dont_draw_outside = instance_data.params.get_bool_at_time(Params::DontDrawOutside, TimeType::Frame(time)).unwrap(); // TODO: unwrap
                 // `Fit` and DontDrawOutside both rely on the centered-content-band assumption.
                 // FillCrop/CenterCrop/Stretch deliver a buffer whose entire extent is valid
                 // source pixels (1:1 crop or stretched fill), so the input rect collapses to
                 // None — the core's `get_rect` then treats the whole buffer as content.
                 let mode_is_fit = matches!(effective_host_input_sizing, HostInputSizing::Auto | HostInputSizing::Fit);
+                let band_selection = select_anamorphic_band_aspects(
+                    anamorphic_band_enabled,
+                    host_name_ref,
+                    mode_is_fit,
+                    instance_data.is_fusion_page,
+                    dont_draw_outside,
+                    is_subscale_render || is_preview_thumbnail,
+                    raw_stretch,
+                    logical_aspect_pair,
+                    physical_aspect_pair,
+                    (src_size.0, src_size.1),
+                );
+                let org_ratio = band_selection.org_ratio;
+                let output_aspect = band_selection.output_aspect;
+                if (raw_stretch.0 - 1.0).abs() > 0.01 || (raw_stretch.1 - 1.0).abs() > 0.01 {
+                    log::debug!(
+                        "anamorphic band guess: space={:?} host={host_name_ref:?} live_stretch={live_stretch:?} raw_stretch={raw_stretch:?} rotated_90_270={input_rotated_90_270} logical={logical_aspect_pair:?} physical={physical_aspect_pair:?} buffer=({}, {}) selected=({org_ratio:.4}, {output_aspect:.4}) clip_par={source_clip_pixel_aspect_ratio:?} image_par={source_image_pixel_aspect_ratio:?}",
+                        band_selection.space,
+                        src_size.0,
+                        src_size.1,
+                    );
+                }
+                let src_rect = GyroflowPluginBase::get_center_rect(src_size.0, src_size.1, org_ratio);
                 let effective_src_rect: Option<(usize, usize, usize, usize)> = if mode_is_fit || dont_draw_outside {
                     Some(src_rect)
                 } else {
@@ -2486,6 +2587,138 @@ mod tests {
             let (org_r, _) = physical_band_aspects((1920, 1080), (1620, 1920), true, stretch, stretch);
             assert!((org_r - 1080.0 / 1920.0).abs() < 1e-9, "rotated org_ratio={org_r}");
         }
+    }
+
+    #[test]
+    fn host_par_composited_observed_resolve_main_buffer_selects_logical() {
+        // The main 1920x1080 effect buffer contains a centered 972x1080 logical content band.
+        // OFX clip/image PAR both report 1.0 and do not participate in the selector.
+        let selected = select_anamorphic_band_aspects(
+            true,
+            Some("DaVinciResolve"),
+            true,
+            false,
+            false,
+            false,
+            (1.0, 1.6),
+            (0.9, 0.9),
+            (0.5625, 0.5625),
+            (1920, 1080),
+        );
+
+        assert_eq!(selected.space, BandAspectSpace::HostParComposited);
+        assert!((selected.org_ratio - 0.9).abs() < 1e-9);
+        assert!((selected.output_aspect - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn host_par_composited_source_native_buffer_stays_physical() {
+        let selected = select_anamorphic_band_aspects(
+            true,
+            Some("DaVinciResolve"),
+            true,
+            false,
+            false,
+            false,
+            (1.0, 1.6),
+            (0.9, 0.9),
+            (0.5625, 0.5625),
+            (1080, 1920),
+        );
+
+        assert_eq!(selected.space, BandAspectSpace::Physical);
+        assert!((selected.org_ratio - 0.5625).abs() < 1e-9);
+    }
+
+    #[test]
+    fn host_par_composited_preview_stays_physical() {
+        let selected = select_anamorphic_band_aspects(
+            true,
+            Some("DaVinciResolve"),
+            true,
+            false,
+            false,
+            true,
+            (1.0, 1.6),
+            (0.9, 0.9),
+            (0.5625, 0.5625),
+            (288, 162),
+        );
+
+        assert_eq!(selected.space, BandAspectSpace::Physical);
+        assert!((selected.org_ratio - 0.5625).abs() < 1e-9);
+    }
+
+    #[test]
+    fn host_par_composited_buffer_matching_physical_stays_physical() {
+        let selected = select_anamorphic_band_aspects(
+            true,
+            Some("com.blackmagicdesign.resolve"),
+            true,
+            false,
+            false,
+            false,
+            (1.0, 1.6),
+            (12.0, 12.0),
+            (11.89, 11.89),
+            (1189, 100),
+        );
+
+        assert_eq!(selected.space, BandAspectSpace::Physical);
+        assert!((selected.org_ratio - 11.89).abs() < 1e-9);
+        assert!((selected.output_aspect - 11.89).abs() < 1e-9);
+    }
+
+    #[test]
+    fn host_par_composited_ambiguous_or_failed_gates_stay_physical() {
+        let cases = [
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (0, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (972, 0)),
+            (None, true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.vegascreativesoftware.vegas"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.example.other"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.blackmagicdesign.resolve"), false, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, true, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, false, true, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.0), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0.65, 0.65), (0.5625, 0.5625), (650, 1000)),
+        ];
+        for (host_name, mode_is_fit, fusion, dont_draw_outside, preview, raw, logical, physical, source_buffer_size) in cases {
+            let selected = select_anamorphic_band_aspects(
+                true,
+                host_name,
+                mode_is_fit,
+                fusion,
+                dont_draw_outside,
+                preview,
+                raw,
+                logical,
+                physical,
+                source_buffer_size,
+            );
+            assert_eq!(selected.space, BandAspectSpace::Physical);
+            assert_eq!(selected.org_ratio, physical.0);
+            assert_eq!(selected.output_aspect, physical.1);
+        }
+    }
+
+    #[test]
+    fn host_par_composited_kill_switch_selects_legacy_logical() {
+        let selected = select_anamorphic_band_aspects(
+            false,
+            Some("com.blackmagicdesign.resolve"),
+            true,
+            false,
+            false,
+            false,
+            (1.0, 1.6),
+            (0.9, 0.9),
+            (0.5625, 0.5625),
+            (972, 1080),
+        );
+
+        assert_eq!(selected.space, BandAspectSpace::LegacyLogical);
+        assert!((selected.org_ratio - 0.9).abs() < 1e-9);
     }
 
     #[test]
