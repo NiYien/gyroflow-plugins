@@ -111,10 +111,12 @@
       0/180/360/−180, and an end-to-end check over both pure functions asserting the exact values
       observed live (`(1920,1620)` + stretch `(1.0,1.5)` + rot 90 + 1.7778 timeline → display
       `(1620,608,0,656)` → storage `((608,1620),(656,0))`). 49 passed, 0 failed.
-- [ ] 8.5 **Live**: the portrait anamorphic clip under `scaleToCrop` renders with correct geometry
-      (not flattened); log shows `store=(608x1620) store_offset=(656,0)`
-- [ ] 8.6 **Live regression**: an unrotated clip under `scaleToCrop` is unchanged from before the fix
-      (identity path)
+- [x] 8.5 **Live verified (log judgement)**: `store=(608x1620) store_offset=(656,0)` observed for the
+      portrait anamorphic clip, and the flattened picture that motivated the fix did not recur in any
+      later session. Caveat: judged from the geometry log line, not a frame-by-frame image comparison.
+- [ ] 8.6 **NOT VERIFIED at archive time**: unrotated clip under `scaleToCrop` unchanged from before
+      the fix. Risk: low — `crop_display_to_storage` is provably the identity for rotation 0/180 and
+      a unit test asserts it, but no unrotated clip was rendered live after the change.
 
 ## 9. Audit remediation (4 parallel adversarial audits, 2026-07-26)
 
@@ -223,15 +225,26 @@ processes after ~3 minutes, one per reclaim window, growing without bound. Evide
 
 - [x] 7.1 Unit tests green — `cargo test -p gyroflow-ofx --lib`: **46 passed, 0 failed** (41 pre-existing
       + 5 new TTL-parse tests). `cargo check -p gyroflow-ofx` clean.
-- [ ] 7.2 **Live**: change the mismatch setting at *project* level while the plugin renders → log shows
-      one new `CurrentFileInfo` within the TTL window, geometry switches, no restart, no node re-drop
-- [ ] 7.3 **Live**: same at *timeline* level (`useCustomSettings=1`)
-- [ ] 7.4 **Live**: preview parked on a clip for ≥60 s with the setting untouched → no visible flicker
-      (proves D5) and one query per TTL window in the log, not per frame
-- [ ] 7.5 **Scale**: a timeline with many plugin-bearing clips (≥20 as a proxy for the 300 case) →
-      project open produces **one** query, not one per instance; check with a log count
-- [ ] 7.6 **Restore**: set mode, save `.drp`, change the setting in Resolve, reopen the project →
-      the refreshed value wins over the persisted hidden field (D4)
-- [ ] 7.7 `GYROFLOW_OFX_MISMATCH_TTL_MS=0` → sticky behavior returns (A/B revert path works)
-- [ ] 7.8 Regression: Resolve Free / scripting disabled → no dialog spam, `Fit` fallback intact,
-      hidden-field fallback still supplies a mode when present
+- [x] 7.2 **Live verified**: project-level change picked up without restart or node re-drop
+      (user-confirmed; probe A4 plus the post-fix log showing the query landing and the mode applying)
+- [x] 7.3 **Live verified**: timeline-level change (`useCustomSettings=1`) — probes A2/A3, known start
+      `scaleToCrop` → Center crop → read back as `centerCrop`, single-key dump diff moving only that key
+- [ ] 7.4 **NOT VERIFIED at archive time**: idle preview for ≥60 s with the setting untouched → no
+      visible flicker (D5) and one query per TTL window rather than per frame. Partially covered:
+      round-3 logs show query cadence following the TTL/back-off, but the no-flicker property was
+      never watched deliberately. Risk: low — the change-gated FlipX has unit-level reasoning and no
+      flicker was reported during any live session.
+- [ ] 7.5 **NOT VERIFIED at archive time**: many plugin-bearing clips → project open issues exactly
+      one query. Risk: low-medium — single-flight and the shared cache are the mechanism, and the
+      four-clip project-open in the logs did produce a single query, but ≥20 instances were never
+      exercised. This is the scenario the whole design is optimised for, so it deserves a real test.
+- [ ] 7.6 **NOT VERIFIED at archive time**: `.drp` restore → refreshed value beats the persisted
+      hidden field (D4). Risk: medium — this path changed substantially (the `ProjectPath` gate was
+      deleted) and was only reasoned about, never exercised end to end.
+- [ ] 7.7 **NOT VERIFIED at archive time**: `GYROFLOW_OFX_MISMATCH_TTL_MS=0` restores sticky
+      behaviour. Risk: low — parse-level unit coverage exists; the runtime path (bootstrap once, then
+      never re-query) was reworked in 9.5 and not re-tested live.
+- [ ] 7.8 **NOT VERIFIED at archive time**: Resolve Free / scripting disabled → no dialog spam, `Fit`
+      fallback intact, hidden field still supplies a mode. Risk: low-medium — the failure back-off
+      (10.2) directly targets this population and is unexercised on a host that genuinely cannot
+      query.

@@ -96,6 +96,22 @@ render time on multi-track or batch renders. Correct clip identification require
 `GetItemListInTrack` and matching by file path, with its own live verification matrix. Tracked as a
 follow-up change.
 
+## Verification status at archive (2026-07-26)
+
+Archived with the main path live-verified and six edge cases deliberately left unverified. Shipped in
+commit `4061a5a`.
+
+**Live-verified**: setting changes picked up without restart at both project and timeline level; no
+periodic project re-import; no plugin-spawned process leak; failure back-off curve (1x→4x TTL) and its
+reset on success; FillCrop rotation transpose; CenterCrop geometry (log values identical to the unit
+test). 55 unit tests pass.
+
+**Unverified, with risk notes in `tasks.md` §7.4–7.8 / §8.6**: idle-preview no-flicker; ≥20-instance
+project open issuing a single query; `.drp` restore precedence; `TTL=0` revert path; Resolve
+Free / scripting-disabled behaviour; unrotated-clip regression. The two carrying the most residual
+risk are the `.drp` restore path (§7.6 — substantially reworked, only reasoned about) and the
+many-instance case (§7.5 — the scenario the design is optimised for).
+
 ## Capabilities
 
 ### New Capabilities
