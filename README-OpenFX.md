@@ -57,12 +57,16 @@ The `Host input sizing` dropdown (in the Adjust group) controls this:
 - **Auto (fuscript)** — *default*. The plugin reads Resolve's `timelineInputResMismatchBehavior` setting via the `fuscript` scripting bridge and picks the matching mode automatically. Requires **DaVinci Resolve Studio** with `Preferences → General → External scripting using` set to `Local`. On the free edition / when scripting is disabled / on compound clips, the plugin silently falls back to `Fit`.
 - **Fit** — assume Resolve letterboxed the clip into the timeline buffer (centered content band with black bars). This is the only legacy path; matches the plugin's pre-v2.2 behavior.
 - **Fill+Crop** — assume Resolve 1:1 center-cropped the source pixels to fill the timeline buffer. The plugin offsets the lens principal point (`cx`/`cy`) and trims the calibration dimensions to the crop region; `fx`/`fy`/distortion are unchanged.
-- **Center Crop** — same math as Fill+Crop for the common case (timeline ≤ source); kept as a distinct option for forward-compat with Resolve's `centerCrop` mode.
+- **Center Crop** — Resolve's "Center crop with no resizing": the source is placed 1:1 at the timeline centre, so the visible region is `min(timeline, source)` on each axis. This is *not* the same as Fill+Crop — no scaling happens, so a source larger than the timeline is cropped by the size difference rather than to a matching aspect, and a smaller source is letterboxed/pillarboxed with no crop at all.
 - **Stretch** — Resolve non-uniformly scaled the source to fit the timeline buffer. The plugin accepts the aspect distortion and logs a one-time warning; recommend switching Resolve to `scaleToFit` / `scaleToCrop` for accurate stabilization.
 
 The Fusion page is always treated as `Fit` (it receives native-resolution clips). `Don't draw outside source clip` takes precedence over this dropdown.
 
-**Runtime caveat**: changing Resolve's mismatched-resolution setting while the project is open requires pressing `Reload project` for the plugin to pick up the new value.
+**Changing the setting while the project is open**: the plugin re-reads Resolve's mismatched-resolution setting periodically (every 10 s by default), so a change made in Project Settings or Timeline Settings takes effect on its own within a few seconds — no Resolve restart and no plugin re-drop required. Set `GYROFLOW_OFX_MISMATCH_TTL_MS` to override the interval, or to `0` to disable the periodic re-read entirely.
+
+> Earlier documentation said this required pressing `Reload project`, and earlier notes attributed the delay to a DaVinci Resolve defect. Both were wrong: `Reload project` is not exposed in the UI, and Resolve reports the new value as soon as the settings dialog is saved. The plugin simply never asked again.
+
+**Known limitation — per-clip Scaling override**: Resolve's Inspector → *Retime and Scaling* → **Scaling** dropdown overrides the mismatched-resolution behaviour for that one clip. The plugin does not read it (it lives in a different place in Resolve's API and never changes the project/timeline setting), so a clip using it may stabilize against the wrong source geometry. Use the Project Settings or Timeline Settings option instead, or set the plugin's own `Host input sizing` dropdown to match.
 
 
 # License

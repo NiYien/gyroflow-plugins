@@ -15,25 +15,193 @@ plugin_module!(
 );
 
 // Plugin-wide cache of the host's mismatched-resolution / timeline-dimensions fields, populated
-// by the first successful fuscript query in a Resolve session. Subsequent CreateInstance calls
-// (e.g. duplicating the OFX node onto another clip) reuse this cache to avoid the multi-second
-// fuscript cold-start latency that otherwise produces a visible "first render passthrough, then
-// FillCrop applied" two-stage UX. The cache only stores project / timeline-level fields — never
-// per-clip data like file_path or frame_count.
+// by the first successful fuscript query in a Resolve session. Every instance shares it, so a
+// timeline with hundreds of plugin-bearing clips still costs one query rather than one per
+// instance (a per-instance query would spawn one fuscript.exe each against Resolve's serialized
+// IPC endpoint). The cache only stores project / timeline-level fields — never per-clip data
+// like file_path or frame_count.
+//
+// `populated_at` gives the entry a freshness window (openfx-mismatch-mode-refresh): the setting
+// it mirrors is user-editable at any time in Resolve, and the host sends no notification, so a
+// cache without expiry silently serves a stale mode for the rest of the session. Expiry is the
+// only staleness mechanism — there is deliberately no instance-lifecycle-driven invalidation.
 #[derive(Clone, Debug)]
 struct HostInputSizingCacheEntry {
     mismatch_mode: Option<String>,
     timeline_w: usize,
     timeline_h: usize,
     use_custom_settings: bool,
+    populated_at: std::time::Instant,
+}
+
+impl HostInputSizingCacheEntry {
+    /// True when this entry is older than the configured TTL. A TTL of 0 disables expiry.
+    fn is_stale(&self) -> bool {
+        let ttl = mismatch_ttl_ms();
+        if ttl == 0 { return false; }
+        self.populated_at.elapsed().as_millis() as u64 >= ttl
+    }
+
 }
 
 #[derive(Default)]
 struct GyroflowPlugin {
     gyroflow_plugin: GyroflowPluginBase,
-    // Lock contention here is minimal: write-once on first fuscript completion + on every
-    // ReloadProject refresh, read-once per CreateInstance.
+    // Lock contention here is minimal: written when a fuscript query completes, read once per
+    // CreateInstance and once per render (an age comparison, no query).
     host_input_sizing_cache: parking_lot::Mutex<Option<HostInputSizingCacheEntry>>,
+    // Single-flight guard for the expiry-driven refresh. Without it, N instances observing the
+    // same expired entry in the same frame would each spawn a query, reintroducing exactly the
+    // process storm the shared cache exists to prevent. Released by the query thread on both
+    // the success and the failure path — a wedged flag would disable refresh for the session.
+    host_input_sizing_refresh_in_flight: Arc<AtomicBool>,
+    // When a refresh was last *attempted*, successful or not. The single-flight guard alone is
+    // not enough to pace retries: on a host where the query can never succeed (Resolve Free,
+    // external scripting disabled, compound clip) the cache stays empty, so every frame sees
+    // "stale", and the guard is released the moment each attempt fails — spawning one
+    // fuscript.exe per frame. Attempt pacing bounds that to the same cadence as success.
+    host_input_sizing_last_attempt: parking_lot::Mutex<Option<std::time::Instant>>,
+    // Consecutive failed refresh attempts, used to back off the retry cadence. Two states retry
+    // forever otherwise: Resolve busy (the query hangs and is killed on its own deadline) and the
+    // playhead parked on a title / gap / compound clip (the lua errors out). Both are common and
+    // long-lived, and retrying each window means one spawned-and-killed process per window for
+    // the whole duration. Reset to zero by the first successful query.
+    host_input_sizing_failures: Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// Build the placeholder `CurrentFileInfo` that carries only host-input-sizing fields.
+/// Clip-level fields (fps / frame_count / file path) stay at their defaults — `LoadCurrent`
+/// refreshes those on demand. `queried_at` inherits the cache entry's timestamp so the
+/// render-path mirror does not mistake a cache read for a fresh query result.
+fn host_sizing_placeholder(entry: &HostInputSizingCacheEntry) -> CurrentFileInfo {
+    CurrentFileInfo {
+        file_path: String::new(),
+        project_path: None,
+        fps: 0.0,
+        duration_s: 0.0,
+        frame_count: 0,
+        width: 0,
+        height: 0,
+        pixel_aspect_ratio: String::new(),
+        mismatch_mode: entry.mismatch_mode.clone(),
+        timeline_w: entry.timeline_w,
+        timeline_h: entry.timeline_h,
+        use_custom_settings: entry.use_custom_settings,
+        queried_at: Some(entry.populated_at),
+    }
+}
+
+impl GyroflowPlugin {
+    /// Single entry point for obtaining an up-to-date host input sizing mode
+    /// (openfx-mismatch-mode-refresh). Called from CreateInstance and once per render.
+    ///
+    /// Two jobs, in order:
+    ///  1. Adopt a newer plugin-global value into this instance's `CurrentFileInfo`. A refresh
+    ///     triggered by any one instance writes the global cache, and every other instance
+    ///     picks it up here — without this, only the instance that happened to arm the query
+    ///     would ever see the new mode.
+    ///  2. Arm a background refresh when the global entry is missing or past its TTL.
+    ///
+    /// Never blocks: the caller keeps rendering with the value it already has, and the query's
+    /// completion forces a re-render only if something actually changed.
+    ///
+    /// Lock discipline: the cache entry is cloned out and its lock released before
+    /// `current_file_info` is taken, because the render-path mirror acquires them in the
+    /// opposite order (info → cache). Overlapping them here would invert the order and deadlock.
+    fn ensure_host_input_sizing_fresh(
+        &self,
+        current_file_info: &Arc<Mutex<Option<CurrentFileInfo>>>,
+        current_file_info_pending: &Arc<AtomicBool>,
+    ) {
+        let cached: Option<HostInputSizingCacheEntry> = self.host_input_sizing_cache.lock().clone();
+
+        if let Some(entry) = cached.as_ref() {
+            let mut info_lock = current_file_info.lock();
+            let instance_ts = info_lock.as_ref().and_then(|i| i.queried_at);
+            let cache_is_newer = instance_ts.map_or(true, |ts| entry.populated_at > ts);
+            if cache_is_newer {
+                match info_lock.as_mut() {
+                    Some(info) => {
+                        info.mismatch_mode       = entry.mismatch_mode.clone();
+                        info.timeline_w          = entry.timeline_w;
+                        info.timeline_h          = entry.timeline_h;
+                        info.use_custom_settings = entry.use_custom_settings;
+                        info.queried_at          = Some(entry.populated_at);
+                    }
+                    None => *info_lock = Some(host_sizing_placeholder(entry)),
+                }
+            }
+        }
+
+        let needs_refresh = cached.as_ref().map_or(true, |entry| entry.is_stale());
+        if !needs_refresh { return; }
+
+        let ttl = mismatch_ttl_ms();
+
+        // Attempt pacing (read-only here; the stamp is written once a query is actually armed).
+        // A query that never succeeds leaves the cache empty, so `needs_refresh` stays true and
+        // the single-flight guard is released as soon as each attempt fails — without this gate
+        // that is one spawned process per rendered frame.
+        {
+            let last_attempt = self.host_input_sizing_last_attempt.lock();
+            if ttl == 0 {
+                // Kill-switch semantics: bootstrap at most once, then never re-query. Without
+                // this the empty-cache branch above keeps arming forever on hosts where the
+                // query can never succeed — the opposite of what the switch promises.
+                if last_attempt.is_some() { return; }
+            } else if let Some(prev) = *last_attempt {
+                // Back off after consecutive failures: 1x the TTL while healthy, stretching to 6x
+                // once the query keeps failing (Resolve busy during playback / export, playhead
+                // on a title or gap). A single success resets it.
+                let failures = self.host_input_sizing_failures.load(SeqCst).min(5) as u64;
+                let min_gap_ms = ttl.saturating_mul(1 + failures);
+                if (prev.elapsed().as_millis() as u64) < min_gap_ms { return; }
+            }
+        }
+
+        if !CurrentFileInfo::is_available() {
+            // Burn the window anyway so a host without fuscript does not stat the filesystem on
+            // every rendered frame.
+            *self.host_input_sizing_last_attempt.lock() = Some(std::time::Instant::now());
+            return;
+        }
+
+        // Single-flight: only the caller that flips false -> true spawns a query. The guard is
+        // released by the query thread (RAII, covers failure and panic paths).
+        if self.host_input_sizing_refresh_in_flight
+            .compare_exchange(false, true, SeqCst, SeqCst)
+            .is_err()
+        {
+            // A query is already in flight. `cmd.output()` has no deadline and fuscript reaches
+            // Resolve over IPC, so a query that never returns would hold the guard for the rest
+            // of the session and silently kill the refresh — reinstating the exact bug this
+            // change fixes, with no log signal. `last_attempt` is only stamped when a query is
+            // actually armed, so its age is the age of the in-flight query. Past a threshold far
+            // beyond any plausible query, steal the guard and re-arm; the stuck thread's RAII
+            // release then becomes a harmless no-op.
+            let stuck = {
+                let last = self.host_input_sizing_last_attempt.lock();
+                (*last).map_or(false, |t| (t.elapsed().as_millis() as u64) >= STUCK_QUERY_MS)
+            };
+            if !stuck { return; }
+            log::warn!(target: "host_input_sizing",
+                "host_input_sizing: refresh query exceeded {STUCK_QUERY_MS}ms — reclaiming the single-flight guard");
+            self.host_input_sizing_refresh_in_flight.store(false, SeqCst);
+            if self.host_input_sizing_refresh_in_flight
+                .compare_exchange(false, true, SeqCst, SeqCst)
+                .is_err()
+            {
+                return;
+            }
+        }
+        *self.host_input_sizing_last_attempt.lock() = Some(std::time::Instant::now());
+        CurrentFileInfo::query_refresh(
+            current_file_info.clone(),
+            current_file_info_pending.clone(),
+            self.host_input_sizing_refresh_in_flight.clone(),
+            self.host_input_sizing_failures.clone(),
+        );
+    }
 }
 
 pub fn frame_from_timetype(time: TimeType) -> f64 {
@@ -60,6 +228,51 @@ fn ofx_anamorphic_band_enabled() -> bool {
             }
             Err(_) => true,
         }
+    })
+}
+
+/// Default freshness window for the plugin-global host-input-sizing cache.
+const MISMATCH_TTL_DEFAULT_MS: u64 = 10_000;
+/// Lower clamp for a non-zero TTL. Below this the render path would re-query almost
+/// continuously; single-flight bounds the concurrency but not the serial rate.
+const MISMATCH_TTL_MIN_MS: u64 = 500;
+/// Upper clamp. Beyond ten minutes the refresh stops being a refresh.
+const MISMATCH_TTL_MAX_MS: u64 = 600_000;
+/// How long an in-flight refresh query may run before the single-flight guard is treated as
+/// wedged and reclaimed. A warm query is ~85 ms and a cold one ~270 ms; anything past a minute
+/// means fuscript is not coming back, and holding the guard forever would silently disable the
+/// refresh for the rest of the session.
+const STUCK_QUERY_MS: u64 = 60_000;
+
+/// Pure parse for `GYROFLOW_OFX_MISMATCH_TTL_MS`, returning `(ttl_ms, source)`.
+///
+/// `0` is meaningful and is **not** clamped: it disables expiry entirely, restoring the
+/// sticky-cache behavior from before `openfx-mismatch-mode-refresh` for A/B diagnosis.
+/// Any other value is clamped into `[MISMATCH_TTL_MIN_MS, MISMATCH_TTL_MAX_MS]`.
+/// Kept free of env and `OnceLock` access so it can be unit-tested directly.
+fn parse_mismatch_ttl(raw: Option<&str>) -> (u64, &'static str) {
+    let Some(raw) = raw else { return (MISMATCH_TTL_DEFAULT_MS, "default"); };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() { return (MISMATCH_TTL_DEFAULT_MS, "default"); }
+    match trimmed.parse::<u64>() {
+        Ok(0)                              => (0,                     "env"),
+        Ok(ms) if ms < MISMATCH_TTL_MIN_MS => (MISMATCH_TTL_MIN_MS,   "env_clamped"),
+        Ok(ms) if ms > MISMATCH_TTL_MAX_MS => (MISMATCH_TTL_MAX_MS,   "env_clamped"),
+        Ok(ms)                             => (ms,                    "env"),
+        Err(_)                             => (MISMATCH_TTL_DEFAULT_MS, "default_invalid"),
+    }
+}
+
+/// Freshness window for the plugin-global host-input-sizing cache, in milliseconds.
+/// `0` disables expiry. Resolved once per process; logs the resolution alongside the
+/// other resolved-config lines.
+fn mismatch_ttl_ms() -> u64 {
+    static TTL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        let raw = std::env::var("GYROFLOW_OFX_MISMATCH_TTL_MS").ok();
+        let (ttl, source) = parse_mismatch_ttl(raw.as_deref());
+        log::info!(target: "host_input_sizing", "mismatch ttl resolved: ttl_ms={ttl} source={source}");
+        ttl
     })
 }
 
@@ -323,6 +536,79 @@ pub fn compute_fillcrop_geometry_desqueezed(
     ))
 }
 
+/// Crop geometry for Resolve's `centerCrop` — "Center crop with **no resizing**". The source is
+/// placed 1:1 at the timeline centre, so the visible source region is `min(timeline, source)` per
+/// axis: an absolute clamp, **not** the aspect-matched band `scaleToCrop` produces. Sharing the
+/// FillCrop model here (as the code did before) under-reports the visible region whenever the
+/// source is larger than the timeline, and reports no crop at all when the aspects happen to match
+/// while the host is in fact centre-cropping.
+///
+/// Takes the timeline's pixel dimensions rather than just its aspect, because "no resizing" makes
+/// the absolute size the deciding factor. Mirrors `compute_fillcrop_geometry_desqueezed`: the
+/// clamp is computed in physical (squeezed) pixels — what Resolve compares — and the result is
+/// scaled back into the desqueezed space `stab.params` lives in, in display orientation.
+///
+/// Returns `None` when the source fits inside the timeline on both axes: it is then fully visible
+/// (letterboxed or pillarboxed) and there is nothing to crop.
+pub fn compute_centercrop_geometry_desqueezed(
+    source_size: (usize, usize),
+    baked_stretch: (f64, f64),
+    timeline_size: (usize, usize),
+    video_rotation_deg: f64,
+) -> Option<(usize, usize, usize, usize)> {
+    let (timeline_w, timeline_h) = timeline_size;
+    if timeline_w == 0 || timeline_h == 0 { return None; }
+
+    let (bh, bv) = baked_stretch;
+    let phys = (
+        ((source_size.0 as f64 / bh).round() as usize).max(1),
+        ((source_size.1 as f64 / bv).round() as usize).max(1),
+    );
+    let rotation = (((video_rotation_deg.round() as i64) % 360) + 360) % 360;
+    let rotated = rotation == 90 || rotation == 270;
+    let disp_phys = if rotated { (phys.1, phys.0) } else { phys };
+
+    // Same exact-centring requirement as the FillCrop path — see `even_margin`.
+    let visible_w = even_margin(disp_phys.0, disp_phys.0.min(timeline_w));
+    let visible_h = even_margin(disp_phys.1, disp_phys.1.min(timeline_h));
+    if visible_w >= disp_phys.0 && visible_h >= disp_phys.1 {
+        return None;
+    }
+    let offset_x = (disp_phys.0 - visible_w) / 2;
+    let offset_y = (disp_phys.1 - visible_h) / 2;
+
+    // Storage-axis stretch factors mapped to display axes (the result is display-oriented).
+    let (s_dw, s_dh) = if rotated { (bv, bh) } else { (bh, bv) };
+    Some((
+        (visible_w as f64 * s_dw).round() as usize,
+        (visible_h as f64 * s_dh).round() as usize,
+        (offset_x as f64 * s_dw).round() as usize,
+        (offset_y as f64 * s_dh).round() as usize,
+    ))
+}
+
+/// Map a display-oriented crop rect (as returned by `compute_fillcrop_geometry_desqueezed`) onto
+/// storage orientation, which is what `params.size`, `lens.calib_dimension` and the camera-matrix
+/// principal point live in. A 90°/270° `video_rotation` transposes the two orientations; every other
+/// rotation makes them identical and this is the identity mapping.
+///
+/// Returns `((storage_w, storage_h), (storage_x, storage_y))`.
+///
+/// Offsets need no 90-vs-270 distinction: `compute_crop_geometry` always centres the crop, so each
+/// offset is that axis' centring value and stays the centring value after the transpose.
+pub fn crop_display_to_storage(
+    crop: (usize, usize, usize, usize),
+    video_rotation_deg: f64,
+) -> ((usize, usize), (usize, usize)) {
+    let (w, h, x, y) = crop;
+    let rotation = (((video_rotation_deg.round() as i64) % 360) + 360) % 360;
+    if rotation == 90 || rotation == 270 {
+        ((h, w), (y, x))
+    } else {
+        ((w, h), (x, y))
+    }
+}
+
 pub fn compute_crop_geometry(
     source_size: (usize, usize),
     timeline_aspect: f64,
@@ -341,17 +627,34 @@ pub fn compute_crop_geometry(
     let source_aspect = sw as f64 / sh as f64;
     if source_aspect > timeline_aspect {
         // Horizontal crop: clip the sides to match the timeline aspect.
-        let crop_w = (sh as f64 * timeline_aspect).round() as usize;
+        let crop_w = even_margin(sw, (sh as f64 * timeline_aspect).round() as usize);
         let crop_h = sh;
         let crop_x = sw.saturating_sub(crop_w) / 2;
         (crop_w, crop_h, crop_x, 0)
     } else {
         // Vertical crop (or exact-match: yields the full source with zero offsets).
         let crop_w = sw;
-        let crop_h = (sw as f64 / timeline_aspect).round() as usize;
+        let crop_h = even_margin(sh, (sw as f64 / timeline_aspect).round() as usize);
         let crop_y = sh.saturating_sub(crop_h) / 2;
         (crop_w, crop_h, 0, crop_y)
     }
+}
+
+/// Shrink `crop` by at most one pixel so the margin `extent - crop` is even, i.e. so the crop is
+/// **exactly** centred.
+///
+/// With an odd margin the `/2` floor puts the extra pixel on one side, and which side that is
+/// depends on the rotation origin: under a 90/270 transpose or a 180 flip the true offset is
+/// `extent - offset - crop`, which differs from `offset` by exactly 1 when the margin is odd.
+/// The display→storage mapping cannot recover that distinction, and the resulting 1 px
+/// principal-point error is invisible on symmetric lenses (the profile overwrites `cx`/`cy` with
+/// the calibration centre) but real on `asymmetrical` profiles.
+///
+/// Giving up at most one pixel of crop removes the ambiguity at the source instead of trying to
+/// model each rotation's origin — cheaper and impossible to get backwards.
+fn even_margin(extent: usize, crop: usize) -> usize {
+    let crop = crop.min(extent);
+    if (extent - crop) % 2 == 1 { crop.saturating_sub(1).max(1) } else { crop }
 }
 
 define_params!(ParamHandler {
@@ -715,7 +1018,7 @@ impl InstanceData {
                 stab.invalidate_smoothing();
                 stab.invalidate_blocking_zooming();
                 stab.invalidate_blocking_undistortion();
-                log::info!(target: "ofx",
+                log::info!(target: "host_input_sizing",
                     "host_input_sizing: baseline restored before input-rotation override (size={size:?} output_size={out_size:?})");
             }
         }
@@ -803,46 +1106,92 @@ impl InstanceData {
             HostInputSizing::Auto | HostInputSizing::Fit => false,
             HostInputSizing::FillCrop | HostInputSizing::CenterCrop => {
                 if timeline_w == 0 || timeline_h == 0 {
-                    log::warn!(target: "ofx", "host_input_sizing: skipping FillCrop/CenterCrop transform — timeline dims are zero");
+                    log::warn!(target: "host_input_sizing", "host_input_sizing: skipping FillCrop/CenterCrop transform — timeline dims are zero");
                     false
                 } else {
                     let (source_size, video_rotation) = {
                         let p = stab.params.read();
                         (p.size, p.video_rotation)
                     };
-                    let timeline_aspect = timeline_w as f64 / timeline_h as f64;
                     // Anamorphic-aware crop model: crop in physical (squeezed) space, scale back
                     // to the desqueezed space `stab.params` live in. `None` = the host performs
-                    // no crop (physical aspect matches the timeline) — leave the stab untouched;
-                    // the Fit-equivalent render path is already correct for that geometry.
+                    // no crop — leave the stab untouched; the Fit-equivalent render path is
+                    // already correct for that geometry.
+                    //
+                    // FillCrop and CenterCrop are NOT the same model and no longer share one.
+                    // `scaleToCrop` scales the source to cover the timeline and keeps an
+                    // aspect-matched band; `centerCrop` does no resizing at all and keeps
+                    // `min(timeline, source)` per axis. Sharing the FillCrop math under-reported
+                    // the visible region for centerCrop, and returned "no crop" in the
+                    // matching-aspect case where the host is in fact centre-cropping.
                     let baked_stretch = lens_baked_stretch(stab);
-                    match compute_fillcrop_geometry_desqueezed(source_size, baked_stretch, timeline_aspect, video_rotation) {
+                    let geometry = if mode == HostInputSizing::CenterCrop {
+                        compute_centercrop_geometry_desqueezed(
+                            source_size, baked_stretch, (timeline_w, timeline_h), video_rotation,
+                        )
+                    } else {
+                        let timeline_aspect = timeline_w as f64 / timeline_h as f64;
+                        compute_fillcrop_geometry_desqueezed(
+                            source_size, baked_stretch, timeline_aspect, video_rotation,
+                        )
+                    };
+                    match geometry {
                         None => {
-                            log::info!(target: "ofx",
+                            log::info!(target: "host_input_sizing",
                                 "host_input_sizing: mode={mode:?} no host crop (physical aspect matches timeline) — leaving stab untouched; source={source_size:?} baked_stretch={baked_stretch:?} video_rotation={video_rotation}");
                             false
                         }
                         Some((crop_w, crop_h, crop_x, crop_y)) if crop_w == 0 || crop_h == 0 => {
-                            log::warn!(target: "ofx", "host_input_sizing: skipping crop — geometry resolved to zero");
+                            log::warn!(target: "host_input_sizing", "host_input_sizing: skipping crop — geometry resolved to zero");
                             false
                         }
                         Some((crop_w, crop_h, crop_x, crop_y)) => {
+                            // The crop rect is display-oriented. `output_size` is display-oriented
+                            // too and takes it as-is, but `params.size`, `calib_dimension` and the
+                            // principal point are storage-oriented, which a 90/270 rotation
+                            // transposes. Writing the display rect into them was leftover defect #1
+                            // from 6b8cb14 ("rotation + real crop writes the wrong orientation"),
+                            // dormant until the mismatch refresh made FillCrop actually run on a
+                            // rotated clip — it flattened a portrait anamorphic clip to
+                            // size=(1620,608) where (608,1620) was required.
+                            let ((store_w, store_h), (store_x, store_y)) =
+                                crop_display_to_storage((crop_w, crop_h, crop_x, crop_y), video_rotation);
                             {
                                 let mut lens_lk = stab.lens.write();
+                                // Express the crop in CALIBRATION space rather than assuming the
+                                // profile was calibrated at exactly the source resolution.
+                                // The runtime lens scale is `params.size / calib_dimension`;
+                                // writing the crop straight into `calib_dimension` forces that
+                                // ratio to 1.0, which is only harmless when the profile happens
+                                // to be calibrated at the source size (true for the built-in
+                                // anamorphic presets, false for an external profile shot at a
+                                // different resolution — there it silently rescales the focal
+                                // length, e.g. 1.5x vertically for calib 1920x1080 on a
+                                // 1920x1620 source). Scaling by the existing ratio preserves it;
+                                // when calib == size both factors are 1.0 and this is a no-op.
+                                let scale_x = lens_lk.calib_dimension.w.max(1) as f64
+                                    / source_size.0.max(1) as f64;
+                                let scale_y = lens_lk.calib_dimension.h.max(1) as f64
+                                    / source_size.1.max(1) as f64;
                                 if lens_lk.fisheye_params.camera_matrix.len() >= 2 {
-                                    lens_lk.fisheye_params.camera_matrix[0][2] -= crop_x as f64;
-                                    lens_lk.fisheye_params.camera_matrix[1][2] -= crop_y as f64;
+                                    lens_lk.fisheye_params.camera_matrix[0][2] -= store_x as f64 * scale_x;
+                                    lens_lk.fisheye_params.camera_matrix[1][2] -= store_y as f64 * scale_y;
                                 }
                                 lens_lk.calib_dimension =
-                                    gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w: crop_w, h: crop_h };
+                                    gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions {
+                                        w: ((store_w as f64 * scale_x).round() as usize).max(1),
+                                        h: ((store_h as f64 * scale_y).round() as usize).max(1),
+                                    };
                             }
                             {
                                 let mut params_lk = stab.params.write();
-                                params_lk.size = (crop_w, crop_h);
+                                params_lk.size = (store_w, store_h);
                                 params_lk.output_size = (crop_w, crop_h);
                             }
-                            log::info!(target: "ofx",
-                                "host_input_sizing: mode={mode:?} crop=({crop_w}x{crop_h}) offset=({crop_x},{crop_y}) source={source_size:?} baked_stretch={baked_stretch:?} video_rotation={video_rotation}");
+                            log::info!(target: "host_input_sizing",
+                                "host_input_sizing: mode={mode:?} crop=({crop_w}x{crop_h}) offset=({crop_x},{crop_y}) \
+                                 store=({store_w}x{store_h}) store_offset=({store_x},{store_y}) \
+                                 source={source_size:?} baked_stretch={baked_stretch:?} video_rotation={video_rotation}");
                             true
                         }
                     }
@@ -854,11 +1203,20 @@ impl InstanceData {
                 } else {
                     {
                         let mut params_lk = stab.params.write();
-                        params_lk.size = (timeline_w, timeline_h);
+                        // `timeline_w/h` are the OFX output buffer dimensions, i.e. display
+                        // orientation, but `params.size` is storage-oriented. Writing them
+                        // verbatim is the same defect D9 fixes for FillCrop a few lines up —
+                        // it just never produced a visible symptom because Stretch is already
+                        // documented as best-effort. Map through the same helper.
+                        let ((store_w, store_h), _) = crop_display_to_storage(
+                            (timeline_w, timeline_h, 0, 0),
+                            params_lk.video_rotation,
+                        );
+                        params_lk.size = (store_w, store_h);
                     }
                     if !self.host_input_sizing_stretch_warned {
                         self.host_input_sizing_stretch_warned = true;
-                        log::warn!(target: "ofx",
+                        log::warn!(target: "host_input_sizing",
                             "host_input_sizing: Stretch mode is best-effort — switch Resolve mismatched-resolution to scaleToFit or scaleToCrop for accurate stabilization");
                     }
                     true
@@ -1169,6 +1527,16 @@ impl Execute for GyroflowPlugin {
                     }
                 }
 
+                // Keep the host input sizing mode current (openfx-mismatch-mode-refresh). Cheap
+                // on the common path: clone the shared entry, compare its age, done. Only an
+                // expired or absent entry arms a background query, and only one instance wins
+                // that race. Runs before `check_pending_file_info` so a result that landed since
+                // the previous frame is consumed by the existing pending-flag machinery below.
+                self.ensure_host_input_sizing_fresh(
+                    &instance_data.current_file_info,
+                    &instance_data.current_file_info_pending,
+                );
+
                 let loading_pending_video_file = instance_data.check_pending_file_info()?;
 
                 // Mirror the freshly-populated CurrentFileInfo into the plugin-global
@@ -1186,24 +1554,27 @@ impl Execute for GyroflowPlugin {
                 let persist_mismatch: Option<String> = {
                     let info_lock = instance_data.current_file_info.lock();
                     if let Some(ref info) = *info_lock {
-                        let entry = HostInputSizingCacheEntry {
-                            mismatch_mode: info.mismatch_mode.clone(),
-                            timeline_w: info.timeline_w,
-                            timeline_h: info.timeline_h,
-                            use_custom_settings: info.use_custom_settings,
-                        };
                         let mut cache_lock = self.host_input_sizing_cache.lock();
-                        let needs_write = match cache_lock.as_ref() {
-                            Some(existing) => {
-                                existing.mismatch_mode != entry.mismatch_mode
-                                    || existing.timeline_w != entry.timeline_w
-                                    || existing.timeline_h != entry.timeline_h
-                                    || existing.use_custom_settings != entry.use_custom_settings
-                            }
-                            None => true,
+                        // Only a genuine query result advances the cache, and with it the
+                        // freshness window. This block runs on EVERY render: writing the entry
+                        // unconditionally would refresh `populated_at` every frame and the TTL
+                        // would never elapse, silently disabling the refresh this change adds.
+                        // `queried_at` is None for a hidden-field restore (never queried) and
+                        // equals the cache timestamp for a value adopted from the cache, so
+                        // both correctly compare as "not new".
+                        let is_new_query = match (info.queried_at, cache_lock.as_ref()) {
+                            (Some(queried_at), Some(existing)) => queried_at > existing.populated_at,
+                            (Some(_), None)                    => true,
+                            (None, _)                          => false,
                         };
-                        if needs_write {
-                            *cache_lock = Some(entry);
+                        if is_new_query {
+                            *cache_lock = Some(HostInputSizingCacheEntry {
+                                mismatch_mode: info.mismatch_mode.clone(),
+                                timeline_w: info.timeline_w,
+                                timeline_h: info.timeline_h,
+                                use_custom_settings: info.use_custom_settings,
+                                populated_at: info.queried_at.unwrap_or_else(std::time::Instant::now),
+                            });
                         }
                         info.mismatch_mode
                             .as_ref()
@@ -1890,46 +2261,41 @@ impl Execute for GyroflowPlugin {
                     instance_data.params.get_string(Params::ProjectPath).unwrap_or_default(),
                 );
 
-                // Host-input-sizing bootstrap: try to populate `current_file_info` from the
-                // plugin-global cache first. Hit means a prior instance in this Resolve session
-                // already paid the fuscript cold-start cost — the new instance gets the
-                // project/timeline-level fields immediately and the first render applies the
-                // correct FillCrop / Fit mode without a passthrough stage.
+                // Host-input-sizing bootstrap (openfx-mismatch-mode-refresh): one shape for every
+                // instance — adopt whatever the shared cache holds, and arm a background refresh
+                // when that entry is missing or past its TTL. `ensure_host_input_sizing_fresh`
+                // never blocks: Resolve calls CreateInstance on the UI thread, so a synchronous
+                // wait here would freeze the host. The render path's `Fit` fallback keeps the
+                // first frames visually safe until a query lands, and the query's completion
+                // forces a re-render only if the value actually moved.
                 //
-                // Miss: spawn a silent query and short-block (1s) so a warm fuscript still gets
-                // synchronised. If it doesn't come back in time, CreateInstance returns and the
-                // Render path's Fit fallback keeps the first frames visually safe until the
-                // async completion writes the cache and the query thread's FlipX trigger
-                // re-renders with the correct mode.
-                //
-                // Fresh drop invalidation: when the user drops the plugin onto a clip with no
-                // ProjectPath (fresh drop, not paste/restore), discard the global cache first.
-                // The cache is otherwise sticky across the entire Resolve session — if the user
-                // changed timeline / mismatched-resolution settings between session start and
-                // this drop, every subsequent paste would keep using the stale mode. The fresh
-                // drop is the natural "user reloads plugin to pick up new settings" signal.
-                {
-                    let project_path_at_create = instance_data
-                        .params
-                        .get_string(Params::ProjectPath)
+                // Two branches this change deliberately removed:
+                //  - the `ProjectPath`-non-empty branch that skipped fuscript entirely for paste
+                //    and `.drp` restore. It pinned whatever mode had been frozen into the project
+                //    file, which is precisely the "changed the Resolve setting, plugin ignores it
+                //    until I restart" bug.
+                //  - the fresh-drop cache invalidation. It existed only because the cache had no
+                //    expiry, making a node re-drop the sole user-reachable way to force a re-read.
+                //    Expiry subsumes it, and keeping it would cost an extra query per drop.
+                self.ensure_host_input_sizing_fresh(
+                    &instance_data.current_file_info,
+                    &instance_data.current_file_info_pending,
+                );
+
+                // Cold-start fallback ONLY: no shared-cache entry and no query result yet — the
+                // genuine no-fuscript cases (Resolve Free, external scripting disabled, compound
+                // clip). The per-node hidden field then supplies a mode detected in an earlier
+                // session. `queried_at: None` marks it never-queried, which means (a) it is
+                // immediately eligible for refresh and (b) the render-path mirror will not
+                // promote it into the shared cache — a value frozen in the project file must not
+                // outlive the next successful query.
+                let needs_hidden_fallback = instance_data.current_file_info.lock().is_none();
+                if needs_hidden_fallback {
+                    let persisted = instance_data
+                        .detected_mismatch_mode
+                        .get_value()
                         .unwrap_or_default();
-                    if project_path_at_create.is_empty() {
-                        let mut cache_lock = self.host_input_sizing_cache.lock();
-                        if cache_lock.is_some() {
-                            log::info!(target: "ofx",
-                                "host_input_sizing: fresh drop invalidating stale global cache");
-                            *cache_lock = None;
-                        }
-                    }
-                }
-                let global_cache_hit: Option<HostInputSizingCacheEntry> =
-                    self.host_input_sizing_cache.lock().clone();
-                match global_cache_hit {
-                    Some(entry) => {
-                        // Synthesize a placeholder CurrentFileInfo carrying only the
-                        // host-input-sizing fields. clip-level fields (fps / frame_count / file
-                        // path) are intentionally left at placeholder defaults — `LoadCurrent`
-                        // can still refresh them later if the user clicks that button.
+                    if !persisted.is_empty() {
                         *instance_data.current_file_info.lock() = Some(CurrentFileInfo {
                             file_path: String::new(),
                             project_path: None,
@@ -1939,89 +2305,14 @@ impl Execute for GyroflowPlugin {
                             width: 0,
                             height: 0,
                             pixel_aspect_ratio: String::new(),
-                            mismatch_mode: entry.mismatch_mode.clone(),
-                            timeline_w: entry.timeline_w,
-                            timeline_h: entry.timeline_h,
-                            use_custom_settings: entry.use_custom_settings,
+                            mismatch_mode: Some(persisted.clone()),
+                            timeline_w: 0,
+                            timeline_h: 0,
+                            use_custom_settings: false,
+                            queried_at: None,
                         });
-                        log::info!(target: "ofx",
-                            "host_input_sizing: CreateInstance hit global cache (mode={:?}, timeline {}x{})",
-                            entry.mismatch_mode, entry.timeline_w, entry.timeline_h);
-                    }
-                    None => {
-                        // Cache miss. Decide whether to actually spawn a fuscript query, or
-                        // skip it entirely so this instance defers to whatever LATER becomes
-                        // the cache value (via another instance's query, or a manual
-                        // LoadCurrent / ReloadProject click on this instance).
-                        //
-                        // Heuristic: if `ProjectPath` is non-empty at CreateInstance time, the
-                        // instance is being created from saved state — either pasted from
-                        // another node (Resolve "Paste Attributes") or restored from a `.drp`
-                        // project reopen. The user explicitly asked the paste path to NOT
-                        // re-query fuscript; we extend the same treatment to .drp restore
-                        // because both share the property that "the user did not just pick a
-                        // fresh source clip", so the desired host-input-sizing data is
-                        // expected to already match an existing global-cache entry (typical
-                        // case: same session, cache already filled by an earlier instance) —
-                        // and when it isn't (Resolve restart, no priming), the passthrough
-                        // fallback in Render keeps the first frames visually clean until the
-                        // user clicks LoadCurrent / ReloadProject to populate the cache.
-                        //
-                        // The fresh-drop case (user drags plugin onto a clip for the first
-                        // time in this session) has empty `ProjectPath` at this point and
-                        // does spawn the query, populating the cache for every subsequent
-                        // paste / restore.
-                        let project_path_at_create = instance_data
-                            .params
-                            .get_string(Params::ProjectPath)
-                            .unwrap_or_default();
-                        if !project_path_at_create.is_empty() {
-                            // .drp restore / paste with empty global cache (typical: Resolve was
-                            // just restarted). The per-node hidden field is the persistence
-                            // layer that survives both save/restore and "Paste Attributes" — if
-                            // it carries a previous fuscript result we can populate
-                            // `current_file_info.mismatch_mode` directly and skip fuscript,
-                            // restoring the FillCrop / scaleToFit / ... mode chosen earlier
-                            // without any user action.
-                            let persisted = instance_data
-                                .detected_mismatch_mode
-                                .get_value()
-                                .unwrap_or_default();
-                            if !persisted.is_empty() {
-                                *instance_data.current_file_info.lock() = Some(CurrentFileInfo {
-                                    file_path: String::new(),
-                                    project_path: None,
-                                    fps: 0.0,
-                                    duration_s: 0.0,
-                                    frame_count: 0,
-                                    width: 0,
-                                    height: 0,
-                                    pixel_aspect_ratio: String::new(),
-                                    mismatch_mode: Some(persisted.clone()),
-                                    timeline_w: 0,
-                                    timeline_h: 0,
-                                    use_custom_settings: false,
-                                });
-                                log::info!(target: "host_input_sizing",
-                                    "CreateInstance restored mismatch from hidden field (mode={persisted:?})");
-                            }
-                            log::info!(target: "ofx",
-                                "host_input_sizing: CreateInstance with non-empty ProjectPath (paste / .drp restore) — \
-                                 skipping fuscript query, relying on existing cache or user-triggered refresh");
-                        } else if CurrentFileInfo::is_available() {
-                            // Fire-and-forget: don't block CreateInstance on fuscript. Resolve
-                            // calls CreateInstance on the UI thread, so any synchronous wait here
-                            // freezes the host. The Render path's `Fit` fallback keeps the first
-                            // frame visually safe, the Render path's pending-flag handler mirrors
-                            // the result into the global cache once fuscript returns, and
-                            // `query_silent`'s FlipX trigger forces a re-render to swap in the
-                            // correct mode — accepting a deliberate two-stage UX in exchange for
-                            // a non-blocking instance create.
-                            CurrentFileInfo::query_silent(
-                                instance_data.current_file_info.clone(),
-                                instance_data.current_file_info_pending.clone(),
-                            );
-                        }
+                        log::info!(target: "host_input_sizing",
+                            "CreateInstance restored mismatch from hidden field (mode={persisted:?})");
                     }
                 }
 
@@ -2055,7 +2346,7 @@ impl Execute for GyroflowPlugin {
                 if in_args.get_name()? == "HostInputSizing" {
                     instance_data.applied_host_input_sizing = None;
                     if in_args.get_change_reason()? == Change::UserEdited {
-                        log::info!(target: "ofx",
+                        log::info!(target: "host_input_sizing",
                             "HostInputSizing changed by user; will re-evaluate on next render");
                     }
                     return OK;
@@ -2521,10 +2812,17 @@ mod tests {
     #[test]
     fn fillcrop_landscape_anamorphic_on_portrait_timeline_scales_back() {
         // R5MK2 (5760×2160 desqueezed, h=1.5) on a portrait 1080×1920 timeline: Resolve crops
-        // the physical 3840×2160 frame to a centered 1215×2160 slice; scaled back to the
-        // desqueezed space that is 1823×2160 at x-offset 1968.
+        // the physical 3840×2160 frame to a centered slice, scaled back to the desqueezed space.
+        //
+        // The aspect-exact crop is 1215 wide, which leaves an ODD 2625 px margin — 1312 on the
+        // left, 1313 on the right. `even_margin` trims the crop to 1214 so both sides are exactly
+        // 1313 (see that helper: an off-centre crop makes the display->storage offset ambiguous
+        // by 1 px under rotation). Desqueezed: 1214*1.5 = 1821 at 1313*1.5 ≈ 1970.
+        //
+        // This asserted 1823/1968 before the centring fix; a real camera config reaching the odd
+        // margin is why that fix is not theoretical.
         let crop = compute_fillcrop_geometry_desqueezed((5760, 2160), (1.5, 1.0), 1080.0 / 1920.0, 0.0);
-        assert_eq!(crop, Some((1823, 2160, 1968, 0)));
+        assert_eq!(crop, Some((1821, 2160, 1970, 0)));
     }
 
     #[test]
@@ -3050,6 +3348,7 @@ mod tests {
             timeline_w: 1920,
             timeline_h: 1920,
             use_custom_settings: false,
+            queried_at: None,
         }
     }
 
@@ -3068,6 +3367,174 @@ mod tests {
         assert_eq!(parse_mismatch_mode(""), None);
         assert_eq!(parse_mismatch_mode("scaletofit"), None); // wrong case
         assert_eq!(parse_mismatch_mode("nope"), None);
+    }
+
+    #[test]
+    fn even_margin_forces_an_exactly_centreable_crop() {
+        // Even margin: untouched.
+        assert_eq!(even_margin(1920, 1080), 1080); // margin 840
+        assert_eq!(even_margin(1920, 1920), 1920); // margin 0, no crop
+        // Odd margin: give up one pixel so both sides are equal.
+        assert_eq!(even_margin(1920, 1215), 1214); // margin 705 -> 706
+        assert_eq!(even_margin(101, 100), 99);     // margin 1 -> 2
+        // Never returns 0, and never exceeds the extent.
+        assert_eq!(even_margin(2, 1), 1);
+        assert_eq!(even_margin(1080, 99999), 1080);
+    }
+
+    #[test]
+    fn crop_geometry_offsets_are_exactly_centred_after_even_margin() {
+        // 1920 wide into a 1.0 timeline aspect on a 1215-tall source would leave an odd
+        // horizontal margin; the crop is trimmed so both sides match and the transpose cannot
+        // land on the wrong side.
+        let (w, h, x, y) = compute_crop_geometry((1920, 1215), 1.0, 0.0);
+        assert_eq!(h, 1215);
+        assert_eq!((1920 - w) % 2, 0, "margin must be even");
+        assert_eq!(x, (1920 - w) / 2);
+        assert_eq!(1920 - x - w, x, "both sides equal");
+        assert_eq!(y, 0);
+    }
+
+    #[test]
+    fn centercrop_keeps_min_of_timeline_and_source_not_an_aspect_band() {
+        // Live config, had the user picked "Center crop" instead of "Fill+Crop":
+        // portrait anamorphic, physical display 1080x1920, timeline 1920x1080.
+        // No resizing => visible region is 1080x1080 centred at y=420, NOT the 1080x608
+        // aspect-matched band FillCrop produces.
+        let cc = compute_centercrop_geometry_desqueezed((1920, 1620), (1.0, 1.5), (1920, 1080), 90.0)
+            .expect("source is taller than the timeline, so it is cropped");
+        // Display-oriented, desqueezed: width 1080*1.5=1620, height 1080*1.0, offset y 420*1.0.
+        assert_eq!(cc, (1620, 1080, 0, 420));
+
+        let fc = compute_fillcrop_geometry_desqueezed((1920, 1620), (1.0, 1.5), 1920.0 / 1080.0, 90.0)
+            .expect("same source is also cropped under FillCrop");
+        assert_ne!(cc, fc, "the two models must not agree here — that was the bug");
+    }
+
+    #[test]
+    fn centercrop_crops_when_aspects_match_but_source_is_larger() {
+        // The case the old shared model got silently wrong: 3840x2160 source in a 1920x1080
+        // timeline. Aspects match, so the FillCrop model reports no crop at all, while the host
+        // is really showing a 2x centre crop.
+        let cc = compute_centercrop_geometry_desqueezed((3840, 2160), (1.0, 1.0), (1920, 1080), 0.0)
+            .expect("a 2x oversized source is centre-cropped");
+        assert_eq!(cc, (1920, 1080, 960, 540));
+
+        assert_eq!(
+            compute_fillcrop_geometry_desqueezed((3840, 2160), (1.0, 1.0), 1920.0 / 1080.0, 0.0),
+            None,
+            "FillCrop correctly reports no crop here — which is why sharing it was wrong"
+        );
+    }
+
+    #[test]
+    fn centercrop_returns_none_when_source_fits_inside_the_timeline() {
+        // Source smaller than the timeline on both axes: fully visible, pillar/letterboxed,
+        // nothing to crop.
+        assert_eq!(
+            compute_centercrop_geometry_desqueezed((1280, 720), (1.0, 1.0), (1920, 1080), 0.0),
+            None
+        );
+        // Exact match is also a no-op.
+        assert_eq!(
+            compute_centercrop_geometry_desqueezed((1920, 1080), (1.0, 1.0), (1920, 1080), 0.0),
+            None
+        );
+        // Degenerate timeline dims never mutate.
+        assert_eq!(
+            compute_centercrop_geometry_desqueezed((1920, 1080), (1.0, 1.0), (0, 0), 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn centercrop_crops_only_the_overflowing_axis() {
+        // Wider than the timeline, shorter than it: only x is clamped.
+        let cc = compute_centercrop_geometry_desqueezed((3840, 720), (1.0, 1.0), (1920, 1080), 0.0)
+            .expect("x overflows");
+        assert_eq!(cc, (1920, 720, 960, 0));
+    }
+
+    #[test]
+    fn crop_display_to_storage_transposes_under_quarter_turns() {
+        // Live case (DSC_3172, portrait anamorphic in a 1920x1080 timeline, scaleToCrop):
+        // display crop 1620x608 at (0,656) must land as storage 608x1620 at (656,0).
+        assert_eq!(
+            crop_display_to_storage((1620, 608, 0, 656), 90.0),
+            ((608, 1620), (656, 0))
+        );
+        assert_eq!(
+            crop_display_to_storage((1620, 608, 0, 656), 270.0),
+            ((608, 1620), (656, 0))
+        );
+        // Negative and out-of-range rotations normalize the same way.
+        assert_eq!(
+            crop_display_to_storage((1620, 608, 0, 656), -90.0),
+            ((608, 1620), (656, 0))
+        );
+        assert_eq!(
+            crop_display_to_storage((1620, 608, 0, 656), 450.0),
+            ((608, 1620), (656, 0))
+        );
+    }
+
+    #[test]
+    fn crop_display_to_storage_is_identity_without_quarter_turn() {
+        // Unrotated clips must stay byte-equivalent to the pre-fix write-back.
+        for rot in [0.0, 180.0, 360.0, -180.0] {
+            assert_eq!(
+                crop_display_to_storage((1215, 2160, 352, 0), rot),
+                ((1215, 2160), (352, 0)),
+                "rotation {rot} should be identity"
+            );
+        }
+    }
+
+    #[test]
+    fn fillcrop_portrait_anamorphic_into_landscape_timeline_writes_storage_orientation() {
+        // End-to-end over the two pure functions, reproducing the logged live values:
+        // source (1920,1620) desqueezed, stretch (1.0,1.5), rotation 90, timeline 1920x1080.
+        let crop = compute_fillcrop_geometry_desqueezed((1920, 1620), (1.0, 1.5), 1920.0 / 1080.0, 90.0)
+            .expect("a portrait clip in a landscape timeline is cropped by the host");
+        assert_eq!(crop, (1620, 608, 0, 656), "display-oriented crop rect");
+
+        let (storage_size, storage_offset) = crop_display_to_storage(crop, 90.0);
+        assert_eq!(storage_size, (608, 1620), "params.size / calib_dimension");
+        assert_eq!(storage_offset, (656, 0), "principal-point shift");
+    }
+
+    #[test]
+    fn parse_mismatch_ttl_defaults_when_unset_or_blank() {
+        assert_eq!(parse_mismatch_ttl(None),        (MISMATCH_TTL_DEFAULT_MS, "default"));
+        assert_eq!(parse_mismatch_ttl(Some("")),    (MISMATCH_TTL_DEFAULT_MS, "default"));
+        assert_eq!(parse_mismatch_ttl(Some("   ")), (MISMATCH_TTL_DEFAULT_MS, "default"));
+    }
+
+    #[test]
+    fn parse_mismatch_ttl_accepts_valid_values() {
+        assert_eq!(parse_mismatch_ttl(Some("10000")),  (10_000, "env"));
+        assert_eq!(parse_mismatch_ttl(Some("3000")),   (3_000,  "env"));
+        assert_eq!(parse_mismatch_ttl(Some(" 750\n")), (750,    "env"));
+    }
+
+    #[test]
+    fn parse_mismatch_ttl_zero_disables_expiry_and_is_never_clamped() {
+        // `0` is the documented kill-switch (sticky cache). It must survive the min clamp.
+        assert_eq!(parse_mismatch_ttl(Some("0")), (0, "env"));
+    }
+
+    #[test]
+    fn parse_mismatch_ttl_clamps_out_of_band_values() {
+        assert_eq!(parse_mismatch_ttl(Some("1")),        (MISMATCH_TTL_MIN_MS, "env_clamped"));
+        assert_eq!(parse_mismatch_ttl(Some("499")),      (MISMATCH_TTL_MIN_MS, "env_clamped"));
+        assert_eq!(parse_mismatch_ttl(Some("99999999")), (MISMATCH_TTL_MAX_MS, "env_clamped"));
+    }
+
+    #[test]
+    fn parse_mismatch_ttl_falls_back_on_garbage() {
+        assert_eq!(parse_mismatch_ttl(Some("abc")),  (MISMATCH_TTL_DEFAULT_MS, "default_invalid"));
+        assert_eq!(parse_mismatch_ttl(Some("-1")),   (MISMATCH_TTL_DEFAULT_MS, "default_invalid"));
+        assert_eq!(parse_mismatch_ttl(Some("1.5")),  (MISMATCH_TTL_DEFAULT_MS, "default_invalid"));
     }
 
     #[test]
