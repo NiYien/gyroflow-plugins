@@ -355,29 +355,68 @@ impl CurrentFileInfo {
                                 let mut trigger = std::process::Command::new(exe);
                                 #[cfg(target_os = "windows")]
                                 { use std::os::windows::process::CommandExt; trigger.creation_flags(0x08000000); }
-                                if let Ok(mut child) = trigger.args(["-q", "-l", "lua", "-x", script]).spawn() {
+                                // Piped so the reaper can surface the lua error text. Reading the
+                                // pipes only AFTER exit/kill cannot deadlock: the trigger prints at
+                                // most a few short lines, orders of magnitude below the pipe buffer.
+                                let spawned = trigger.args(["-q", "-l", "lua", "-x", script])
+                                    .stdout(std::process::Stdio::piped())
+                                    .stderr(std::process::Stdio::piped())
+                                    .spawn();
+                                match spawned {
+                                    Ok(mut child) => {
                                     // Same deadline as the query itself. This trigger goes through
                                     // the same Resolve IPC endpoint, so it hangs under exactly the
                                     // same conditions — a plain `wait()` here would leak both the
                                     // process and the reaper thread for the rest of the session.
+                                    //
+                                    // Failure is logged but never retried: the next natural render
+                                    // adopts the corrected cache value regardless. The log exists
+                                    // because the lua side fails for the same playhead-on-a-gap /
+                                    // title reasons as the query itself, and a silent failure here
+                                    // means "cache corrected but the screen kept the stale frame"
+                                    // with zero diagnostics (openfx-mismatch-switch-refresh).
                                     std::thread::spawn(move || {
                                         let deadline = std::time::Instant::now()
                                             + std::time::Duration::from_millis(QUERY_TIMEOUT_MS);
-                                        loop {
+                                        let mut timed_out = false;
+                                        let status = loop {
                                             match child.try_wait() {
-                                                Ok(Some(_)) => break,
+                                                Ok(Some(status)) => break Some(status),
                                                 Ok(None) => {
                                                     if std::time::Instant::now() >= deadline {
                                                         let _ = child.kill();
                                                         let _ = child.wait();
-                                                        break;
+                                                        timed_out = true;
+                                                        break None;
                                                     }
                                                     std::thread::sleep(std::time::Duration::from_millis(50));
                                                 }
-                                                Err(_) => break,
+                                                Err(_) => break None,
                                             }
+                                        };
+                                        let mut stderr = String::new();
+                                        if let Some(mut pipe) = child.stderr.take() {
+                                            use std::io::Read;
+                                            let _ = pipe.read_to_string(&mut stderr);
+                                        }
+                                        let lua_error = stderr.trim().lines()
+                                            .filter(|line| !is_missing_python2(line))
+                                            .collect::<Vec<_>>()
+                                            .join(" | ");
+                                        match status {
+                                            Some(st) if st.success() && lua_error.is_empty() => {}
+                                            Some(st) => log::warn!(target: "host_input_sizing",
+                                                "forced re-render trigger failed (exit={:?}, stderr: {lua_error}) — the corrected mode reaches the screen on the next natural render",
+                                                st.code()),
+                                            None if timed_out => log::warn!(target: "host_input_sizing",
+                                                "forced re-render trigger exceeded {QUERY_TIMEOUT_MS}ms and was killed — Resolve is most likely busy; the corrected mode reaches the screen on the next natural render"),
+                                            None => log::warn!(target: "host_input_sizing",
+                                                "forced re-render trigger could not be awaited (stderr: {lua_error})"),
                                         }
                                     });
+                                    }
+                                    Err(e) => log::warn!(target: "host_input_sizing",
+                                        "forced re-render trigger failed to spawn: {e}"),
                                 }
                             }
                         }

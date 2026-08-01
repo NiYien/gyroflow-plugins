@@ -34,16 +34,6 @@ struct HostInputSizingCacheEntry {
     populated_at: std::time::Instant,
 }
 
-impl HostInputSizingCacheEntry {
-    /// True when this entry is older than the configured TTL. A TTL of 0 disables expiry.
-    fn is_stale(&self) -> bool {
-        let ttl = mismatch_ttl_ms();
-        if ttl == 0 { return false; }
-        self.populated_at.elapsed().as_millis() as u64 >= ttl
-    }
-
-}
-
 #[derive(Default)]
 struct GyroflowPlugin {
     gyroflow_plugin: GyroflowPluginBase,
@@ -67,6 +57,14 @@ struct GyroflowPlugin {
     // long-lived, and retrying each window means one spawned-and-killed process per window for
     // the whole duration. Reset to zero by the first successful query.
     host_input_sizing_failures: Arc<std::sync::atomic::AtomicU32>,
+    // Pending forced refresh, set by CreateInstance (openfx-mismatch-switch-refresh). Instance
+    // recreation is the host's only observable signal that the project context may have changed
+    // (the shared cache carries no project identity), so a switch to a project with different
+    // mismatch settings would otherwise serve the previous project's values for a full TTL.
+    // Consumed only when a forced query is actually armed — consuming it on a read that merely
+    // observed it (single-flight busy, pacing floor) would let a query armed BEFORE the switch
+    // land with the old project's values under a fresh timestamp and reinstate the stale window.
+    host_input_sizing_force_refresh: AtomicBool,
 }
 
 /// Build the placeholder `CurrentFileInfo` that carries only host-input-sizing fields.
@@ -133,36 +131,31 @@ impl GyroflowPlugin {
             }
         }
 
-        let needs_refresh = cached.as_ref().map_or(true, |entry| entry.is_stale());
-        if !needs_refresh { return; }
-
+        // Arm decision (openfx-mismatch-switch-refresh): freshness, attempt pacing, failure
+        // back-off, the TTL=0 kill-switch and the forced-arm bypass all live in one pure,
+        // unit-tested gate. The force flag is only PEEKED here — it is consumed at the arm
+        // point below, so a skipped read (pacing floor, single-flight busy) leaves it pending.
         let ttl = mismatch_ttl_ms();
-
-        // Attempt pacing (read-only here; the stamp is written once a query is actually armed).
-        // A query that never succeeds leaves the cache empty, so `needs_refresh` stays true and
-        // the single-flight guard is released as soon as each attempt fails — without this gate
-        // that is one spawned process per rendered frame.
-        {
+        let forced = self.host_input_sizing_force_refresh.load(SeqCst);
+        let decision = {
             let last_attempt = self.host_input_sizing_last_attempt.lock();
-            if ttl == 0 {
-                // Kill-switch semantics: bootstrap at most once, then never re-query. Without
-                // this the empty-cache branch above keeps arming forever on hosts where the
-                // query can never succeed — the opposite of what the switch promises.
-                if last_attempt.is_some() { return; }
-            } else if let Some(prev) = *last_attempt {
-                // Back off after consecutive failures: 1x the TTL while healthy, stretching to 6x
-                // once the query keeps failing (Resolve busy during playback / export, playhead
-                // on a title or gap). A single success resets it.
-                let failures = self.host_input_sizing_failures.load(SeqCst).min(5) as u64;
-                let min_gap_ms = ttl.saturating_mul(1 + failures);
-                if (prev.elapsed().as_millis() as u64) < min_gap_ms { return; }
-            }
-        }
+            host_sizing_arm_decision(
+                forced,
+                cached.as_ref().map(|e| e.populated_at.elapsed().as_millis() as u64),
+                last_attempt.map(|t| t.elapsed().as_millis() as u64),
+                self.host_input_sizing_failures.load(SeqCst),
+                ttl,
+            )
+        };
+        let ArmDecision::Arm { reset_failures } = decision else { return; };
 
         if !CurrentFileInfo::is_available() {
             // Burn the window anyway so a host without fuscript does not stat the filesystem on
-            // every rendered frame.
+            // every rendered frame. A pending forced arm can never be satisfied on such a host,
+            // so consume it too — otherwise the flag pins the gate open and this branch runs
+            // its filesystem stat on every rendered frame for the rest of the session.
             *self.host_input_sizing_last_attempt.lock() = Some(std::time::Instant::now());
+            self.host_input_sizing_force_refresh.store(false, SeqCst);
             return;
         }
 
@@ -194,6 +187,12 @@ impl GyroflowPlugin {
                 return;
             }
         }
+        // A query is being armed for real: consume the forced state now (and only now — see the
+        // field comment for why earlier consumption reopens the stale-cache window), and reset
+        // the failure streak accumulated against the previous project context so its back-off
+        // (up to 6x TTL) does not delay the very re-read the switch needs.
+        if forced { self.host_input_sizing_force_refresh.store(false, SeqCst); }
+        if reset_failures { self.host_input_sizing_failures.store(0, SeqCst); }
         *self.host_input_sizing_last_attempt.lock() = Some(std::time::Instant::now());
         CurrentFileInfo::query_refresh(
             current_file_info.clone(),
@@ -274,6 +273,64 @@ fn mismatch_ttl_ms() -> u64 {
         log::info!(target: "host_input_sizing", "mismatch ttl resolved: ttl_ms={ttl} source={source}");
         ttl
     })
+}
+
+/// Outcome of `host_sizing_arm_decision`. `reset_failures` is true only for a forced arm:
+/// the consecutive-failure streak was accumulated against the previous project context and
+/// must not impose its back-off on the new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmDecision {
+    Skip,
+    Arm { reset_failures: bool },
+}
+
+/// Pure gate for "should this call arm a background host-input-sizing refresh?"
+/// (openfx-mismatch-switch-refresh). Kept free of `Instant`, env and locks so the
+/// forced / normal / kill-switch matrix is unit-testable, following the
+/// `parse_mismatch_ttl` precedent. The caller keeps the locking and single-flight
+/// choreography.
+///
+/// - `forced`: a `CreateInstance` armed a forced refresh that has not been consumed yet.
+/// - `entry_age_ms`: `None` when the cache is empty.
+/// - `elapsed_since_attempt_ms`: `None` when no query attempt was ever stamped.
+///
+/// TTL 0 is the kill-switch: at most one bootstrap attempt per session, and the forced
+/// arm is disabled entirely — its promise takes precedence.
+/// A forced arm bypasses both the freshness check and the normal
+/// `TTL x (1 + failures)` pacing, but still honors a short floor
+/// (`MISMATCH_TTL_MIN_MS`) so a burst of CreateInstances is bounded to ~2 queries.
+fn host_sizing_arm_decision(
+    forced: bool,
+    entry_age_ms: Option<u64>,
+    elapsed_since_attempt_ms: Option<u64>,
+    failures: u32,
+    ttl_ms: u64,
+) -> ArmDecision {
+    if ttl_ms == 0 {
+        // Kill-switch: bootstrap at most once (empty cache, no prior attempt), forced ignored.
+        return if entry_age_ms.is_none() && elapsed_since_attempt_ms.is_none() {
+            ArmDecision::Arm { reset_failures: false }
+        } else {
+            ArmDecision::Skip
+        };
+    }
+    if forced {
+        return match elapsed_since_attempt_ms {
+            Some(elapsed) if elapsed < MISMATCH_TTL_MIN_MS => ArmDecision::Skip,
+            _ => ArmDecision::Arm { reset_failures: true },
+        };
+    }
+    let stale = entry_age_ms.map_or(true, |age| age >= ttl_ms);
+    if !stale {
+        return ArmDecision::Skip;
+    }
+    match elapsed_since_attempt_ms {
+        Some(elapsed) => {
+            let min_gap_ms = ttl_ms.saturating_mul(1 + failures.min(5) as u64);
+            if elapsed < min_gap_ms { ArmDecision::Skip } else { ArmDecision::Arm { reset_failures: false } }
+        }
+        None => ArmDecision::Arm { reset_failures: false },
+    }
 }
 
 /// Physical (source-native squeezed) aspect ratios for the input content-band and output
@@ -2293,6 +2350,25 @@ impl Execute for GyroflowPlugin {
                 //  - the fresh-drop cache invalidation. It existed only because the cache had no
                 //    expiry, making a node re-drop the sole user-reachable way to force a re-read.
                 //    Expiry subsumes it, and keeping it would cost an extra query per drop.
+                //
+                // Forced arm (openfx-mismatch-switch-refresh): instance recreation is the host's
+                // only observable signal that the project context may have changed — the shared
+                // cache carries no project identity, so after a project switch a young entry
+                // still holds the PREVIOUS project's mismatch mode and timeline resolution.
+                // Treat the entry as suspect regardless of age: keep serving it, but arm one
+                // background refresh now instead of waiting out the TTL. Skipped under the TTL=0
+                // kill-switch, whose "at most one bootstrap query" promise takes precedence.
+                if mismatch_ttl_ms() != 0 {
+                    let cache_age_ms = self.host_input_sizing_cache.lock().as_ref()
+                        .map(|e| e.populated_at.elapsed().as_millis() as u64);
+                    self.host_input_sizing_force_refresh.store(true, SeqCst);
+                    match cache_age_ms {
+                        Some(age) => log::info!(target: "host_input_sizing",
+                            "CreateInstance armed forced refresh (cache_age_ms={age})"),
+                        None => log::info!(target: "host_input_sizing",
+                            "CreateInstance armed forced refresh (cache=empty)"),
+                    }
+                }
                 self.ensure_host_input_sizing_fresh(
                     &instance_data.current_file_info,
                     &instance_data.current_file_info_pending,
@@ -3537,6 +3613,66 @@ mod tests {
         assert_eq!(parse_mismatch_ttl(Some("abc")),  (MISMATCH_TTL_DEFAULT_MS, "default_invalid"));
         assert_eq!(parse_mismatch_ttl(Some("-1")),   (MISMATCH_TTL_DEFAULT_MS, "default_invalid"));
         assert_eq!(parse_mismatch_ttl(Some("1.5")),  (MISMATCH_TTL_DEFAULT_MS, "default_invalid"));
+    }
+
+    const ARM: ArmDecision = ArmDecision::Arm { reset_failures: false };
+    const ARM_RESET: ArmDecision = ArmDecision::Arm { reset_failures: true };
+    const SKIP: ArmDecision = ArmDecision::Skip;
+    const TTL: u64 = MISMATCH_TTL_DEFAULT_MS; // 10_000
+
+    #[test]
+    fn arm_decision_normal_fresh_entry_skips() {
+        assert_eq!(host_sizing_arm_decision(false, Some(3_000), Some(3_000), 0, TTL), SKIP);
+        // Age exactly at the TTL boundary counts as stale (>=, matching the pre-change is_stale).
+        assert_eq!(host_sizing_arm_decision(false, Some(TTL), None, 0, TTL), ARM);
+    }
+
+    #[test]
+    fn arm_decision_normal_stale_or_empty_arms_without_reset() {
+        assert_eq!(host_sizing_arm_decision(false, None,          None, 0, TTL), ARM);
+        assert_eq!(host_sizing_arm_decision(false, Some(15_000),  None, 0, TTL), ARM);
+        assert_eq!(host_sizing_arm_decision(false, Some(15_000), Some(12_000), 0, TTL), ARM);
+    }
+
+    #[test]
+    fn arm_decision_normal_pacing_and_backoff() {
+        // Healthy: one attempt per TTL window.
+        assert_eq!(host_sizing_arm_decision(false, None, Some(5_000),  0, TTL), SKIP);
+        assert_eq!(host_sizing_arm_decision(false, None, Some(10_000), 0, TTL), ARM);
+        // Back-off stretches the gap to TTL x (1 + failures)…
+        assert_eq!(host_sizing_arm_decision(false, None, Some(25_000), 2, TTL), SKIP);
+        assert_eq!(host_sizing_arm_decision(false, None, Some(30_000), 2, TTL), ARM);
+        // …capped at 6x.
+        assert_eq!(host_sizing_arm_decision(false, None, Some(59_000), 9, TTL), SKIP);
+        assert_eq!(host_sizing_arm_decision(false, None, Some(60_000), 9, TTL), ARM);
+    }
+
+    #[test]
+    fn arm_decision_forced_bypasses_freshness_and_backoff() {
+        // Fresh entry, recent attempt, big failure streak — forced still arms and resets.
+        assert_eq!(host_sizing_arm_decision(true, Some(2_000), None, 0, TTL), ARM_RESET);
+        assert_eq!(host_sizing_arm_decision(true, Some(2_000), Some(3_000), 5, TTL), ARM_RESET);
+        assert_eq!(host_sizing_arm_decision(true, None, Some(1_000), 3, TTL), ARM_RESET);
+    }
+
+    #[test]
+    fn arm_decision_forced_honors_the_burst_floor() {
+        // A CreateInstance burst is bounded by MISMATCH_TTL_MIN_MS between forced arms.
+        assert_eq!(host_sizing_arm_decision(true, Some(2_000), Some(100), 0, TTL), SKIP);
+        assert_eq!(host_sizing_arm_decision(true, Some(2_000), Some(MISMATCH_TTL_MIN_MS), 0, TTL), ARM_RESET);
+    }
+
+    #[test]
+    fn arm_decision_ttl_zero_bootstraps_once_and_ignores_forced() {
+        // Bootstrap: empty cache, never attempted.
+        assert_eq!(host_sizing_arm_decision(false, None, None, 0, 0), ARM);
+        // After any attempt, or with any entry, never again — forced or not.
+        assert_eq!(host_sizing_arm_decision(false, None, Some(999_999), 0, 0), SKIP);
+        assert_eq!(host_sizing_arm_decision(false, Some(999_999), None, 0, 0), SKIP);
+        assert_eq!(host_sizing_arm_decision(true,  Some(1_000), None, 0, 0), SKIP);
+        assert_eq!(host_sizing_arm_decision(true,  None, Some(999_999), 0, 0), SKIP);
+        // Forced during bootstrap is fine but must not carry the reset marker (nothing to reset).
+        assert_eq!(host_sizing_arm_decision(true, None, None, 0, 0), ARM);
     }
 
     #[test]
