@@ -10,15 +10,17 @@ The OpenFX render path SHALL map host buffers onto the stabilization core's logi
 
 - `LegacyLogical` SHALL use the stretch-baked logical ratios only when `GYROFLOW_OFX_ANAMORPHIC_BAND=0|off|false`.
 - `Physical` SHALL use the stretch-divided ratios and SHALL remain the default and every evidence-poor/inconsistent fallback.
-- `HostParComposited` SHALL use the stretch-baked logical ratios for both input and output on a main Resolve Edit/Color `Fit` render when the actual source buffer does not match the source-native physical input aspect.
+- `HostParComposited` SHALL use the stretch-baked logical ratios for both input and output on every main Resolve Edit/Color `Fit` render of an anamorphic lens, independent of the actual source-buffer aspect.
 
 - **Input content band** (`src_rect`): when the effective `HostInputSizing` is `Auto` or `Fit`, or `DontDrawOutside` is enabled, the plugin SHALL guess the content band of the source buffer using the selected aspect space. The physical base is `params.size` divided per storage axis by the lens `input_horizontal_stretch` / `input_vertical_stretch` (factors <= 0.01 treated as 1.0), transposed when the effective InputRotation is 90/270. When the effective `HostInputSizing` is `FillCrop`, `CenterCrop`, or `Stretch`, the input rect SHALL remain `None` (full buffer, unchanged).
 
 - **Output aspect fit** (`aspect_fit_output`): when `DontDrawOutside` is disabled, the plugin is not on the Fusion page, and the effective `HostInputSizing` is `Auto` or `Fit`, the plugin SHALL derive the output rect from the selected output aspect. The physical base is `params.output_size` with each display axis divided by the stretch factor that produced it (display-horizontal divided by `input_vertical_stretch` when InputRotation is 90/270 and by `input_horizontal_stretch` otherwise; conversely for display-vertical). The render-scale (proxy) composition SHALL apply the same selected derivation at the scaled dimensions.
 
-`HostParComposited` SHALL require all of the following: Resolve host name `DaVinciResolve` (the canonical `com.blackmagicdesign.resolve` alias MAY also be accepted); Edit/Color `Fit`; `DontDrawOutside=false`; anamorphic raw stretch; a main render rather than preview/subscale; logical input aspect differing from the physical input aspect by more than 0.1; and actual source-buffer aspect not matching the physical input aspect within 1%. A physical match, preview/subscale request, another host, or failure of any gate SHALL select `Physical`. Fuscript clip fields and OFX clip/image PAR SHALL NOT participate in the decision.
+`HostParComposited` SHALL require all of the following: Resolve host name `DaVinciResolve` (the canonical `com.blackmagicdesign.resolve` alias MAY also be accepted); Edit/Color `Fit`; `DontDrawOutside=false`; not the Fusion page; anamorphic raw stretch (factors <= 0.01 treated as 1.0); a main render rather than preview/subscale; and a non-degenerate source buffer. Failure of any gate SHALL select `Physical`. The source-buffer aspect SHALL NOT participate in the decision, and neither SHALL fuscript clip fields nor OFX clip/image PAR.
 
-The host contract is that the user applies the anamorphic PAR corresponding to the loaded `.gyroflow` raw lens stretch in Resolve. The logical aspect is therefore the expected post-PAR buffer aspect; the physical aspect remains the expected source-native squeezed buffer aspect.
+The host contract is that the user applies the anamorphic PAR corresponding to the loaded `.gyroflow` raw lens stretch in Resolve's Clip Attributes, so a main Fit render receives the already-desqueezed frame composited into the timeline buffer. The band is therefore fully determined by the project's own `output_size` together with the existing `HostInputSizing` and `InputRotation` parameters.
+
+An anamorphic clip left un-desqueezed in Resolve is outside this contract: its main Fit render receives the logical band as well, which is wrong for it. Distinguishing the two requires a host signal stating what the host did to the buffer, and none is available that is both instance-bound and durable — the fuscript clip PAR resolves from the playhead's clip, is not republished by the expiry-driven refresh, and returns empty after a project reopen. An earlier revision inferred the distinction from the source-buffer aspect instead; that is degenerate whenever the timeline aspect matches the squeezed source's (the ordinary 16:9 pairing) and produced warped top/bottom black bands plus rolling-shutter jello on landscape 1.5x material.
 
 Buffer-space squash SHALL occur only by the lens stretch factors (host-PAR pre-compensation); the plugin SHALL NOT otherwise stretch or squash the stabilized image to fill a mismatched buffer. Aspect mismatches beyond the stretch factors are still resolved by centered letterbox/pillarbox bands.
 
@@ -46,10 +48,15 @@ The `DontDrawOutside` output-rect derivation SHALL continue to be derived from `
 - **WHEN** an anamorphic Resolve Edit/Color `Fit` main render has no clip-level fuscript evidence, reports host `DaVinciResolve`, and supplies a 1920x1080 timeline buffer whose source-native physical aspect is 0.5625 while the loaded logical content aspect is 0.9
 - **THEN** both band ratios use `HostParComposited`, `get_center_rect` keeps the full 972x1080 logical content band, and the plugin does not shrink it again to a 608x1080 physical band
 
-#### Scenario: Source-native buffer - physical behavior preserved
+#### Scenario: Protective gates - physical behavior preserved
 
-- **WHEN** the main buffer matches the physical input aspect, comes from another host, or any Resolve/Fit/anamorphic gate fails
+- **WHEN** the render comes from another host, is on the Fusion page, has `DontDrawOutside` enabled, is a preview/subscale request, uses a non-`Fit` `HostInputSizing` mode, carries a non-anamorphic lens, or supplies a degenerate buffer
 - **THEN** the selector uses `Physical` and behavior is identical to `6b8cb14`
+
+#### Scenario: Buffer aspect matching the physical one still selects logical
+
+- **WHEN** a main Resolve `Fit` anamorphic render supplies a buffer whose outer aspect matches the physical input aspect - the ordinary pairing of a 16:9 timeline with a 16:9 squeezed source
+- **THEN** the selector still uses `HostParComposited`, because that coincidence carries no information about what the host did to the buffer; keying on it produced warped top/bottom black bands and rolling-shutter jello on landscape 1.5x material
 
 #### Scenario: Non-anamorphic sources - byte-equivalent
 

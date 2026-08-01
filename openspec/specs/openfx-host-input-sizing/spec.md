@@ -345,13 +345,13 @@ The host contract is that users apply the anamorphic PAR corresponding to the lo
 
 #### Scenario: Restored main render defaults to the logical content band
 
-- **WHEN** a Resolve Edit/Color `Fit` instance is restored with empty clip-level fuscript fields, its loaded lens is anamorphic, the render is not a preview/subscale request, and the actual source-buffer aspect does not match the physical input aspect
-- **THEN** the render selects the host-PAR-composited band without re-running fuscript
+- **WHEN** a Resolve Edit/Color `Fit` instance is restored with empty clip-level fuscript fields, its loaded lens is anamorphic, and the render is not a preview/subscale request
+- **THEN** the render selects the host-PAR-composited band without re-running fuscript, whatever the actual source-buffer aspect is
 
-#### Scenario: Restored source-native buffer remains physical
+#### Scenario: Source-buffer aspect does not alter the classification
 
-- **WHEN** the same restored instance receives a source-native squeezed buffer whose aspect matches the physical input aspect
-- **THEN** the render keeps the physical band behavior
+- **WHEN** the same restored instance receives a buffer whose aspect happens to match the physical input aspect
+- **THEN** the render still selects the host-PAR-composited band, because the buffer aspect cannot distinguish a host-desqueezed frame from a source-native one whenever the timeline aspect matches the squeezed source's
 
 #### Scenario: Preview and subscale renders remain physical
 

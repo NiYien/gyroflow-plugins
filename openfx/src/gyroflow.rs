@@ -344,14 +344,28 @@ struct BandAspectSelection {
     output_aspect: f64,
 }
 
-fn aspects_match_within_one_percent(left: f64, right: f64) -> bool {
-    left.is_finite()
-        && right.is_finite()
-        && left > 0.0
-        && right > 0.0
-        && ((left / right) - 1.0).abs() <= 0.01
-}
-
+/// Which aspect space the input content-band and output aspect-fit guesses operate in.
+///
+/// Supported workflow (2026-08-01): anamorphic sources are desqueezed by Resolve itself, via
+/// Clip Attributes' pixel aspect ratio. What reaches the effect is therefore the LOGICAL
+/// (already widened) frame that the host composited into the timeline buffer — letterboxed under
+/// `scaleToFit`, full-bleed under the crop/stretch modes where the band is ignored anyway. The
+/// band is then fully determined by the project's own `output_size` plus the existing
+/// `HostInputSizing` and `InputRotation` parameters; nothing about the host has to be inferred
+/// from buffer geometry.
+///
+/// The previous revision tried to tell "host already desqueezed" from "host handed the raw
+/// squeezed source" by comparing the buffer's outer aspect against the physical one. Those two
+/// cases are indistinguishable whenever the timeline aspect matches the squeezed source's — the
+/// ordinary 16:9-timeline pairing — which is what produced warped top/bottom black bands plus
+/// rolling-shutter jello on landscape 1.5x material (measured 2026-08-01).
+///
+/// KNOWN LIMIT, deliberate: an anamorphic clip left un-desqueezed in Resolve (Clip Attributes
+/// PAR still 1.0) now gets the logical band as well, which is wrong for it. That configuration
+/// is out of the supported workflow; restoring it needs a signal that says what the host did,
+/// and the host does not offer one that is both instance-bound and reliable — the fuscript clip
+/// PAR is resolved from the PLAYHEAD's clip, is not republished by the expiry-driven refresh,
+/// and comes back empty after a project reopen.
 fn select_anamorphic_band_aspects(
     enabled: bool,
     host_name: Option<&str>,
@@ -374,7 +388,16 @@ fn select_anamorphic_band_aspects(
     }
 
     let is_resolve = matches!(host_name, Some("DaVinciResolve" | "com.blackmagicdesign.resolve"));
-    let anamorphic = (raw_stretch.0 - 1.0).abs() > 0.01 || (raw_stretch.1 - 1.0).abs() > 0.01;
+    // Same "≤ 0.01 means unset, treat as 1.0" convention as `physical_band_aspects`, so the
+    // uninitialised stretch form does not read as anamorphic. The render path already guards it
+    // before calling; this keeps the function correct on its own terms.
+    let guard = |s: f64| if s > 0.01 { s } else { 1.0 };
+    let (raw_h, raw_v) = (guard(raw_stretch.0), guard(raw_stretch.1));
+    let anamorphic = (raw_h - 1.0).abs() > 0.01 || (raw_v - 1.0).abs() > 0.01;
+    // Every gate below keeps its pre-existing meaning; only the final decision changed.
+    // Non-Fit modes hand over a buffer whose whole extent is valid source pixels, Fusion and
+    // DontDrawOutside carry their own content-band contracts, previews/proxies are not the
+    // composited timeline frame, and non-anamorphic lenses make the two spaces identical.
     if !is_resolve
         || !anamorphic
         || !mode_is_fit
@@ -390,15 +413,7 @@ fn select_anamorphic_band_aspects(
         return selection(BandAspectSpace::Physical, physical_aspects);
     }
 
-    let source_buffer_aspect = buffer_w as f64 / buffer_h as f64;
-    let logical_and_physical_are_distinct = (logical_aspects.0 - physical_aspects.0).abs() > 0.1;
-    if !logical_and_physical_are_distinct
-        || aspects_match_within_one_percent(source_buffer_aspect, physical_aspects.0)
-    {
-        selection(BandAspectSpace::Physical, physical_aspects)
-    } else {
-        selection(BandAspectSpace::HostParComposited, logical_aspects)
-    }
+    selection(BandAspectSpace::HostParComposited, logical_aspects)
 }
 
 // OpenFX-only enum describing how the host has resized the source image into the timeline
@@ -1781,9 +1796,10 @@ impl Execute for GyroflowPlugin {
                 let params = stab.params.read();
                 let fps = params.fps;
                 let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
-                // Preserve both spaces until the source buffer is available. The selector below
-                // gives source-native physical matches precedence, then applies the user-provided
-                // Resolve PAR contract to remaining main Edit/Color Fit buffers.
+                // Compute both spaces; the selector below picks between them. On a main Edit/Color
+                // Fit render of an anamorphic lens it takes the logical one — the host has already
+                // desqueezed the clip, so that is what the buffer carries. Every other path keeps
+                // the physical (stretch-divided) space.
                 let logical_aspect_pair = physical_band_aspects(
                     params.size,
                     params.output_size,
@@ -2888,29 +2904,44 @@ mod tests {
     }
 
     #[test]
-    fn host_par_composited_observed_resolve_main_buffer_selects_logical() {
-        // The main 1920x1080 effect buffer contains a centered 972x1080 logical content band.
-        // OFX clip/image PAR both report 1.0 and do not participate in the selector.
-        let selected = select_anamorphic_band_aspects(
-            true,
-            Some("DaVinciResolve"),
-            true,
-            false,
-            false,
-            false,
-            (1.0, 1.6),
-            (0.9, 0.9),
-            (0.5625, 0.5625),
-            (1920, 1080),
-        );
+    fn resolve_anamorphic_main_fit_render_uses_the_logical_band() {
+        // Supported workflow: the clip is desqueezed in Resolve, so the frame reaching the effect
+        // on the main Edit/Color Fit render is the logical one composited into the timeline
+        // buffer. Measured 2026-08-01 on landscape 1.5x material — buffer 4023x2268 carrying a
+        // centered 4023x1509 band. Within this path the answer must not depend on the buffer's
+        // own aspect, which is what the replaced heuristic keyed on and got wrong.
+        for raw in [(1.5, 1.0), (1.0, 1.6)] {
+            for host in ["DaVinciResolve", "com.blackmagicdesign.resolve"] {
+                for buffer in [(4023, 2268), (1920, 1080), (1080, 1920)] {
+                    let selected = select_anamorphic_band_aspects(
+                        true,
+                        Some(host),
+                        true,
+                        false,
+                        false,
+                        false,
+                        raw,
+                        (2.6666666666666665, 2.6666666666666665),
+                        (1.7777777777777777, 1.7777777777777777),
+                        buffer,
+                    );
 
-        assert_eq!(selected.space, BandAspectSpace::HostParComposited);
-        assert!((selected.org_ratio - 0.9).abs() < 1e-9);
-        assert!((selected.output_aspect - 0.9).abs() < 1e-9);
+                    assert_eq!(selected.space, BandAspectSpace::HostParComposited, "host={host} raw={raw:?} buffer={buffer:?}");
+                    assert!((selected.org_ratio - 2.6666666666666665).abs() < 1e-9);
+                    assert!((selected.output_aspect - 2.6666666666666665).abs() < 1e-9);
+                }
+            }
+        }
     }
 
     #[test]
-    fn host_par_composited_source_native_buffer_stays_physical() {
+    fn undesqueezed_anamorphic_clip_also_gets_the_logical_band_by_design() {
+        // Pins the documented limit rather than leaving it to be rediscovered: a clip whose
+        // Resolve pixel aspect ratio was left at 1.0 is out of the supported workflow and now
+        // receives the logical band on the main Fit render too, which is wrong for it. Nothing in
+        // the inputs can tell it apart from a desqueezed clip — that is exactly why the
+        // buffer-aspect heuristic this replaced misfired. Revisit only with a host signal that is
+        // instance-bound and survives a project reopen.
         let selected = select_anamorphic_band_aspects(
             true,
             Some("DaVinciResolve"),
@@ -2918,70 +2949,41 @@ mod tests {
             false,
             false,
             false,
-            (1.0, 1.6),
+            (1.0, 1.5),
             (0.9, 0.9),
             (0.5625, 0.5625),
             (1080, 1920),
         );
 
-        assert_eq!(selected.space, BandAspectSpace::Physical);
-        assert!((selected.org_ratio - 0.5625).abs() < 1e-9);
+        assert_eq!(selected.space, BandAspectSpace::HostParComposited);
+        assert!((selected.org_ratio - 0.9).abs() < 1e-9);
     }
 
     #[test]
-    fn host_par_composited_preview_stays_physical() {
-        let selected = select_anamorphic_band_aspects(
-            true,
-            Some("DaVinciResolve"),
-            true,
-            false,
-            false,
-            true,
-            (1.0, 1.6),
-            (0.9, 0.9),
-            (0.5625, 0.5625),
-            (288, 162),
-        );
-
-        assert_eq!(selected.space, BandAspectSpace::Physical);
-        assert!((selected.org_ratio - 0.5625).abs() < 1e-9);
-    }
-
-    #[test]
-    fn host_par_composited_buffer_matching_physical_stays_physical() {
-        let selected = select_anamorphic_band_aspects(
-            true,
-            Some("com.blackmagicdesign.resolve"),
-            true,
-            false,
-            false,
-            false,
-            (1.0, 1.6),
-            (12.0, 12.0),
-            (11.89, 11.89),
-            (1189, 100),
-        );
-
-        assert_eq!(selected.space, BandAspectSpace::Physical);
-        assert!((selected.org_ratio - 11.89).abs() < 1e-9);
-        assert!((selected.output_aspect - 11.89).abs() < 1e-9);
-    }
-
-    #[test]
-    fn host_par_composited_ambiguous_or_failed_gates_stay_physical() {
+    fn protective_gates_stay_physical() {
+        // Every one of these kept its pre-existing meaning across the band-decision change; only
+        // the final Resolve/anamorphic/Fit/main-render decision moved. Tuple order:
+        // (host, mode_is_fit, fusion, dont_draw_outside, preview_or_subscale, raw, buffer).
         let cases = [
-            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (0, 1080)),
-            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (972, 0)),
-            (None, true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.vegascreativesoftware.vegas"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.example.other"), true, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.blackmagicdesign.resolve"), false, false, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.blackmagicdesign.resolve"), true, true, false, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.blackmagicdesign.resolve"), true, false, true, false, (1.0, 1.6), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.0), (0.9, 0.9), (0.5625, 0.5625), (1920, 1080)),
-            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0.65, 0.65), (0.5625, 0.5625), (650, 1000)),
+            // Degenerate buffers.
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (0, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.6), (972, 0)),
+            // Other hosts / no host.
+            (None, true, false, false, false, (1.0, 1.6), (1920, 1080)),
+            (Some("com.vegascreativesoftware.vegas"), true, false, false, false, (1.0, 1.6), (1920, 1080)),
+            (Some("com.example.other"), true, false, false, false, (1.0, 1.6), (1920, 1080)),
+            // Non-Fit modes hand over a fully valid buffer; the band is not consulted.
+            (Some("com.blackmagicdesign.resolve"), false, false, false, false, (1.0, 1.6), (1920, 1080)),
+            // Fusion page and DontDrawOutside carry their own content-band contracts.
+            (Some("com.blackmagicdesign.resolve"), true, true, false, false, (1.0, 1.6), (1920, 1080)),
+            (Some("com.blackmagicdesign.resolve"), true, false, true, false, (1.0, 1.6), (1920, 1080)),
+            // Previews / proxies are not the composited timeline frame.
+            (Some("com.blackmagicdesign.resolve"), true, false, false, true, (1.0, 1.6), (288, 162)),
+            // Non-anamorphic lens, including the uninitialised 0.0 form.
+            (Some("com.blackmagicdesign.resolve"), true, false, false, false, (1.0, 1.0), (1920, 1080)),
+            (Some("DaVinciResolve"), true, false, false, false, (0.0, 0.0), (1920, 1080)),
         ];
-        for (host_name, mode_is_fit, fusion, dont_draw_outside, preview, raw, logical, physical, source_buffer_size) in cases {
+        for (host_name, mode_is_fit, fusion, dont_draw_outside, preview, raw, buffer) in cases {
             let selected = select_anamorphic_band_aspects(
                 true,
                 host_name,
@@ -2990,18 +2992,18 @@ mod tests {
                 dont_draw_outside,
                 preview,
                 raw,
-                logical,
-                physical,
-                source_buffer_size,
+                (0.9, 0.9),
+                (0.5625, 0.5625),
+                buffer,
             );
-            assert_eq!(selected.space, BandAspectSpace::Physical);
-            assert_eq!(selected.org_ratio, physical.0);
-            assert_eq!(selected.output_aspect, physical.1);
+            assert_eq!(selected.space, BandAspectSpace::Physical, "case host={host_name:?} fit={mode_is_fit} fusion={fusion} ddo={dont_draw_outside} preview={preview} raw={raw:?} buffer={buffer:?}");
+            assert_eq!(selected.org_ratio, 0.5625);
+            assert_eq!(selected.output_aspect, 0.5625);
         }
     }
 
     #[test]
-    fn host_par_composited_kill_switch_selects_legacy_logical() {
+    fn kill_switch_selects_legacy_logical() {
         let selected = select_anamorphic_band_aspects(
             false,
             Some("com.blackmagicdesign.resolve"),
