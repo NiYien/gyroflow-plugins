@@ -85,6 +85,10 @@ fn host_sizing_placeholder(entry: &HostInputSizingCacheEntry) -> CurrentFileInfo
         timeline_w: entry.timeline_w,
         timeline_h: entry.timeline_h,
         use_custom_settings: entry.use_custom_settings,
+        // Clip-level fields stay at their defaults (playhead contract) — the
+        // host-trim window is per-clip and never comes from the global cache.
+        source_start_frame: None,
+        source_end_frame: None,
         queried_at: Some(entry.populated_at),
     }
 }
@@ -522,6 +526,154 @@ pub fn parse_mismatch_mode(s: &str) -> Option<HostInputSizing> {
     }
 }
 
+// plugins-host-timeline-trim (out-of-window passthrough): source-domain timestamp
+// for an Edit/Color-page render request. Shared by Render and IsIdentity so the
+// passthrough verdict can never drift from the timestamp Render actually uses.
+// Exactly the historical Render math: timeline time -> source microseconds via
+// speed_stretch, with the mixed-fps variant flooring to the frame grid. The
+// Render-only SrcFrame override is deliberately NOT part of this function —
+// IsIdentity has no access to that in-arg, which is why its boundary slack must
+// stay <= the widen guard's slack (see the IsIdentity arm).
+fn ofx_source_timestamp_us(time: f64, src_fps: f64, fps: f64, speed_stretch: f64) -> i64 {
+    let mut timestamp_us = ((time / src_fps * 1_000_000.0) * speed_stretch).round() as i64;
+    if (src_fps - fps).abs() > 0.01 {
+        let frame = (time / src_fps) * fps * speed_stretch;
+        timestamp_us = (frame.floor() * (1_000_000.0 / fps)).round() as i64;
+    }
+    timestamp_us
+}
+
+// Speed factor between the project media duration and the host clip's reported
+// frame range (Resolve scales the range on retimed clips). Small deviations are
+// rounding noise, not retime — absorbed to 1.0, matching the historical Render
+// behavior ("for the rest users will use Fusion").
+fn ofx_speed_stretch(duration_ms: f64, src_fps: f64, frame_range_max: f64) -> f64 {
+    let mut speed_stretch = 1.0;
+    if frame_range_max > 0.0 {
+        let duration_at_src_fps = (frame_range_max / src_fps) * 1000.0;
+        speed_stretch = ((duration_ms.round() / duration_at_src_fps.round()) * 100.0).floor() / 100.0;
+    }
+    if speed_stretch == 1.01 || speed_stretch == 0.99 || speed_stretch == 1.02 || speed_stretch == 0.98 || speed_stretch == 1.03 || speed_stretch == 0.97 {
+        speed_stretch = 1.0;
+    }
+    speed_stretch
+}
+
+// Shared verdict for both passthrough layers (IsIdentity + render-copy): TRUE
+// only when the timestamp is provably outside EVERY window range by more than
+// the half-frame boundary slack — the SAME tolerance widen_host_trim_for_render
+// uses, so a frame that renders because this said "inside" can never trigger
+// a widening. Multi-range windows (a multi-range project trim) make frames in
+// the holes between ranges pass through, matching the app where they are not
+// exported.
+fn host_trim_frame_outside(window_s: &[(f64, f64)], timestamp_us: i64, fps: f64) -> bool {
+    if !(fps > 0.0) {
+        return false;
+    }
+    let slack_s = 0.5 / fps;
+    let t_s = timestamp_us as f64 / 1_000_000.0;
+    let mut any_valid = false;
+    for &(start_s, end_s) in window_s {
+        if end_s > start_s {
+            any_valid = true;
+            if t_s >= start_s - slack_s && t_s <= end_s + slack_s {
+                return false;
+            }
+        }
+    }
+    any_valid
+}
+
+// Log formatting for a (possibly multi-range) window, seconds.
+fn format_trim_ranges_s(ranges: &[(f64, f64)]) -> String {
+    ranges.iter().map(|&(a, b)| format!("[{a:.3}, {b:.3}]")).collect::<Vec<_>>().join(", ")
+}
+
+// plugins-host-timeline-trim D7: out-of-window passthrough frame copy for the
+// Render path. STRICTLY matching buffers only — identical width/height/stride
+// and both buffers on a copyable backend. Anything else returns Err and the
+// caller falls back to the pre-D7 behavior (widen guard + stabilized render);
+// the failure direction is always "stabilize like before", never a corrupted
+// frame. CUDA + CPU cover Resolve on Windows/Linux (NVIDIA path confirmed live:
+// `in_src=cuda(dev=0)`); OpenCL/Metal/OpenGL deliberately unsupported until a
+// live setup exists to verify them.
+fn passthrough_copy_source_to_output(buffers: &mut Buffers) -> std::result::Result<(), &'static str> {
+    let (sw, sh, ss) = buffers.input.size;
+    let (ow, oh, os) = buffers.output.size;
+    if sw != ow || sh != oh || ss != os {
+        return Err("buffer geometry mismatch");
+    }
+    let bytes = sh.checked_mul(ss).ok_or("buffer size overflow")?;
+    if bytes == 0 {
+        return Err("empty buffer");
+    }
+    match (&mut buffers.input.data, &mut buffers.output.data) {
+        (BufferSource::Cpu { buffer: src }, BufferSource::Cpu { buffer: dst }) => {
+            if src.len() < bytes || dst.len() < bytes {
+                return Err("cpu buffer shorter than geometry");
+            }
+            dst[..bytes].copy_from_slice(&src[..bytes]);
+            Ok(())
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        (BufferSource::CUDABuffer { buffer: src }, BufferSource::CUDABuffer { buffer: dst }) => {
+            cuda_passthrough::memcpy_dtod(*dst as usize, *src as usize, bytes)
+        }
+        _ => Err("unsupported buffer backend for passthrough"),
+    }
+}
+
+// Minimal CUDA driver-API surface for the passthrough copy. Device-to-device,
+// synchronized on the default stream before returning (the host owns any wider
+// synchronization, same contract as the stabilized render path).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod cuda_passthrough {
+    use std::sync::OnceLock;
+
+    type CUresult = i32;
+    struct Api {
+        memcpy_dtod: unsafe extern "system" fn(dst: usize, src: usize, byte_count: usize) -> CUresult,
+        stream_sync: unsafe extern "system" fn(stream: usize) -> CUresult,
+        _lib: libloading::Library,
+    }
+    // SAFETY: the function pointers are plain C ABI entry points resolved from
+    // the driver library, valid for the lifetime of `_lib` which is stored
+    // alongside them and never dropped.
+    unsafe impl Send for Api {}
+    unsafe impl Sync for Api {}
+
+    static API: OnceLock<Option<Api>> = OnceLock::new();
+
+    fn api() -> Option<&'static Api> {
+        API.get_or_init(|| unsafe {
+            #[cfg(target_os = "windows")]
+            let lib = libloading::Library::new("nvcuda.dll").ok()?;
+            #[cfg(target_os = "linux")]
+            let lib = libloading::Library::new("libcuda.so.1").ok()?;
+            let memcpy_dtod = *lib.get(b"cuMemcpyDtoD_v2\0").ok()?;
+            let stream_sync = *lib.get(b"cuStreamSynchronize\0").ok()?;
+            Some(Api { memcpy_dtod, stream_sync, _lib: lib })
+        }).as_ref()
+    }
+
+    pub fn memcpy_dtod(dst: usize, src: usize, bytes: usize) -> std::result::Result<(), &'static str> {
+        let api = api().ok_or("CUDA driver library unavailable")?;
+        // The host render thread arrives with its CUDA context current (the
+        // same assumption the stabilized render path has always made).
+        let res = unsafe { (api.memcpy_dtod)(dst, src, bytes) };
+        if res != 0 {
+            log::warn!("passthrough cuMemcpyDtoD_v2 failed: CUresult={res}");
+            return Err("cuMemcpyDtoD_v2 failed");
+        }
+        let res = unsafe { (api.stream_sync)(0) };
+        if res != 0 {
+            log::warn!("passthrough cuStreamSynchronize failed: CUresult={res}");
+            return Err("cuStreamSynchronize failed");
+        }
+        Ok(())
+    }
+}
+
 // Pure resolver implementing the override precedence from the spec:
 //   1. DontDrawOutside: returns mode unchanged; caller must skip the mode-aware lens/params
 //      transform (DontDrawOutside has its own rect logic that subsumes mode handling).
@@ -865,6 +1017,29 @@ struct InstanceData {
     // copied through "Paste Attributes" by Resolve's standard OFX machinery, so on project
     // reopen each node's mismatch mode is restored without re-running fuscript.
     detected_mismatch_mode: ParamHandle<String>,
+
+    // plugins-host-timeline-trim: hidden OFX string param persisting the host-derived
+    // stabilization window as "<start_s>:<end_s>" (master-media seconds). Same
+    // persistence contract as DetectedMismatchMode: `.drp` reopen restores the window
+    // without fuscript; empty means "no bounds detected" (whole-clip window).
+    detected_host_trim: ParamHandle<String>,
+
+    // plugins-host-timeline-trim: apply-once bookkeeping. The window is applied when
+    // the RESOLVED SOURCE VALUE changes (or the stab was rebuilt), NOT whenever the
+    // stab's current window differs from it — a per-render diff-based apply would
+    // fight the out-of-window render guard (apply narrows, guard widens, one
+    // invalidate+recompute pair per frame past the boundary). The weak stab ref
+    // detects cache rebuilds so a fresh (empty-window) stab gets the value again.
+    // Empty = no window applied yet (first Render populates it). One entry for
+    // a host sub-range, one or more for the project-trim fallback (multi-range
+    // trims are honored in full since out-of-window passthrough).
+    applied_host_trim: Vec<(f64, f64)>,
+    applied_host_trim_stab: Option<std::sync::Weak<StabilizationManager>>,
+
+    // plugins-host-timeline-trim (out-of-window passthrough): last IsIdentity
+    // verdict (true = outside the window, host reuses the source frame). Kept
+    // only to log window enter/exit transitions once instead of per frame.
+    host_trim_passthrough_state: Option<bool>,
 
     // Tracks the mode currently baked into the stab manager so the transform is idempotent.
     // Without this, reapplying the transform on top of an already-transformed lens would
@@ -1553,6 +1728,86 @@ impl Execute for GyroflowPlugin {
         use Action::*;
 
         match *action {
+            // plugins-host-timeline-trim (out-of-window passthrough): frames outside
+            // the resolved stabilization window are declared identity — the host
+            // reuses the source frame untouched (no rotation, no crop, no lens
+            // correction), matching the app, where out-of-trim frames are simply
+            // not part of the export. Every gate below answers REPLY_DEFAULT
+            // (= render normally): passthrough may only fire when the frame is
+            // PROVABLY outside the window. Frames that do reach Render keep the
+            // widen guard, so a host that never asks IsIdentity degrades to the
+            // pre-passthrough behavior (widened window), never to black borders.
+            IsIdentity(ref mut effect, ref in_args, ref mut out_args) => {
+                // Diagnostic (D7 as-built): does this host dispatch IsIdentity at all?
+                // The first live Resolve test showed no passthrough despite correct
+                // windows — the render-copy layer below is the primary passthrough
+                // path; this line settles the host-behavior question per session.
+                static ISIDENTITY_SEEN: std::sync::Once = std::sync::Once::new();
+                ISIDENTITY_SEEN.call_once(|| log::info!("IsIdentity action dispatched by host"));
+                let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                // The Fusion page has no timeline item; the env gates keep both
+                // rollback contracts (HOST_TRIM=0 / KEEP_PROJECT_TRIM=1) intact —
+                // with either active this arm must behave as if it did not exist.
+                if instance_data.is_fusion_page || !gyroflow_plugin_base::host_timeline_trim_enabled() {
+                    return REPLY_DEFAULT;
+                }
+                // The window this instance actually applied (apply-once bookkeeping
+                // in Render). Empty until the first Render — the first frame always
+                // renders normally, which also populates these fields.
+                if instance_data.applied_host_trim.is_empty() {
+                    return REPLY_DEFAULT;
+                }
+                let window = instance_data.applied_host_trim.clone();
+                let Some(stab) = instance_data.applied_host_trim_stab.as_ref().and_then(|w| w.upgrade()) else {
+                    return REPLY_DEFAULT;
+                };
+                let time = in_args.get_time()?;
+                let (fps, duration_ms) = {
+                    let params = stab.params.read();
+                    (params.fps, params.duration_ms)
+                };
+                if !(fps > 0.0) || !(duration_ms > 0.0) {
+                    return REPLY_DEFAULT;
+                }
+                let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
+                let speed_stretch = instance_data.source_clip.get_frame_range()
+                    .map(|range| ofx_speed_stretch(duration_ms, src_fps, range.max))
+                    .unwrap_or(1.0);
+                // Retimed clips: Render additionally honors the host's SrcFrame
+                // in-arg, which IsIdentity cannot read — near the boundary the
+                // verdict could disagree with the frame Render would produce.
+                // Conservative: retimes and speed ramps render normally.
+                if speed_stretch != 1.0 {
+                    return REPLY_DEFAULT;
+                }
+                let timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch);
+                if stab.params.read().get_source_timestamp_at_ramped_timestamp(timestamp_us) != timestamp_us {
+                    return REPLY_DEFAULT;
+                }
+                // Shared verdict (half-frame slack — the SAME tolerance
+                // widen_host_trim_for_render uses). Keeping the two equal is
+                // load-bearing: every frame IsIdentity lets through to Render
+                // lands inside the guard's tolerance, so passthrough can never
+                // hand Render a frame that would widen the window.
+                let outside = host_trim_frame_outside(&window, timestamp_us, fps);
+                if instance_data.host_trim_passthrough_state != Some(outside) {
+                    instance_data.host_trim_passthrough_state = Some(outside);
+                    log::info!(
+                        "host trim passthrough (IsIdentity) {}: t={:.3}s window={}s",
+                        if outside { "entered" } else { "left" },
+                        timestamp_us as f64 / 1_000_000.0,
+                        format_trim_ranges_s(&window)
+                    );
+                }
+                if outside {
+                    out_args.set_name(&image_effect_simple_source_clip_name())?;
+                    out_args.set_time(time)?;
+                    OK
+                } else {
+                    REPLY_DEFAULT
+                }
+            }
+
             Render(ref mut effect, ref in_args) => {
                 let _time = std::time::Instant::now();
 
@@ -1666,6 +1921,57 @@ impl Execute for GyroflowPlugin {
                     }
                 }
 
+                // plugins-host-timeline-trim: the item's source-bounds window in
+                // master-media seconds, derived from the same fuscript record.
+                // Clip-level fields — only a LoadCurrent/ReloadProject publish sets
+                // them, never the expiry refresh (playhead contract). The per-node
+                // hidden param persists a genuine sub-range across `.drp` reopens;
+                // an item spanning (approximately) the whole media carries no trim
+                // information — an untrimmed timeline item — and clears any stale
+                // persisted window instead, letting the project's own trim drive
+                // the window (applied at the stab site below). set_value runs with
+                // no locks held (same deadlock rationale as DetectedMismatchMode).
+                let (fuscript_range, fuscript_reported): (Option<(f64, f64)>, bool) = {
+                    let info_lock = instance_data.current_file_info.lock();
+                    match info_lock.as_ref() {
+                        Some(info) => match (info.source_start_frame, info.source_end_frame) {
+                            (Some(s), Some(e)) if info.fps > 0.0 && e > s => {
+                                let (start_s, end_s) = (s / info.fps, e / info.fps);
+                                let eps = 1.5 / info.fps;
+                                let is_subrange = start_s > eps || end_s < info.duration_s - eps;
+                                (is_subrange.then_some((start_s, end_s)), true)
+                            }
+                            _ => (None, false),
+                        },
+                        None => (None, false),
+                    }
+                };
+                let host_trim_s = match fuscript_range {
+                    Some(r) => {
+                        let encoded = format!("{:.6}:{:.6}", r.0, r.1);
+                        if instance_data.detected_host_trim.get_value().unwrap_or_default() != encoded {
+                            let _ = instance_data.detected_host_trim.set_value(encoded);
+                        }
+                        Some(r)
+                    }
+                    None => {
+                        if fuscript_reported {
+                            // The host explicitly reported an untrimmed item — any
+                            // persisted window is stale (incl. full-span residue
+                            // from earlier builds). Clear it so it cannot mask the
+                            // project-trim fallback.
+                            if !instance_data.detected_host_trim.get_value().unwrap_or_default().is_empty() {
+                                let _ = instance_data.detected_host_trim.set_value(String::new());
+                            }
+                            None
+                        } else {
+                            gyroflow_plugin_base::parse_host_trim_field(
+                                &instance_data.detected_host_trim.get_value().unwrap_or_default(),
+                            )
+                        }
+                    }
+                };
+
                 // Cold-fuscript first-render: rather than `return OK` (which leaves the dst
                 // buffer uninitialised in Resolve — visible as a white flash for several frames
                 // until fuscript responds), fall through to the normal render path. The
@@ -1683,6 +1989,34 @@ impl Execute for GyroflowPlugin {
                 let output_rect: RectI = output_image.get_region_of_definition()?;
 
                 let stab = instance_data.stab_manager(&self.gyroflow_plugin.manager_cache, output_rect, loading_pending_video_file)?;
+
+                // plugins-host-timeline-trim: the stabilization window follows the host
+                // item's source bounds when the item is actually trimmed; an untrimmed
+                // item falls back to the project's own trim (captured at import by
+                // clear_imported_project_trim, populated by the stab_manager call above —
+                // which is why the fallback joins HERE and not in the chain block).
+                // APPLY-ONCE per (source value, stab identity): a per-render diff-based
+                // apply would fight the out-of-window render guard below (apply narrows,
+                // guard widens — one invalidate+recompute pair per frame past the
+                // boundary). Gated by GYROFLOW_PLUGIN_HOST_TRIM / an active
+                // KEEP_PROJECT_TRIM inside the helper. The Fusion page has no timeline
+                // item and its own time base — skip it there.
+                if !instance_data.is_fusion_page {
+                    let resolved: Vec<(f64, f64)> = host_trim_s
+                        .map(|r| vec![r])
+                        .unwrap_or_else(|| instance_data.plugin.original_project_trim_ranges.clone());
+                    let same_stab = instance_data
+                        .applied_host_trim_stab
+                        .as_ref()
+                        .and_then(|w| w.upgrade())
+                        .map_or(false, |prev| Arc::ptr_eq(&prev, &stab));
+                    if !same_stab || instance_data.applied_host_trim != resolved {
+                        gyroflow_plugin_base::apply_host_timeline_trim(&stab, &resolved);
+                        instance_data.applied_host_trim = resolved;
+                        instance_data.applied_host_trim_stab = Some(Arc::downgrade(&stab));
+                    }
+                }
+
                 // Prefer the rotation captured at import time over the stab's current
                 // `video_rotation`: after the load-time rotation step a freshly rebuilt stab
                 // already carries the *effective* rotation (e.g. 90 on a restored portrait
@@ -1882,16 +2216,9 @@ impl Execute for GyroflowPlugin {
                 if let Ok(range) = instance_data.source_clip.get_frame_range() {
                     if instance_data.is_fusion_page {
                         time_adj = range.min;
+                    } else {
+                        speed_stretch = ofx_speed_stretch(params.duration_ms, src_fps, range.max);
                     }
-                    if range.max > 0.0 && !instance_data.is_fusion_page {
-                        let duration_at_src_fps = (range.max / src_fps) * 1000.0;
-                        speed_stretch = ((params.duration_ms.round() / duration_at_src_fps.round()) * 100.0).floor() / 100.0;
-                    }
-                }
-
-                // This should cover most cases by default, and for the rest users will use Fusion
-                if speed_stretch == 1.01 || speed_stretch == 0.99 || speed_stretch == 1.02 || speed_stretch == 0.98 || speed_stretch == 1.03 || speed_stretch == 0.97 {
-                    speed_stretch = 1.0;
                 }
 
                 if !has_accurate_timestamps && !has_offsets {
@@ -1903,14 +2230,10 @@ impl Execute for GyroflowPlugin {
                 let mut time = time;
                 //let time_adj = if instance_data.is_fusion_page { instance_data.params.fusion_start_frame.get_value().unwrap_or_default() } else { 0.0 };
                 time -= time_adj;
-                let mut timestamp_us = ((time / src_fps * 1_000_000.0) * speed_stretch).round() as i64;
+                let mut timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch);
 
                 // log::info!("fps: {fps:?}, src_fps: {src_fps:?}, speed_stretch: {speed_stretch:.6}, time: {time:?}, timestamp_us: {timestamp_us:?}");
 
-                if (src_fps - fps).abs() > 0.01 {
-                    let frame = (time / src_fps) * fps * speed_stretch;
-                    timestamp_us = (frame.floor() * (1_000_000.0 / fps)).round() as i64;
-                }
                 if let Ok(frame) = in_args.get_src_frame() {
                     timestamp_us = (frame as f64 * (1_000_000.0 / fps)).round() as i64;
                 }
@@ -1920,11 +2243,32 @@ impl Execute for GyroflowPlugin {
 
                 if source_timestamp_us != timestamp_us {
                     time = (source_timestamp_us as f64 / speed_stretch / 1_000_000.0 * src_fps).round();
-                    timestamp_us = ((time / src_fps * 1_000_000.0) * speed_stretch).round() as i64;
-                    if (src_fps - fps).abs() > 0.01 {
-                        let frame = (time / src_fps) * fps * speed_stretch;
-                        timestamp_us = (frame.floor() * (1_000_000.0 / fps)).round() as i64;
-                    }
+                    timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch);
+                }
+
+                // plugins-host-timeline-trim D7: passthrough verdict on the FINAL
+                // timestamp (SrcFrame + ramp corrections included). Decided BEFORE
+                // the widen guard runs — a frame that will not be stabilized must
+                // not widen the window (that would poison the in-window zoom). The
+                // guard itself moved next to process_pixels below: every frame that
+                // IS stabilized still passes it first (black-border invariant
+                // unchanged). The explicit enabled-gate matters: the apply-once
+                // bookkeeping records `applied_host_trim` even when the env
+                // contracts made the apply itself a no-op.
+                let host_trim_render_passthrough = !instance_data.is_fusion_page
+                    && gyroflow_plugin_base::host_timeline_trim_enabled()
+                    && host_trim_frame_outside(&instance_data.applied_host_trim, timestamp_us, fps);
+                if !instance_data.applied_host_trim.is_empty()
+                    && !instance_data.is_fusion_page
+                    && instance_data.host_trim_passthrough_state != Some(host_trim_render_passthrough)
+                {
+                    instance_data.host_trim_passthrough_state = Some(host_trim_render_passthrough);
+                    log::info!(
+                        "host trim passthrough (render) {}: t={:.3}s window={}s",
+                        if host_trim_render_passthrough { "entered" } else { "left" },
+                        timestamp_us as f64 / 1_000_000.0,
+                        format_trim_ranges_s(&instance_data.applied_host_trim)
+                    );
                 }
 
                 time += time_adj;
@@ -2159,6 +2503,30 @@ impl Execute for GyroflowPlugin {
                         output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine, flip_h: output_flip_h, flip_v: output_flip_v }
                     };
 
+                    // plugins-host-timeline-trim D7: out-of-window frames copy the
+                    // source buffer to the output untouched instead of stabilizing.
+                    // A failed copy (mismatched geometry, unsupported backend) falls
+                    // back to the pre-D7 path below — widen + stabilized render.
+                    if host_trim_render_passthrough {
+                        match passthrough_copy_source_to_output(&mut buffers) {
+                            Ok(()) => { return OK; }
+                            Err(reason) => {
+                                log::warn!("host trim passthrough copy unavailable ({reason}) — falling back to widened stabilized render");
+                            }
+                        }
+                    }
+
+                    // Out-of-window render guard: a frame must never be STABILIZED
+                    // while excluded from the stabilization window (the black-border
+                    // mechanism plugins-ignore-project-trim removed) — a stale window
+                    // widens to include the requested frame and recomputes inside
+                    // process_pixels before the frame is produced. Runs immediately
+                    // before process_pixels so passthrough frames (which render no
+                    // stabilized pixels) never widen the window.
+                    if !instance_data.is_fusion_page {
+                        gyroflow_plugin_base::widen_host_trim_for_render(&stab, timestamp_us);
+                    }
+
                     let processed = match output_image.get_pixel_depth()? {
                         BitDepth::None  => { return FAILED; },
                         BitDepth::Byte  => stab.process_pixels::<RGBA8>  (timestamp_us, None, &mut buffers),
@@ -2279,6 +2647,10 @@ impl Execute for GyroflowPlugin {
                         // (host owns orientation); flag off → shared stab-manager path unchanged.
                         host_owns_orientation:        false,
                         original_project_rotation:    None,
+                        // Captured on cache-miss import; the OFX render path uses it as the
+                        // stabilization window when the timeline item is untrimmed
+                        // (plugins-host-timeline-trim project-trim fallback).
+                        original_project_trim_ranges: Vec::new(),
                         // Captured during cache-miss builds but never consumed by OpenFX (the
                         // Premiere-only media pre-rotation compensation reads it).
                         container_media_rotation:     None,
@@ -2295,6 +2667,10 @@ impl Execute for GyroflowPlugin {
                     current_file_info_pending: Arc::new(AtomicBool::new(false)),
                     host_input_sizing:                param_set.parameter("HostInputSizing")?,
                     detected_mismatch_mode:           param_set.parameter("DetectedMismatchMode")?,
+                    detected_host_trim:               param_set.parameter("DetectedHostTrim")?,
+                    applied_host_trim:                Vec::new(),
+                    applied_host_trim_stab:           None,
+                    host_trim_passthrough_state:      None,
                     applied_host_input_sizing:        None,
                     last_applied_stab:                None,
                     pre_mode_size:                    None,
@@ -2401,6 +2777,10 @@ impl Execute for GyroflowPlugin {
                             timeline_w: 0,
                             timeline_h: 0,
                             use_custom_settings: false,
+                            // The host-trim fallback has its own hidden field
+                            // (DetectedHostTrim, parsed in the render path).
+                            source_start_frame: None,
+                            source_end_frame: None,
                             queried_at: None,
                         });
                         log::info!(target: "host_input_sizing",
@@ -2448,7 +2828,7 @@ impl Execute for GyroflowPlugin {
                 // way the param is pure storage — the runtime mismatch_mode comes from the
                 // global cache / hidden-field fallback at CreateInstance — so this event has
                 // no work to do beyond suppressing the `Unknown param name` log line below.
-                if in_args.get_name()? == "DetectedMismatchMode" {
+                if in_args.get_name()? == "DetectedMismatchMode" || in_args.get_name()? == "DetectedHostTrim" {
                     return OK;
                 }
                 if in_args.get_name()? == "Source" || in_args.get_name()? == "Output" || in_args.get_name()? == "ResolveUseAlphaForTrackCompositing" {
@@ -2751,6 +3131,18 @@ impl Execute for GyroflowPlugin {
                     let _ = param.set_script_name("DetectedMismatchMode");
                     param.set_string_type(ParamStringType::SingleLine)?;
                     param.set_label("Detected mismatch mode")?;
+                    param.set_hint("")?;
+                    param.set_secret(true)?;
+                }
+
+                // plugins-host-timeline-trim: hidden per-node storage for the host-derived
+                // stabilization window ("<start_s>:<end_s>"). Same persistence contract as
+                // DetectedMismatchMode above.
+                {
+                    let mut param = param_set.param_define_string("DetectedHostTrim")?;
+                    let _ = param.set_script_name("DetectedHostTrim");
+                    param.set_string_type(ParamStringType::SingleLine)?;
+                    param.set_label("Detected host trim")?;
                     param.set_hint("")?;
                     param.set_secret(true)?;
                 }
@@ -3427,6 +3819,8 @@ mod tests {
             timeline_h: 1920,
             use_custom_settings: false,
             queried_at: None,
+            source_start_frame: None,
+            source_end_frame: None,
         }
     }
 
@@ -3759,5 +4153,92 @@ mod tests {
         // matching the rotated-source vertical-crop case.
         let (w, h, x, y) = compute_crop_geometry((1920, 1080), 1.0, 90.0);
         assert_eq!((w, h, x, y), (1080, 1080, 0, 420));
+    }
+
+    // plugins-host-timeline-trim (out-of-window passthrough): the shared
+    // timestamp/speed helpers must reproduce the historical Render math —
+    // IsIdentity's verdict is only safe while both paths agree.
+    #[test]
+    fn ofx_source_timestamp_matches_render_math() {
+        // Same-fps path: plain round of time/src_fps.
+        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 1.0), 2_000_000);
+        // Mixed-fps path (|src_fps - fps| > 0.01): floor to the target frame grid.
+        assert_eq!(ofx_source_timestamp_us(50.0, 50.0, 25.0, 1.0), 1_000_000);
+        // speed_stretch scales the source time.
+        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 2.0), 4_000_000);
+    }
+
+    #[test]
+    fn ofx_speed_stretch_absorbs_rounding_noise_only() {
+        // Exact match -> 1.0.
+        assert_eq!(ofx_speed_stretch(10_000.0, 25.0, 250.0), 1.0);
+        // Rounding noise (1.01) is absorbed to 1.0.
+        assert_eq!(ofx_speed_stretch(10_100.0, 25.0, 250.0), 1.0);
+        // A real retime survives.
+        assert_eq!(ofx_speed_stretch(20_000.0, 25.0, 250.0), 2.0);
+        // No usable frame range -> neutral.
+        assert_eq!(ofx_speed_stretch(10_000.0, 25.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn host_trim_frame_outside_uses_half_frame_slack() {
+        let win = &[(2.0, 5.0)][..];
+        // Inside the window.
+        assert!(!host_trim_frame_outside(win, 3_000_000, 25.0));
+        // Boundary frames within half-frame slack (20ms at 25fps) stay inside.
+        assert!(!host_trim_frame_outside(win, 5_010_000, 25.0));
+        assert!(!host_trim_frame_outside(win, 1_990_000, 25.0));
+        // Clearly outside on both sides.
+        assert!(host_trim_frame_outside(win, 1_000_000, 25.0));
+        assert!(host_trim_frame_outside(win, 6_000_000, 25.0));
+        // No window / degenerate inputs -> never outside.
+        assert!(!host_trim_frame_outside(&[], 1_000_000, 25.0));
+        assert!(!host_trim_frame_outside(win, 1_000_000, 0.0));
+        assert!(!host_trim_frame_outside(&[(5.0, 2.0)], 1_000_000, 25.0));
+    }
+
+    #[test]
+    fn host_trim_frame_outside_honors_multi_range_holes() {
+        let win = &[(2.0, 3.0), (6.0, 8.0)][..];
+        // Inside either range: not outside.
+        assert!(!host_trim_frame_outside(win, 2_500_000, 25.0));
+        assert!(!host_trim_frame_outside(win, 7_000_000, 25.0));
+        // Range boundaries within slack stay inside.
+        assert!(!host_trim_frame_outside(win, 3_010_000, 25.0));
+        assert!(!host_trim_frame_outside(win, 5_990_000, 25.0));
+        // In the hole and beyond both ends: outside (passthrough).
+        assert!(host_trim_frame_outside(win, 4_500_000, 25.0));
+        assert!(host_trim_frame_outside(win, 1_000_000, 25.0));
+        assert!(host_trim_frame_outside(win, 9_000_000, 25.0));
+        // A degenerate entry is ignored, valid ones still count.
+        assert!(host_trim_frame_outside(&[(5.0, 2.0), (6.0, 8.0)], 4_500_000, 25.0));
+        assert!(!host_trim_frame_outside(&[(5.0, 2.0), (6.0, 8.0)], 7_000_000, 25.0));
+    }
+
+    #[test]
+    fn passthrough_copy_cpu_requires_matching_geometry() {
+        fn make_buffers<'a>(src: &'a mut [u8], dst: &'a mut [u8], src_size: (usize, usize, usize), dst_size: (usize, usize, usize)) -> Buffers<'a> {
+            Buffers {
+                input:  BufferDescription { size: src_size, rect: None, data: BufferSource::Cpu { buffer: src }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
+                output: BufferDescription { size: dst_size, rect: None, data: BufferSource::Cpu { buffer: dst }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
+            }
+        }
+        // Matching geometry: source bytes land in the output untouched.
+        let mut src = vec![7u8; 4 * 2 * 16];
+        let mut dst = vec![0u8; 4 * 2 * 16];
+        let mut buffers = make_buffers(&mut src, &mut dst, (4, 2, 64), (4, 2, 64));
+        assert!(passthrough_copy_source_to_output(&mut buffers).is_ok());
+        assert!(dst.iter().all(|&b| b == 7));
+        // Geometry mismatch refuses instead of guessing.
+        let mut src = vec![7u8; 4 * 2 * 16];
+        let mut dst = vec![0u8; 4 * 4 * 16];
+        let mut buffers = make_buffers(&mut src, &mut dst, (4, 2, 64), (4, 4, 64));
+        assert!(passthrough_copy_source_to_output(&mut buffers).is_err());
+        assert!(dst.iter().all(|&b| b == 0));
+        // Undersized backing slice refuses.
+        let mut src = vec![7u8; 10];
+        let mut dst = vec![0u8; 4 * 2 * 16];
+        let mut buffers = make_buffers(&mut src, &mut dst, (4, 2, 64), (4, 2, 64));
+        assert!(passthrough_copy_source_to_output(&mut buffers).is_err());
     }
 }

@@ -16,9 +16,13 @@ deploy:
     cd "{{TargetDir}}"
     Remove-Item -Recurse -Force gyroflow-niyien-ofx-windows, GyroflowNiyien-OpenFX-windows.zip -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/Win64" -Force
+    New-Item -ItemType Directory -Path "gyroflow-niyien-ofx-windows/ResolveScripts" -Force
     cp "deploy/gyroflow_ofx.dll" "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/Win64/GyroflowNiyien.ofx"
     cp "{{justfile_directory()}}/res/Info.plist" "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/"
     cp "{{justfile_directory()}}/../LICENSE" "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/"
+    cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Clip.lua" "gyroflow-niyien-ofx-windows/ResolveScripts/"
+    cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Track.lua" "gyroflow-niyien-ofx-windows/ResolveScripts/"
+    cp "{{justfile_directory()}}/../resolve-scripts/gyroflow_autocut_common.inc" "gyroflow-niyien-ofx-windows/ResolveScripts/"
     cd gyroflow-niyien-ofx-windows ; 7z a ../GyroflowNiyien-OpenFX-windows.zip .
 
 [macos]
@@ -51,10 +55,14 @@ deploy:
     cd "{{TargetDir}}"
     rm -Rf gyroflow-niyien-ofx-macos GyroflowNiyien-OpenFX-macos.dmg
     mkdir -p gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS
+    mkdir -p gyroflow-niyien-ofx-macos/ResolveScripts
 
     lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_ofx.dylib -create -output gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.dylib
     cp "{{justfile_directory()}}/res/Info.plist" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/
     cp "{{justfile_directory()}}/../LICENSE"     gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/
+    cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Clip.lua" gyroflow-niyien-ofx-macos/ResolveScripts/
+    cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Track.lua" gyroflow-niyien-ofx-macos/ResolveScripts/
+    cp "{{justfile_directory()}}/../resolve-scripts/gyroflow_autocut_common.inc" gyroflow-niyien-ofx-macos/ResolveScripts/
 
     /usr/libexec/PlistBuddy -c "add CFBundleVersion string $version_short" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/Info.plist
     /usr/libexec/PlistBuddy -c "add CFBundleShortVersionString string $version" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/Info.plist
@@ -66,7 +74,7 @@ deploy:
     codesign -vvvv --deep --verify gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle
 
     pushd gyroflow-niyien-ofx-macos
-        zip -r ../GyroflowNiyien-OpenFX-macos.zip GyroflowNiyien.ofx.bundle
+        zip -r ../GyroflowNiyien-OpenFX-macos.zip GyroflowNiyien.ofx.bundle ResolveScripts
     popd
 
     ln -sf /Library/OFX/Plugins "gyroflow-niyien-ofx-macos/"
@@ -84,7 +92,11 @@ deploy:
     cd "{{TargetDir}}"
     rm -Rf gyroflow-niyien-ofx-linux GyroflowNiyien-OpenFX-linux.zip
     mkdir -p gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/Linux-x86-64
+    mkdir -p gyroflow-niyien-ofx-linux/ResolveScripts
     cp deploy/libgyroflow_ofx.so gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/Linux-x86-64/GyroflowNiyien.ofx
     cp "{{justfile_directory()}}/res/Info.plist" gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/
     cp "{{justfile_directory()}}/../LICENSE"     gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/
+    cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Clip.lua" gyroflow-niyien-ofx-linux/ResolveScripts/
+    cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Track.lua" gyroflow-niyien-ofx-linux/ResolveScripts/
+    cp "{{justfile_directory()}}/../resolve-scripts/gyroflow_autocut_common.inc" gyroflow-niyien-ofx-linux/ResolveScripts/
     cd gyroflow-niyien-ofx-linux && zip -r ../GyroflowNiyien-OpenFX-linux.zip .

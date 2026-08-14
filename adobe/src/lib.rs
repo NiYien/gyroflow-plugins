@@ -134,6 +134,10 @@ impl CrossThreadInstance {
             // Re-decided per render call by the Premiere GPU path (set on aspect mismatch).
             host_owns_orientation:          false,
             original_project_rotation:      None,
+            // Captured during cache-miss builds but not consumed on Adobe: the AE/Premiere
+            // paths derive the window from fresh host bounds every (pre)render, so the
+            // OFX-only project-trim fallback does not apply here.
+            original_project_trim_ranges:   Vec::new(),
             // Captured during the cache-miss build in stab_manager (container metadata probe).
             container_media_rotation:       None,
             // Set per render call by the Premiere GPU path only (adobe-rotated-anamorphic-full-frame).
@@ -780,17 +784,12 @@ impl AdobePluginInstance for CrossThreadInstance {
 
                     if let Some(stab) = _self.stab_manager(&mut params, plugin.global, full_rect) {
                         {
+                            // plugins-host-timeline-trim: the stabilization window follows
+                            // the AE layer's in/out. A failed layer query falls back to the
+                            // full clip (explicit reset — pre-existing AE semantics). The
+                            // env gate and the changed-only invalidation live in the helper.
                             let duration_ms = stab.params.read().duration_ms;
-                            let old_range = stab.trim_ranges().first().cloned().unwrap_or((0.0, 1.0));
-                            let old_range_ms = ((old_range.0 * duration_ms).round() as i64, (old_range.1 * duration_ms).round() as i64);
-                            let new_range = trim_range.unwrap_or((0.0f64, duration_ms / 1000.0));
-                            let new_range_ms = ((new_range.0 * 1000.0).round() as i64, (new_range.1 * 1000.0).round() as i64);
-                            if old_range_ms != new_range_ms {
-                                log::info!("Trim range changed: {old_range_ms:?} != {new_range_ms:?}");
-
-                                stab.set_trim_ranges(vec![((new_range.0 * 1000.0) / duration_ms, (new_range.1 * 1000.0) / duration_ms)]);
-                                stab.invalidate_blocking_smoothing();
-                            }
+                            gyroflow_plugin_base::apply_host_timeline_trim(&stab, &[trim_range.unwrap_or((0.0f64, duration_ms / 1000.0))]);
                         }
                         extra.set_pre_render_data::<RenderData>(RenderData { stab, stored });
                     } else {

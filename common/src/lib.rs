@@ -710,6 +710,17 @@ pub struct GyroflowPluginBaseInstance {
     #[serde(skip)]
     pub original_project_rotation: Option<f64>,
 
+    // plugins-host-timeline-trim: the project's trim envelope as imported
+    // (seconds within the master media), captured by `clear_imported_project_trim`
+    // right before the window is cleared. Re-captured on every cache-miss
+    // rebuild; not persisted — always re-derived from the project itself.
+    // Consumed by the OFX render path as the initial stabilization window when
+    // the host reports no sub-range (untrimmed timeline item): the app-side trim
+    // then drives the window directly, and the out-of-window render guard keeps
+    // the black-border invariant if the host renders beyond it.
+    #[serde(skip)]
+    pub original_project_trim_ranges: Vec<(f64, f64)>,
+
     // Raw container rotation metadata (tkhd-style degrees, NOT normalized for display) of the
     // source video, captured during the cache-miss build in `stab_manager` (bare-video branch:
     // `load_video_file` metadata; .gyroflow branch: the `always_set_input_rotation` probe).
@@ -751,6 +762,7 @@ impl Clone for GyroflowPluginBaseInstance {
             apply_input_rotation_on_load:   self.apply_input_rotation_on_load,
             host_owns_orientation:          self.host_owns_orientation,
             original_project_rotation:      self.original_project_rotation,
+            original_project_trim_ranges:   self.original_project_trim_ranges.clone(),
             container_media_rotation:       self.container_media_rotation,
             premiere_rotated_anamorphic:    self.premiere_rotated_anamorphic,
             keyframable_params:             Arc::new(RwLock::new(self.keyframable_params.read().clone())),
@@ -778,6 +790,7 @@ impl Default for GyroflowPluginBaseInstance {
             apply_input_rotation_on_load:   false,
             host_owns_orientation:          false,
             original_project_rotation:      None,
+            original_project_trim_ranges:   Vec::new(),
             container_media_rotation:       None,
             premiere_rotated_anamorphic:    false,
             keyframable_params: Arc::new(RwLock::new(KeyframableParams {
@@ -1308,7 +1321,7 @@ impl GyroflowPluginBaseInstance {
                                         .set_description(crate::i18n::tf("dialog.failed_load_preset", &[("error", &format!("{e:?}"))]))
                                         .show();
                                 } else {
-                                    clear_imported_project_trim(&stab);
+                                    self.original_project_trim_ranges = clear_imported_project_trim(&stab);
                                 }
                             }
                         }
@@ -1336,7 +1349,7 @@ impl GyroflowPluginBaseInstance {
                                 self.update_loaded_state(params, false);
                                 format!("load_gyro_data error: {e}")
                             })?;
-                            clear_imported_project_trim(&stab);
+                            self.original_project_trim_ranges = clear_imported_project_trim(&stab);
                         } else {
                             log::error!("An error occured: {e:?}");
                             self.update_loaded_state(params, false);
@@ -1389,7 +1402,7 @@ impl GyroflowPluginBaseInstance {
                     self.update_loaded_state(params, false);
                     msg
                 })?;
-                clear_imported_project_trim(&stab);
+                self.original_project_trim_ranges = clear_imported_project_trim(&stab);
                 params.set_string(Params::LoadedProject, &filesystem::get_filename(&filesystem::path_to_url(&path)))?;
 
                 if self.always_set_input_rotation {
@@ -1995,31 +2008,210 @@ fn keep_project_trim_requested(env_value: Option<&str>) -> bool {
 }
 
 /// Clears trim ranges that `import_gyroflow_data` restored from the project.
-/// Returns the number of ranges cleared (0 = nothing to do, zero cost).
+/// Returns the cleared ranges in master-media seconds (sorted, invalid pairs
+/// dropped; empty = nothing was cleared) so the caller can keep them as the
+/// initial host-trim window (`original_project_trim_ranges`) — the app-side
+/// trim then drives the window when the host reports no sub-range of its own.
+/// Multi-range projects are returned in full: since out-of-window passthrough,
+/// frames in the holes between ranges render as the untouched source instead
+/// of the max-fov substitute, so honoring holes is safe (the old envelope
+/// collapse existed only because of the black-border mechanism).
 /// When a non-empty trim is cleared, the fov curve computed during the blocking
 /// import is already poisoned by the trim, so this triggers the same explicit
 /// invalidate + blocking recompute pair the post-mutation path uses.
-pub fn clear_imported_project_trim(stab: &StabilizationManager) -> usize {
+pub fn clear_imported_project_trim(stab: &StabilizationManager) -> Vec<(f64, f64)> {
     clear_imported_project_trim_impl(
         stab,
         std::env::var("GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM").ok().as_deref(),
     )
 }
 
-fn clear_imported_project_trim_impl(stab: &StabilizationManager, keep_env: Option<&str>) -> usize {
+fn clear_imported_project_trim_impl(stab: &StabilizationManager, keep_env: Option<&str>) -> Vec<(f64, f64)> {
+    let ranges_s = {
+        let params = stab.params.read();
+        if params.trim_ranges.is_empty() || !(params.duration_ms > 0.0) {
+            Vec::new()
+        } else {
+            let mut v: Vec<(f64, f64)> = params.trim_ranges.iter()
+                .filter(|r| r.1 > r.0)
+                .map(|r| (r.0 * params.duration_ms / 1000.0, r.1 * params.duration_ms / 1000.0))
+                .collect();
+            v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        }
+    };
     let ranges = stab.params.read().trim_ranges.len();
     if ranges == 0 {
-        return 0;
+        return Vec::new();
     }
     if keep_project_trim_requested(keep_env) {
         log::info!("GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM set — keeping {ranges} project trim range(s)");
-        return 0;
+        return Vec::new();
     }
     stab.set_trim_ranges(Vec::new());
     log::info!("cleared {ranges} project trim range(s) on import — NLE host timeline governs the render range");
     stab.invalidate_smoothing();
     stab.recompute_blocking();
-    ranges
+    ranges_s
+}
+
+// --- plugins-host-timeline-trim ---
+// The stabilization window (adaptive zoom + trim_range_only smoothing) follows
+// the host timeline clip's actual in/out bounds: AE layer in/out, Premiere clip
+// bounds (Media_InPoint/OutPoint + Media_ContentStart), Resolve item source
+// bounds via fuscript. The window can only ever originate from the host — the
+// project's export trim stays cleared by `clear_imported_project_trim` above.
+// Every acquisition failure degrades to "no window" (whole clip, pre-change
+// behavior); a window can never be smaller than the range the host renders
+// thanks to `widen_host_trim_for_render`.
+
+/// Pure gate for the host-derived trim feature. On by default;
+/// `GYROFLOW_PLUGIN_HOST_TRIM` set to `0|off|false|no` (case-insensitive)
+/// disables it. An active `GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM` forces it off
+/// regardless — that diagnostic env must reproduce the pre-July
+/// (project-trim-honoring) behavior end-to-end, and a host-derived overwrite
+/// of the deliberately-kept project trim would defeat it.
+fn host_timeline_trim_enabled_impl(host_env: Option<&str>, keep_env: Option<&str>) -> bool {
+    if keep_project_trim_requested(keep_env) {
+        return false;
+    }
+    match host_env {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "off" | "false" | "no")
+        }
+        None => true,
+    }
+}
+
+pub fn host_timeline_trim_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = host_timeline_trim_enabled_impl(
+            std::env::var("GYROFLOW_PLUGIN_HOST_TRIM").ok().as_deref(),
+            std::env::var("GYROFLOW_PLUGIN_KEEP_PROJECT_TRIM").ok().as_deref(),
+        );
+        log::info!("host timeline trim resolved: enabled={enabled}");
+        enabled
+    })
+}
+
+/// Applies a host-derived stabilization window (seconds within the master
+/// media; one or more ranges — a multi-range project trim is applied in full,
+/// matching the app's own zoom/smoothing semantics) to the manager. Mirrors
+/// the diff-check the AE path has always used: a no-op unless the ranges
+/// actually changed at ms granularity, so calling this on every render is
+/// free. An empty slice leaves the manager untouched (host bounds unknown —
+/// whole-clip window, pre-change behavior). Returns true when the window
+/// changed and smoothing was invalidated (the blocking recompute then runs
+/// inside the next `process_pixels`).
+pub fn apply_host_timeline_trim(stab: &StabilizationManager, ranges_s: &[(f64, f64)]) -> bool {
+    if !host_timeline_trim_enabled() {
+        return false;
+    }
+    if ranges_s.is_empty() {
+        return false;
+    }
+    let duration_ms = stab.params.read().duration_ms;
+    if !(duration_ms > 0.0) {
+        return false;
+    }
+    let mut norm: Vec<(f64, f64)> = ranges_s.iter()
+        .map(|&(a_s, b_s)| (((a_s * 1000.0) / duration_ms).clamp(0.0, 1.0), ((b_s * 1000.0) / duration_ms).clamp(0.0, 1.0)))
+        .filter(|&(a, b)| b > a)
+        .collect();
+    if norm.is_empty() {
+        return false;
+    }
+    norm.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    let old = stab.trim_ranges();
+    let old_effective: &[(f64, f64)] = if old.is_empty() { &[(0.0, 1.0)] } else { &old };
+    let to_ms = |r: &[(f64, f64)]| -> Vec<(i64, i64)> {
+        r.iter().map(|&(a, b)| ((a * duration_ms).round() as i64, (b * duration_ms).round() as i64)).collect()
+    };
+    if to_ms(old_effective) == to_ms(&norm) {
+        return false;
+    }
+    log::info!("host timeline trim changed: {:?}ms -> {:?}ms", to_ms(old_effective), to_ms(&norm));
+    stab.set_trim_ranges(norm);
+    stab.invalidate_blocking_smoothing();
+    true
+}
+
+/// Out-of-window render guard: a source timestamp outside the current
+/// non-empty window means the window is stale (e.g. the user re-trimmed the
+/// clip on the host timeline without reloading). Widen the window to include
+/// the timestamp and invalidate smoothing BEFORE the frame renders — a frame
+/// must never render while excluded from the stabilization window (that is
+/// exactly the black-border mechanism `plugins-ignore-project-trim` removed).
+/// The window can only grow, so the failure direction is always "less trim
+/// effect", never black borders. Returns true when it widened.
+pub fn widen_host_trim_for_render(stab: &StabilizationManager, timestamp_us: i64) -> bool {
+    // Same gate as apply: with host trim disabled (or KEEP_PROJECT_TRIM active)
+    // no window originates from the host, and a deliberately-kept project trim
+    // must keep its pre-July behavior byte-equivalently — "healing" it here
+    // would defeat that diagnostic.
+    if !host_timeline_trim_enabled() {
+        return false;
+    }
+    let (duration_ms, fps) = {
+        let params = stab.params.read();
+        (params.duration_ms, params.fps)
+    };
+    if !(duration_ms > 0.0) {
+        return false;
+    }
+    let ranges = stab.trim_ranges();
+    if ranges.is_empty() {
+        return false;
+    }
+    let t = (timestamp_us as f64 / 1000.0) / duration_ms;
+    // Half-frame slack: timestamps are frame-rounded while the window came from
+    // host time values, so exact boundary frames must not count as "outside".
+    let slack = if fps > 0.0 { (500.0 / fps) / duration_ms } else { 0.0 };
+    if ranges.iter().any(|&(a, b)| t >= a - slack && t <= b + slack) {
+        return false;
+    }
+    if ranges.len() > 1 {
+        // Multi-range window: a stabilized render outside every range only
+        // happens on the exceptional fallback path (the passthrough copy was
+        // unavailable). Collapse to the whole clip — the invariant (a frame is
+        // never stabilized while excluded) outweighs zoom tightness here, and
+        // per-range edge-extension is undefined for holes.
+        log::warn!(
+            "host trim widened: render at {:.1}ms fell outside all {} ranges — collapsing the window to the whole clip",
+            timestamp_us as f64 / 1000.0, ranges.len()
+        );
+        stab.set_trim_ranges(vec![(0.0, 1.0)]);
+        stab.invalidate_blocking_smoothing();
+        return true;
+    }
+    let (a, b) = ranges[0];
+    // Extend to the CLIP EDGE in the violated direction, not just to the
+    // timestamp: sequential playback past the window end would otherwise land
+    // one frame outside on every frame — one blocking recompute per frame, a
+    // slideshow. Edge-extension caps the cost at one recompute per direction.
+    let new_a = if t < a - slack { 0.0 } else { a };
+    let new_b = if t > b + slack { 1.0 } else { b };
+    log::warn!(
+        "host trim widened: render at {:.1}ms fell outside the window [{:.1}, {:.1}]ms — widening to [{:.1}, {:.1}]ms",
+        timestamp_us as f64 / 1000.0, a * duration_ms, b * duration_ms, new_a * duration_ms, new_b * duration_ms
+    );
+    stab.set_trim_ranges(vec![(new_a, new_b)]);
+    stab.invalidate_blocking_smoothing();
+    true
+}
+
+/// Parses the per-node persisted host-trim field (`"<start_s>:<end_s>"`,
+/// seconds). Empty or malformed input yields `None`.
+pub fn parse_host_trim_field(s: &str) -> Option<(f64, f64)> {
+    let mut it = s.trim().split(':');
+    let a = it.next()?.parse::<f64>().ok()?;
+    let b = it.next()?.parse::<f64>().ok()?;
+    if it.next().is_some() || !(b > a) || !a.is_finite() || !b.is_finite() || a < 0.0 {
+        return None;
+    }
+    Some((a, b))
 }
 
 impl std::str::FromStr for Params {
@@ -2058,21 +2250,38 @@ mod tests {
     fn imported_trim_is_cleared_and_counted() {
         let stab = import_minimal_project(Some("[[0.2, 0.5]]"));
         assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.5)], "import must restore the trim first");
-        assert_eq!(clear_imported_project_trim_impl(&stab, None), 1);
+        // The minimal fixture carries no video metadata (duration 0), so the
+        // cleared window cannot be expressed in seconds — no fallback ranges.
+        assert!(clear_imported_project_trim_impl(&stab, None).is_empty());
         assert!(stab.params.read().trim_ranges.is_empty());
+    }
+
+    // plugins-host-timeline-trim: the cleared trim's envelope (seconds) is
+    // returned so the caller can keep it as the project-trim fallback window.
+    #[test]
+    fn cleared_trim_ranges_are_returned_in_seconds() {
+        let stab = import_minimal_project(Some("[[0.4, 0.5], [0.2, 0.3]]"));
+        stab.params.write().duration_ms = 10_000.0;
+        let ranges = clear_imported_project_trim_impl(&stab, None);
+        // Full multi-range list, sorted — NOT the envelope (holes are honored
+        // since out-of-window passthrough removed the black-border mechanism).
+        assert_eq!(ranges.len(), 2, "{ranges:?}");
+        assert!((ranges[0].0 - 2.0).abs() < 1e-9 && (ranges[0].1 - 3.0).abs() < 1e-9, "{ranges:?}");
+        assert!((ranges[1].0 - 4.0).abs() < 1e-9 && (ranges[1].1 - 5.0).abs() < 1e-9, "{ranges:?}");
+        assert!(stab.params.read().trim_ranges.is_empty(), "the window itself is still cleared");
     }
 
     #[test]
     fn project_without_trim_is_a_noop() {
         let stab = import_minimal_project(None);
         assert!(stab.params.read().trim_ranges.is_empty());
-        assert_eq!(clear_imported_project_trim_impl(&stab, None), 0);
+        assert!(clear_imported_project_trim_impl(&stab, None).is_empty());
     }
 
     #[test]
     fn keep_env_retains_trim() {
         let stab = import_minimal_project(Some("[[0.2, 0.5]]"));
-        assert_eq!(clear_imported_project_trim_impl(&stab, Some("1")), 0);
+        assert!(clear_imported_project_trim_impl(&stab, Some("1")).is_empty());
         assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.5)]);
         // Gate parsing: accepted spellings vs. everything else.
         for v in ["1", "true", "TRUE", "yes", "on", " On "] {
@@ -2082,6 +2291,117 @@ mod tests {
             assert!(!keep_project_trim_requested(Some(v)), "{v:?} must not enable the gate");
         }
         assert!(!keep_project_trim_requested(None));
+    }
+
+    // --- host timeline trim (plugins-host-timeline-trim) ---
+
+    fn stab_with_duration(ms: f64) -> StabilizationManager {
+        let stab = StabilizationManager::default();
+        {
+            let mut params = stab.params.write();
+            params.duration_ms = ms;
+            params.fps = 25.0;
+        }
+        stab
+    }
+
+    #[test]
+    fn host_trim_gate_parsing_and_keep_precedence() {
+        assert!(host_timeline_trim_enabled_impl(None, None));
+        for v in ["0", "off", "FALSE", " no "] {
+            assert!(!host_timeline_trim_enabled_impl(Some(v), None), "{v:?} must disable the gate");
+        }
+        for v in ["1", "on", "yes", "anything"] {
+            assert!(host_timeline_trim_enabled_impl(Some(v), None), "{v:?} must keep the gate enabled");
+        }
+        // An active KEEP_PROJECT_TRIM wins regardless of the host-trim env: the
+        // diagnostic escape hatch must reproduce pre-July behavior end-to-end.
+        assert!(!host_timeline_trim_enabled_impl(None, Some("1")));
+        assert!(!host_timeline_trim_enabled_impl(Some("1"), Some("yes")));
+        // An inactive keep-gate does not disable anything.
+        assert!(host_timeline_trim_enabled_impl(Some("1"), Some("0")));
+    }
+
+    #[test]
+    fn apply_host_trim_sets_normalized_window_once() {
+        let stab = stab_with_duration(10_000.0);
+        assert!(apply_host_timeline_trim(&stab, &[(2.0, 5.0)]));
+        assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.5)]);
+        // Unchanged range: per-render calls are free.
+        assert!(!apply_host_timeline_trim(&stab, &[(2.0, 5.0)]));
+        // Unknown bounds leave the window untouched (not a reset).
+        assert!(!apply_host_timeline_trim(&stab, &[]));
+        assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.5)]);
+        // Degenerate input is rejected.
+        assert!(!apply_host_timeline_trim(&stab, &[(5.0, 2.0)]));
+    }
+
+    #[test]
+    fn apply_host_trim_applies_multi_range_in_full() {
+        let stab = stab_with_duration(10_000.0);
+        // Unsorted input is sorted; holes are preserved (NOT enveloped).
+        assert!(apply_host_timeline_trim(&stab, &[(6.0, 8.0), (2.0, 3.0)]));
+        assert_eq!(stab.params.read().trim_ranges, vec![(0.2, 0.3), (0.6, 0.8)]);
+        // Same list again: free.
+        assert!(!apply_host_timeline_trim(&stab, &[(2.0, 3.0), (6.0, 8.0)]));
+    }
+
+    #[test]
+    fn apply_host_trim_full_range_clears_the_window() {
+        let stab = stab_with_duration(10_000.0);
+        assert!(apply_host_timeline_trim(&stab, &[(2.0, 5.0)]));
+        // AE/Premiere pass the full clip when the host reports no bounds — core
+        // normalizes (0.0, 1.0) to an empty range (whole-clip window).
+        assert!(apply_host_timeline_trim(&stab, &[(0.0, 10.0)]));
+        assert!(stab.params.read().trim_ranges.is_empty());
+    }
+
+    #[test]
+    fn widen_guard_extends_a_stale_window() {
+        let stab = stab_with_duration(10_000.0);
+        assert!(apply_host_timeline_trim(&stab, &[(2.0, 5.0)]));
+        // In-window and boundary (half-frame slack @25fps = 20ms) timestamps: no-op.
+        assert!(!widen_host_trim_for_render(&stab, 3_000_000));
+        assert!(!widen_host_trim_for_render(&stab, 5_010_000));
+        // Outside: the window extends to the CLIP EDGE in the violated
+        // direction (one recompute per direction, no per-frame storm during
+        // sequential playback past the boundary), and never shrinks.
+        assert!(widen_host_trim_for_render(&stab, 8_000_000));
+        let r = stab.params.read().trim_ranges.clone();
+        assert_eq!(r.len(), 1);
+        assert!((r[0].0 - 0.2).abs() < 1e-9, "start must not move: {r:?}");
+        assert!((r[0].1 - 1.0).abs() < 1e-9, "end must extend to the clip edge: {r:?}");
+        // A later frame in the already-extended direction is a no-op.
+        assert!(!widen_host_trim_for_render(&stab, 9_000_000));
+        // Whole-clip window (empty ranges): nothing to widen.
+        let stab2 = stab_with_duration(10_000.0);
+        assert!(!widen_host_trim_for_render(&stab2, 8_000_000));
+    }
+
+    #[test]
+    fn widen_guard_multi_range_collapses_to_whole_clip() {
+        let stab = stab_with_duration(10_000.0);
+        assert!(apply_host_timeline_trim(&stab, &[(2.0, 3.0), (6.0, 8.0)]));
+        // Inside either range (or its slack): no-op.
+        assert!(!widen_host_trim_for_render(&stab, 2_500_000));
+        assert!(!widen_host_trim_for_render(&stab, 7_000_000));
+        assert!(!widen_host_trim_for_render(&stab, 3_010_000));
+        // In a hole (only reachable when the passthrough copy failed): the
+        // whole-clip collapse keeps the never-stabilize-excluded invariant.
+        // Core normalizes the (0,1) full range to empty (= whole-clip window),
+        // which also makes any further widen call a no-op.
+        assert!(widen_host_trim_for_render(&stab, 4_500_000));
+        assert!(stab.params.read().trim_ranges.is_empty());
+        assert!(!widen_host_trim_for_render(&stab, 4_500_000));
+    }
+
+    #[test]
+    fn host_trim_field_round_trip() {
+        assert_eq!(parse_host_trim_field("2.000000:5.000000"), Some((2.0, 5.0)));
+        assert_eq!(parse_host_trim_field(" 0:1.5 "), Some((0.0, 1.5)));
+        for bad in ["", "x", "5:2", "2:2", "-1:5", "1:2:3", "nan:5"] {
+            assert_eq!(parse_host_trim_field(bad), None, "{bad:?} must not parse");
+        }
     }
 
     // --- host media pre-rotation inference (adobe-media-rotation-compensation) ---

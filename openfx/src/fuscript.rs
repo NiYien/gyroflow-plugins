@@ -49,6 +49,16 @@ pub struct CurrentFileInfo {
     pub timeline_h: usize,
     pub use_custom_settings: bool,
 
+    // plugins-host-timeline-trim: the playhead item's source-domain in/out
+    // bounds in frames at the clip's media fps (`GetSourceStartFrame` /
+    // `GetSourceEndFrame`, with a `GetLeftOffset`+`GetDuration` fallback for
+    // older Resolve). CLIP-LEVEL fields: published only in
+    // `publish_clip_fields` mode — an expiry refresh resolves the PLAYHEAD's
+    // item, which may not be the instance's clip. `None` = not reported
+    // (older Resolve / Fusion page / lua fallback empty).
+    pub source_start_frame: Option<f64>,
+    pub source_end_frame: Option<f64>,
+
     // When the fuscript query that produced these host-input-sizing fields completed.
     // `None` means they did not come from a query at all (restored from the per-node hidden
     // field), which makes the value immediately eligible for refresh. Instances synthesized
@@ -163,16 +173,27 @@ impl CurrentFileInfo {
             //  - Per-clip overrides (Inspector > Retime and Scaling > Scaling) are NOT visible
             //    here: they live in `timelineItem:GetProperty()['Scaling']` and never move
             //    `timelineInputResMismatchBehavior`. Known gap, tracked separately.
+            // Lines 11-12 (plugins-host-timeline-trim): the item's source-domain in/out
+            // frames. Method existence is probed before calling (older Resolve lacks
+            // GetSourceStartFrame — an unguarded call would nil-error and take the whole
+            // 12-line query down with it). The GetLeftOffset+GetDuration fallback is
+            // timeline-domain for the duration part, so it is only used when the source
+            // accessors are absent; empty strings keep the line count on any failure.
             let script = "proj = Resolve():GetProjectManager():GetCurrentProject();\
                               tl = proj:GetCurrentTimeline();\
-                              p = tl:GetCurrentVideoItem():GetMediaPoolItem():GetClipProperty();\
+                              it = tl:GetCurrentVideoItem();\
+                              p = it:GetMediaPoolItem():GetClipProperty();\
                               print(p['FPS']);print(p['Frames']);print(p['Duration']);print(p['PAR']);print(p['Resolution']);print(p['File Path']);\
                               ucs = tl:GetSetting('useCustomSettings') or '';\
                               if ucs == '1' then mm = tl:GetSetting('timelineInputResMismatchBehavior') or ''; else mm = proj:GetSetting('timelineInputResMismatchBehavior') or ''; end;\
                               tw = ''; th = '';\
                               if ucs == '1' then tw = tl:GetSetting('timelineResolutionWidth') or ''; th = tl:GetSetting('timelineResolutionHeight') or ''; end;\
                               if tw == '' or th == '' then tw = proj:GetSetting('timelineResolutionWidth') or ''; th = proj:GetSetting('timelineResolutionHeight') or ''; end;\
-                              print(ucs);print(mm);print(tw);print(th);";
+                              print(ucs);print(mm);print(tw);print(th);\
+                              ss = ''; se = '';\
+                              if it.GetSourceStartFrame ~= nil then ss = it:GetSourceStartFrame() or ''; se = it:GetSourceEndFrame() or ''; end;\
+                              if ss == '' and it.GetLeftOffset ~= nil then lo = it:GetLeftOffset(); du = it:GetDuration(); if lo ~= nil and du ~= nil then ss = lo; se = lo + du; end; end;\
+                              print(ss);print(se);";
             // Run the query with a deadline instead of `output()`.
             //
             // `output()` blocks forever, and fuscript reaches Resolve over IPC: while Resolve is
@@ -230,10 +251,10 @@ impl CurrentFileInfo {
                         .filter(|line| !is_missing_python2(line))
                         .collect::<Vec<_>>();
                 let lines = stdout.trim().lines().collect::<Vec<_>>();
-                // Accept exactly 10 lines from the extended query. Older Resolve versions without
+                // Accept exactly 12 lines from the extended query. Older Resolve versions without
                 // the extra settings keys still emit empty strings (`print('')`) so the line count
                 // stays the same; only a true script failure produces fewer lines.
-                if errors.is_empty() && lines.len() == 10 {
+                if errors.is_empty() && lines.len() == 12 {
                     let fps = lines[0].parse::<f64>().unwrap_or_default();
                     let frame_count = lines[1].parse::<usize>().unwrap_or_default();
                     let duration_s = Self::parse_duration(lines[2], fps);
@@ -249,6 +270,8 @@ impl CurrentFileInfo {
                     };
                     let timeline_w = lines[8].trim().parse::<usize>().unwrap_or_default();
                     let timeline_h = lines[9].trim().parse::<usize>().unwrap_or_default();
+                    let source_start_frame = lines[10].trim().parse::<f64>().ok();
+                    let source_end_frame   = lines[11].trim().parse::<f64>().ok();
                     if fps > 0.0 && frame_count > 0 && duration_s > 0.0 && !file_path.is_empty() {
                         let info = Self {
                             file_path: file_path.to_string(),
@@ -263,6 +286,8 @@ impl CurrentFileInfo {
                             timeline_w,
                             timeline_h,
                             use_custom_settings,
+                            source_start_frame,
+                            source_end_frame,
                             queried_at: Some(std::time::Instant::now()),
                         };
                         log::debug!("{info:#?}");
@@ -293,6 +318,8 @@ impl CurrentFileInfo {
                                         || prev.use_custom_settings != info.use_custom_settings
                                         || prev.file_path           != info.file_path
                                         || prev.project_path        != info.project_path
+                                        || prev.source_start_frame  != info.source_start_frame
+                                        || prev.source_end_frame    != info.source_end_frame
                                 }
                                 None => true,
                             };
@@ -332,6 +359,10 @@ impl CurrentFileInfo {
                                         timeline_w: info.timeline_w,
                                         timeline_h: info.timeline_h,
                                         use_custom_settings: info.use_custom_settings,
+                                        // Clip-level fields stay empty in a refresh seed
+                                        // (playhead contract) — same as file_path above.
+                                        source_start_frame: None,
+                                        source_end_frame: None,
                                         queried_at: info.queried_at,
                                     });
                                     true

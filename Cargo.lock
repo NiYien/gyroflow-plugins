@@ -3305,6 +3305,7 @@ name = "gyroflow-ofx"
 version = "2.1.2"
 dependencies = [
  "gyroflow-plugin-base",
+ "libloading 0.8.9",
  "log",
  "ofx",
  "regex",

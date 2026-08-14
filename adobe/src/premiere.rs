@@ -156,11 +156,27 @@ impl pr::GpuFilter for PremiereGPU {
                 let key = format!("{path}{disable_stretch}{instance_id}");
                 // log::info!("PremiereGPU::render! {pixel_format:?} in: {in_frame_data:?}, out: {out_frame_data:?}, stride: {in_stride}/{out_stride}, bounds: {in_bounds:?}/{out_bounds:?}, disable_stretch: {disable_stretch:?} path: {} instance_id: {instance_id:?} | time: {}", path, render_params.clip_time());
 
+                // A bin subclip has its own time domain: clip_time is relative to the subclip's
+                // start, not to the start of the master media. Media_ContentStart reports where
+                // that domain begins within the master file, and is absent (0) for a plain
+                // master clip, whose clip_time is already master-relative. Gyro data is anchored
+                // to master-file time, so without this every subclip frame gets the sample from
+                // Media_ContentStart earlier.
+                let media_content_start = match filter.video_segment_suite.node_property(media_node.1, pr::Property::Media_ContentStart) {
+                    Ok(pr::PropertyData::Time(start)) => start as i64,
+                    _ => 0
+                };
+
+                // plugins-host-timeline-trim: the clip's in/out bounds in master-media
+                // seconds. The `media_content_start` shift keeps the window in the same
+                // time domain as the frame timestamps below — a subclip window normalized
+                // against master duration WITHOUT the shift would sit at the wrong offset
+                // and re-create the out-of-window black borders this feature must avoid.
                 let mut trim_range = None;
                 if let Ok(pr::PropertyData::Int64(start)) = filter.video_segment_suite.node_property(media_node.1, pr::Property::Media_InPointMediaTimeAsTicks) {
                     if let Ok(pr::PropertyData::Int64(end)) = filter.video_segment_suite.node_property(media_node.1, pr::Property::Media_OutPointMediaTimeAsTicks) {
-                        let start = filter.video_segment_suite.transform_node_time(clip_node, start)?;
-                        let end   = filter.video_segment_suite.transform_node_time(clip_node, end)?;
+                        let start = filter.video_segment_suite.transform_node_time(clip_node, start)? + media_content_start;
+                        let end   = filter.video_segment_suite.transform_node_time(clip_node, end)? + media_content_start;
                         trim_range = Some((start as f64 / ticks_per_sec, end as f64 / ticks_per_sec));
                     }
                 }
@@ -199,19 +215,15 @@ impl pr::GpuFilter for PremiereGPU {
                     // Copy out now (filled during the cache-miss build above) — `inst` is behind a
                     // guard, so keeping `base_inst` alive would conflict with `inst.stored` below.
                     let container_media_rotation = base_inst.container_media_rotation;
-                    /*{
+                    {
+                        // plugins-host-timeline-trim: re-enabled (upstream fe6d951 disabled the
+                        // original block, which predates the Media_ContentStart subclip fix and
+                        // derived subclip windows in the wrong time domain). Unavailable bounds
+                        // fall back to the full clip (explicit reset — same as the AE path). The
+                        // env gate and the changed-only invalidation live in the helper.
                         let duration_ms = stab.params.read().duration_ms;
-                        let old_range = stab.trim_ranges().first().cloned().unwrap_or((0.0, 1.0));
-                        let old_range_ms = ((old_range.0 * duration_ms).round() as i64, (old_range.1 * duration_ms).round() as i64);
-                        let new_range = trim_range.unwrap_or((0.0, duration_ms / 1000.0));
-                        let new_range_ms = ((new_range.0 * 1000.0).round() as i64, (new_range.1 * 1000.0).round() as i64);
-                        if old_range_ms != new_range_ms {
-                            log::info!("Trim range changed: {:?} != {:?}", old_range_ms, new_range_ms);
-
-                            stab.set_trim_ranges(vec![((new_range.0 * 1000.0) / duration_ms, (new_range.1 * 1000.0) / duration_ms)]);
-                            stab.invalidate_blocking_smoothing();
-                        }
-                    }*/
+                        gyroflow_plugin_base::apply_host_timeline_trim(&stab, &[trim_range.unwrap_or((0.0, duration_ms / 1000.0))]);
+                    }
 
                     // (adobe-output-geometry-recompute-once) The aspect-mismatch host-placement
                     // neutralization that used to run here per frame now runs once at load time inside
@@ -224,7 +236,7 @@ impl pr::GpuFilter for PremiereGPU {
                     let fps_ticks = if fps_ticks == 0 { ticks_per_sec / fps } else { fps_ticks as f64 };
 
                     // round the timestamp_us according to the fps, so it's never between frames and always points to a valid frame timestamp
-                    let frame = render_params.clip_time() as f64 / fps_ticks;
+                    let frame = (render_params.clip_time() + media_content_start) as f64 / fps_ticks;
                     let frame = if frame.fract() > 0.999 { frame.ceil() } else { frame.floor() };
                     let timestamp_us = (frame * (1_000_000.0 / fps)).round() as i64;
 
