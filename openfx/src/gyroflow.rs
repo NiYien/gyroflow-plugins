@@ -3236,12 +3236,12 @@ impl Execute for GyroflowPlugin {
                     let _ = effect_properties.set_opengl_render_supported("true");
                 }
 
-                let _has_metal  = wgpu_devices.iter().any(|x| x.contains("(Metal)"));
-                let _has_vulkan = wgpu_devices.iter().any(|x| x.contains("(Vulkan)"));
-                let _has_dx12   = wgpu_devices.iter().any(|x| x.contains("(Dx12)"));
+                let _has_metal  = wgpu_devices.iter().any(|x| x.list_name.contains("(Metal)"));
+                let _has_vulkan = wgpu_devices.iter().any(|x| x.list_name.contains("(Vulkan)"));
+                let _has_dx12   = wgpu_devices.iter().any(|x| x.list_name.contains("(Dx12)"));
 
                 #[cfg(target_os = "macos")]
-                if !wgpu_devices.iter().any(|x| x.to_ascii_lowercase().contains("apple m")) {
+                if !wgpu_devices.iter().any(|x| x.display_name.to_ascii_lowercase().contains("apple m")) {
                     unsafe {
                         std::env::set_var("NO_METAL", "1");
                         std::env::set_var("NO_WGPU", "1");

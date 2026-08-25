@@ -41,8 +41,8 @@ impl GyroflowLaunchCommand {
 // Snapshot of `StabilizationManager` fields that feed
 // `gyroflow_core::stabilization::compute_params::ComputeParams::from_manager`.
 // Captured pre- and post-mutation inside `stab_manager()` so the post-import
-// recompute pair (`invalidate_smoothing()` + `recompute_blocking()`) can be
-// skipped when no relevant input changed. Field list derived from a direct
+// recompute can be skipped when no relevant input changed and otherwise select
+// smoothing or zoom invalidation from the effective camera-FOV change. Field list derived from a direct
 // code audit of `from_manager` (see gyroflow/src/core/stabilization/compute_params.rs).
 //
 // Raw stretch mirror fields (`input_horizontal_stretch_raw`,
@@ -50,10 +50,10 @@ impl GyroflowLaunchCommand {
 // read by `from_manager`. The motivation comes from §10: `apply_anamorphic_decay`
 // reads them, and any later change in the raw mirror semantically affects the
 // compute output. Both raw and mutating fields are tracked to detect any state
-// change. In the common anamorphic case, `disable_lens_stretch` only changes
-// the mutating fields (raw stays at λ), so the snapshot still diffs and fires
-// — this is correct: size also changed, so a recompute is required. The §10
-// gain is render coherence with the desktop app, not skip-count.
+// change. Raw-only stretch changes remain zoom-only. Static lens state records
+// the exact scalar FOV bit pattern calculated by gyroflow-core; timestamp-selected
+// lens state is classified dynamic and conservatively routes related mutations
+// through smoothing.
 #[derive(Clone, Debug, PartialEq)]
 struct ComputeInputsSnapshot {
     size: (usize, usize),
@@ -65,9 +65,33 @@ struct ComputeInputsSnapshot {
     input_vertical_stretch: f64,
     input_horizontal_stretch_raw: Option<f64>,
     input_vertical_stretch_raw: Option<f64>,
+    lens_params_len: usize,
+    lens_positions_len: usize,
+    smoothing_camera_fov: SmoothingCameraFovSignature,
     integration_method: usize,
     keyframes_hash: u64,
     smoothing_hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SmoothingCameraFovSignature {
+    Static(u64),
+    Dynamic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostMutationInvalidation {
+    Smoothing,
+    Zoom,
+}
+
+impl PostMutationInvalidation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoothing => "smoothing",
+            Self::Zoom => "zoom",
+        }
+    }
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -88,6 +112,20 @@ fn hash_str(s: &str) -> u64 {
 // manager is exclusively owned. Future call sites in render / async paths
 // MUST re-audit before adding.
 fn snapshot_compute_inputs(stab: &StabilizationManager) -> ComputeInputsSnapshot {
+    let (lens_params_len, lens_positions_len) = {
+        let gyro = stab.gyro.read();
+        let metadata = gyro.file_metadata.read();
+        (metadata.lens_params.len(), metadata.lens_positions.len())
+    };
+    let smoothing_camera_fov = if lens_params_len > 1 || lens_positions_len > 0 {
+        SmoothingCameraFovSignature::Dynamic
+    } else {
+        let mut compute = gyroflow_core::stabilization::ComputeParams::from_manager(stab);
+        compute.calculate_camera_fovs();
+        SmoothingCameraFovSignature::Static(
+            compute.camera_diagonal_fovs.first().copied().unwrap_or_default().to_bits(),
+        )
+    };
     let p = stab.params.read();
     let lens = stab.lens.read();
     let gyro = stab.gyro.read();
@@ -109,6 +147,9 @@ fn snapshot_compute_inputs(stab: &StabilizationManager) -> ComputeInputsSnapshot
         input_vertical_stretch: lens.input_vertical_stretch,
         input_horizontal_stretch_raw: lens.input_horizontal_stretch_raw(),
         input_vertical_stretch_raw: lens.input_vertical_stretch_raw(),
+        lens_params_len,
+        lens_positions_len,
+        smoothing_camera_fov,
         integration_method: gyro.integration_method,
         keyframes_hash,
         smoothing_hash,
@@ -159,11 +200,48 @@ impl ComputeInputsSnapshot {
         if self.input_vertical_stretch != other.input_vertical_stretch { out.push("input_vertical_stretch"); }
         if self.input_horizontal_stretch_raw != other.input_horizontal_stretch_raw { out.push("input_horizontal_stretch_raw"); }
         if self.input_vertical_stretch_raw != other.input_vertical_stretch_raw { out.push("input_vertical_stretch_raw"); }
+        if self.lens_params_len != other.lens_params_len { out.push("lens_params"); }
+        if self.lens_positions_len != other.lens_positions_len { out.push("lens_positions"); }
+        if self.smoothing_camera_fov != other.smoothing_camera_fov { out.push("camera_fov"); }
         if self.integration_method != other.integration_method { out.push("integration_method"); }
         if self.keyframes_hash != other.keyframes_hash { out.push("keyframes"); }
         if self.smoothing_hash != other.smoothing_hash { out.push("smoothing"); }
         out
     }
+}
+
+fn post_mutation_invalidation(
+    pre: &ComputeInputsSnapshot,
+    post: &ComputeInputsSnapshot,
+) -> Option<PostMutationInvalidation> {
+    let diff = pre.diff(post);
+    if diff.is_empty() {
+        return None;
+    }
+
+    let dynamic_lens = matches!(pre.smoothing_camera_fov, SmoothingCameraFovSignature::Dynamic)
+        || matches!(post.smoothing_camera_fov, SmoothingCameraFovSignature::Dynamic);
+    let dynamic_lens_input_changed = dynamic_lens
+        && diff.iter().any(|field| {
+            matches!(
+                *field,
+                "size"
+                    | "input_horizontal_stretch"
+                    | "input_vertical_stretch"
+                    | "lens_params"
+                    | "lens_positions"
+                    | "camera_fov"
+            )
+        });
+    let smoothing_changed = diff.contains(&"keyframes")
+        || diff.contains(&"camera_fov")
+        || dynamic_lens_input_changed;
+
+    Some(if smoothing_changed {
+        PostMutationInvalidation::Smoothing
+    } else {
+        PostMutationInvalidation::Zoom
+    })
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, PartialOrd, Eq, Ord, serde::Serialize, serde::Deserialize)]
@@ -1196,6 +1274,30 @@ impl GyroflowPluginBaseInstance {
         Ok(())
     }
 
+    fn maybe_disable_lens_stretch_on_load(
+        &self,
+        params: &mut dyn GyroflowPluginParams,
+        disable_stretch: &mut bool,
+        stab: &StabilizationManager,
+    ) -> PluginResult<bool> {
+        if !*disable_stretch {
+            return Ok(false);
+        }
+        let has_lens_positions = {
+            let gyro = stab.gyro.read();
+            !gyro.file_metadata.read().lens_positions.is_empty()
+        };
+        if has_lens_positions {
+            *disable_stretch = false;
+            params.set_bool(Params::DisableStretch, false)?;
+            log::warn!(target: "stab.load", "DisableStretch ignored: lens_positions requires timestamp-selected stretch");
+            return Ok(false);
+        }
+
+        stab.disable_lens_stretch(self.anamorphic_adjust_size);
+        Ok(true)
+    }
+
     // Gated load-time InputRotation step (openfx-restore-rotation-order D1). Called from the
     // cache-miss mutation block in `stab_manager`. Returns the effective rotation when a
     // rotation + output-size transpose was applied to the stab, `None` when the step is
@@ -1592,9 +1694,7 @@ impl GyroflowPluginBaseInstance {
                 self.maybe_auto_disable_stretch_from_embedded_data(params, &mut disable_stretch)?;
             }
 
-            if disable_stretch {
-                stab.disable_lens_stretch(self.anamorphic_adjust_size);
-            }
+            self.maybe_disable_lens_stretch_on_load(params, &mut disable_stretch, &stab)?;
 
             stab.set_fov_overview(params.get_bool(Params::ToggleOverview)?);
 
@@ -1706,37 +1806,21 @@ impl GyroflowPluginBaseInstance {
             }
 
             // §11.4 + §11.5: skip the redundant second recompute when nothing
-            // relevant changed since import #1. The skip target is the
+            // relevant changed since import #1; otherwise route through smoothing
+            // only when the effective camera FOV can change, or zoom for proven
+            // geometry-only mutations. The skip target is the
             // 25-iter / ~85 s Max-Zoom limiter rerun observed in
             // gyroflow-openfx.log for a non-anamorphic Canon MXF where import
             // #1 reported `any above limit: false` but the post-mutation
             // recompute disagreed. Diff list goes to `stab.load` so a future
             // log shows which mutation actually triggers the rerun.
             let post_snapshot = snapshot_compute_inputs(&stab);
-            if pre_snapshot != post_snapshot {
+            if let Some(invalidation) = post_mutation_invalidation(&pre_snapshot, &post_snapshot) {
                 let diff = pre_snapshot.diff(&post_snapshot);
-                // smoothing-perf-recompute-gating: only force-invalidate for
-                // fields that affect a leg but are NOT expressed through the
-                // core checksum gates (gyro/smoothing checksums for the
-                // smoothing leg, zooming::get_checksum for the zoom leg).
-                // Everything else lets the gated recompute_blocking decide,
-                // so a size/stretch-only host negotiation diff no longer
-                // reruns smoothing over the whole gyro timeline.
-                const SMOOTHING_UNCOVERED: &[&str] = &["keyframes"];
-                const ZOOM_UNCOVERED: &[&str] = &[
-                    "adaptive_zoom_method",
-                    "input_horizontal_stretch",
-                    "input_vertical_stretch",
-                    "input_horizontal_stretch_raw",
-                    "input_vertical_stretch_raw",
-                ];
-                let smoothing_uncovered = diff.iter().any(|f| SMOOTHING_UNCOVERED.contains(f));
-                let zoom_uncovered = diff.iter().any(|f| ZOOM_UNCOVERED.contains(f));
-                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?} force_smoothing={smoothing_uncovered} force_zooming={zoom_uncovered}");
-                if smoothing_uncovered {
-                    stab.invalidate_smoothing();
-                } else if zoom_uncovered {
-                    stab.invalidate_zooming();
+                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?} invalidation={}", invalidation.as_str());
+                match invalidation {
+                    PostMutationInvalidation::Smoothing => stab.invalidate_smoothing(),
+                    PostMutationInvalidation::Zoom => stab.invalidate_zooming(),
                 }
                 stab.recompute_blocking();
             } else {
@@ -2878,11 +2962,8 @@ mod tests {
         assert_eq!(command.args, vec!["-a", "/Applications/GyroflowNiYien.app"]);
     }
 
-    // §11.8 unit stand-in: full integration test (mock GyroflowPluginParams +
-    // .gyroflow fixture + log capture) requires test infra that doesn't exist
-    // in this crate. Verify the testable invariant directly: snapshot of an
-    // un-mutated manager equals itself, so the `if pre != post` skip branch
-    // would fire on the same-state load path.
+    // Equal-state fast path: an un-mutated manager must not request either
+    // smoothing or zoom invalidation.
     #[test]
     fn snapshot_of_unchanged_manager_is_equal() {
         let stab = StabilizationManager::default();
@@ -2890,6 +2971,182 @@ mod tests {
         let post = snapshot_compute_inputs(&stab);
         assert_eq!(pre, post);
         assert!(pre.diff(&post).is_empty());
+        assert_eq!(post_mutation_invalidation(&pre, &post), None);
+    }
+
+    fn manager_for_snapshot_stretch(stretch: (f64, f64)) -> StabilizationManager {
+        let stab = StabilizationManager::default();
+        let normalized = (
+            if stretch.0 > 0.01 { stretch.0 } else { 1.0 },
+            if stretch.1 > 0.01 { stretch.1 } else { 1.0 },
+        );
+        let calib_size = (
+            (1920.0 * normalized.0).round() as usize,
+            (1080.0 * normalized.1).round() as usize,
+        );
+        {
+            let mut stab_params = stab.params.write();
+            stab_params.size = (1920, 1080);
+            stab_params.output_size = (1920, 1080);
+            stab_params.frame_count = 2;
+            stab_params.fps = 30.0;
+            stab_params.duration_ms = 2_000.0 / 30.0;
+        }
+        {
+            let mut lens = stab.lens.write();
+            lens.calib_dimension = gyroflow_core::lens_profile::Dimensions {
+                w: calib_size.0,
+                h: calib_size.1,
+            };
+            lens.orig_dimension = lens.calib_dimension.clone();
+            lens.fisheye_params.camera_matrix = vec![
+                [3500.0, 0.0, calib_size.0 as f64 / 2.0],
+                [0.0, 3500.0, calib_size.1 as f64 / 2.0],
+                [0.0, 0.0, 1.0],
+            ];
+            lens.fisheye_params.distortion_coeffs = vec![0.0; 4];
+            lens.input_horizontal_stretch = stretch.0;
+            lens.input_vertical_stretch = stretch.1;
+        }
+        stab
+    }
+
+    fn camera_fov_bits(stab: &StabilizationManager) -> Vec<u64> {
+        let mut compute = gyroflow_core::stabilization::ComputeParams::from_manager(stab);
+        compute.calculate_camera_fovs();
+        compute.camera_diagonal_fovs.into_iter().map(f64::to_bits).collect()
+    }
+
+    #[test]
+    fn snapshot_current_stretch_override_routes_to_smoothing() {
+        let stab = manager_for_snapshot_stretch((1.0, 1.0));
+        let pre = snapshot_compute_inputs(&stab);
+
+        stab.lens.write().input_horizontal_stretch = 1.5;
+        let post = snapshot_compute_inputs(&stab);
+
+        assert!(pre.diff(&post).contains(&"camera_fov"));
+        assert_eq!(
+            post_mutation_invalidation(&pre, &post),
+            Some(PostMutationInvalidation::Smoothing),
+        );
+    }
+
+    #[test]
+    fn snapshot_static_horizontal_bakes_keep_fov_and_route_to_zoom() {
+        for stretch in [1.5, 1.33] {
+            let stab = manager_for_snapshot_stretch((stretch, 1.0));
+            let pre = snapshot_compute_inputs(&stab);
+
+            stab.disable_lens_stretch(true);
+            let post = snapshot_compute_inputs(&stab);
+
+            assert!(!pre.diff(&post).contains(&"camera_fov"), "stretch={stretch}");
+            assert_eq!(
+                post_mutation_invalidation(&pre, &post),
+                Some(PostMutationInvalidation::Zoom),
+                "stretch={stretch}",
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_static_vertical_fractional_bake_routes_to_smoothing() {
+        let stab = manager_for_snapshot_stretch((1.0, 1.33));
+        let pre = snapshot_compute_inputs(&stab);
+
+        stab.disable_lens_stretch(true);
+        let post = snapshot_compute_inputs(&stab);
+
+        assert!(pre.diff(&post).contains(&"camera_fov"));
+        assert_eq!(
+            post_mutation_invalidation(&pre, &post),
+            Some(PostMutationInvalidation::Smoothing),
+        );
+    }
+
+    #[test]
+    fn snapshot_dynamic_lens_related_mutation_routes_to_smoothing() {
+        let stab = manager_for_snapshot_stretch((1.0, 1.0));
+        stab.gyro.write().file_metadata.write().lens_params = BTreeMap::from([
+            (0, gyroflow_core::gyro_source::LensParams { pixel_focal_length: Some(3500.0), ..Default::default() }),
+            (100_000, gyroflow_core::gyro_source::LensParams { pixel_focal_length: Some(3600.0), ..Default::default() }),
+        ]);
+        let pre = snapshot_compute_inputs(&stab);
+
+        stab.lens.write().input_horizontal_stretch = 1.5;
+        let post = snapshot_compute_inputs(&stab);
+
+        assert!(matches!(pre.smoothing_camera_fov, SmoothingCameraFovSignature::Dynamic));
+        assert_eq!(
+            post_mutation_invalidation(&pre, &post),
+            Some(PostMutationInvalidation::Smoothing),
+        );
+    }
+
+    #[test]
+    fn snapshot_raw_output_and_zoom_mode_only_diffs_stay_zoom_only() {
+        let stab = manager_for_snapshot_stretch((1.0, 1.0));
+        let pre = snapshot_compute_inputs(&stab);
+
+        let mut raw_only = pre.clone();
+        raw_only.input_horizontal_stretch_raw = Some(1.5);
+        assert_eq!(
+            post_mutation_invalidation(&pre, &raw_only),
+            Some(PostMutationInvalidation::Zoom),
+        );
+
+        let mut output_only = pre.clone();
+        output_only.output_size = (1280, 720);
+        assert_eq!(
+            post_mutation_invalidation(&pre, &output_only),
+            Some(PostMutationInvalidation::Zoom),
+        );
+
+        let mut zoom_mode_only = pre.clone();
+        zoom_mode_only.adaptive_zoom_window = pre.adaptive_zoom_window + 1.0;
+        assert_eq!(
+            post_mutation_invalidation(&pre, &zoom_mode_only),
+            Some(PostMutationInvalidation::Zoom),
+        );
+    }
+
+    #[test]
+    fn lens_positions_reject_disable_stretch_for_both_adjust_policies() {
+        for anamorphic_adjust_size in [true, false] {
+            let stab = manager_for_snapshot_stretch((1.5, 1.0));
+            stab.gyro.write().file_metadata.write().lens_positions =
+                BTreeMap::from([(0, 1.0), (100_000, 2.0)]);
+            stab.lens.write().interpolations = Some(serde_json::json!({
+                "1.0": { "input_horizontal_stretch": 1.5 },
+                "2.0": { "input_horizontal_stretch": 2.0 }
+            }));
+            let pre_size = stab.params.read().size;
+            let pre_lens = stab.lens.read().clone();
+            let pre_fovs = camera_fov_bits(&stab);
+            let mut host_params = TestParams::default();
+            host_params.set_bool(Params::DisableStretch, true).unwrap();
+            let mut disable_stretch = true;
+            let instance = GyroflowPluginBaseInstance {
+                anamorphic_adjust_size,
+                ..Default::default()
+            };
+
+            let applied = instance
+                .maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab)
+                .unwrap();
+
+            assert!(!applied);
+            assert!(!disable_stretch);
+            assert!(!host_params.get_bool(Params::DisableStretch).unwrap());
+            assert_eq!(stab.params.read().size, pre_size);
+            let post_lens = stab.lens.read();
+            assert_eq!(post_lens.input_horizontal_stretch, pre_lens.input_horizontal_stretch);
+            assert_eq!(post_lens.input_vertical_stretch, pre_lens.input_vertical_stretch);
+            assert_eq!(post_lens.interpolations, pre_lens.interpolations);
+            drop(post_lens);
+            assert_eq!(camera_fov_bits(&stab), pre_fovs);
+        }
     }
 
     // §11.9 unit stand-in: mutate the field that the OFX ZoomMode round-trip
