@@ -5,7 +5,8 @@ ExtDir := justfile_directory() / "ext"
 
 export DYLD_FALLBACK_LIBRARY_PATH := if os() == "macos" { if path_exists(`xcode-select --print-path` + "/Toolchains/XcodeDefault.xctoolchain/usr/lib/") == "true" { `xcode-select --print-path` + "/Toolchains/XcodeDefault.xctoolchain/usr/lib/" } else { `xcode-select --print-path` + "/usr/lib/" } } else { "" }
 export MACOSX_DEPLOYMENT_TARGET := "10.15"
-export LIBCLANG_PATH := if os() == "macos" { DYLD_FALLBACK_LIBRARY_PATH } else { if path_exists(ExtDir / "llvm/bin") == "true" { ExtDir / "llvm/bin" } else { env_var_or_default("LIBCLANG_PATH", if path_exists("/usr/lib/llvm-13/lib/") == "true" { "/usr/lib/llvm-13/lib/" } else { "" }) } }
+LinuxClangLibDir := if os() == "linux" { `find /usr/lib/llvm-*/lib -maxdepth 1 -name 'libclang.so*' -printf '%h\n' 2>/dev/null | sort -V | tail -n 1` } else { "" }
+export LIBCLANG_PATH := if os() == "macos" { DYLD_FALLBACK_LIBRARY_PATH } else { if path_exists(ExtDir / "llvm/bin") == "true" { ExtDir / "llvm/bin" } else { env_var_or_default("LIBCLANG_PATH", LinuxClangLibDir) } }
 export PATH := LIBCLANG_PATH + (if os() == "windows" { ";" } else { ":" }) + env_var('PATH')
 
 export CARGO_TARGET_DIR := justfile_directory() / "target"
@@ -128,6 +129,12 @@ install-deps:
     fi
 
     # LLVM
-    if [[ ! -d "${LIBCLANG_PATH}" ]]; then
-        sudo apt-get install -y libclang-13-dev
+    clang_lib_dir="${LIBCLANG_PATH:-}"
+    if [ ! -d "$clang_lib_dir" ]; then
+        clang_lib_dir="$(find /usr/lib/llvm-*/lib -maxdepth 1 -name 'libclang.so*' -printf '%h\n' 2>/dev/null | sort -V | tail -n 1)"
     fi
+    if [ ! -d "$clang_lib_dir" ]; then
+        echo "Unable to locate the libclang directory after installing libclang-dev." >&2
+        exit 1
+    fi
+    export LIBCLANG_PATH="$clang_lib_dir"

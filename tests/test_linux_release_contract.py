@@ -29,6 +29,21 @@ class LinuxWorkflowContractTests(unittest.TestCase):
         self.assertIn('just -f frei0r/Justfile deploy', justfile)
         self.assertIn('Skipping Adobe deploy on Linux', justfile)
 
+    def test_linux_openfx_deploy_derives_a_nonempty_package_version(self):
+        justfile = (ROOT / "openfx" / "Justfile").read_text(encoding="utf-8")
+        linux_deploy = justfile.split("[linux]", 1)[1]
+
+        self.assertIn("version=$(cargo pkgid -p gyroflow-ofx", linux_deploy)
+        self.assertLess(linux_deploy.index("version=$(cargo pkgid"), linux_deploy.index('cd "{{TargetDir}}"'))
+
+    def test_linux_openfx_returns_to_target_root_before_package_verification(self):
+        justfile = (ROOT / "openfx" / "Justfile").read_text(encoding="utf-8")
+        linux_deploy = justfile.split("[linux]", 1)[1]
+
+        self.assertIn("pushd gyroflow-niyien-ofx-linux", linux_deploy)
+        self.assertIn("popd", linux_deploy)
+        self.assertNotIn("cd gyroflow-niyien-ofx-linux && zip", linux_deploy)
+
     def test_linux_workflow_never_uploads_adobe(self):
         workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
@@ -43,10 +58,22 @@ class LinuxWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("GyroflowNiyien-Adobe-linux", workflow)
         self.assertIn("name: GyroflowNiyien-OpenFX-${{ matrix.targets.type }}", workflow)
 
+    def test_linux_discovers_the_distribution_libclang_instead_of_pin_to_13(self):
+        justfile = (ROOT / "Justfile").read_text(encoding="utf-8")
+
+        self.assertNotIn("libclang-13-dev", justfile)
+        self.assertNotIn("/usr/lib/llvm-13/lib/", justfile)
+        self.assertGreaterEqual(justfile.count("find /usr/lib/llvm-*/lib"), 2)
+
 
 class LinuxZipContractTests(unittest.TestCase):
     def setUp(self):
         self.verifier = load_verifier()
+
+    def test_verifier_defers_type_annotations_for_bullseye_python(self):
+        script = VERIFY_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertTrue(script.startswith("from __future__ import annotations\n"))
 
     def write_zip(self, path: Path, missing: str | None = None):
         entries = {

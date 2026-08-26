@@ -90,6 +90,7 @@ deploy:
     set -e
 
     cargo build --profile deploy
+    version=$(cargo pkgid -p gyroflow-ofx | sed -E 's/.*@([^@]+)$/\1/')
     cd "{{TargetDir}}"
     rm -Rf gyroflow-niyien-ofx-linux GyroflowNiyien-OpenFX-linux.zip
     mkdir -p gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/Linux-x86-64
@@ -102,5 +103,7 @@ deploy:
     cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Clip.lua" gyroflow-niyien-ofx-linux/ResolveScripts/
     cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Track.lua" gyroflow-niyien-ofx-linux/ResolveScripts/
     cp "{{justfile_directory()}}/../resolve-scripts/gyroflow_autocut_common.inc" gyroflow-niyien-ofx-linux/ResolveScripts/
-    cd gyroflow-niyien-ofx-linux && zip -r ../GyroflowNiyien-OpenFX-linux.zip .
+    pushd gyroflow-niyien-ofx-linux
+        zip -r ../GyroflowNiyien-OpenFX-linux.zip .
+    popd
     python3 "{{justfile_directory()}}/../scripts/verify_linux_openfx_package.py" GyroflowNiyien-OpenFX-linux.zip
