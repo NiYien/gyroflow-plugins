@@ -13,7 +13,6 @@ deploy:
     $ErrorActionPreference = 'Stop'
 
     cargo build --profile deploy
-    version=$(cargo pkgid -p gyroflow-ofx | sed -E 's/.*@([^@]+)$/\1/')
     cd "{{TargetDir}}"
     Remove-Item -Recurse -Force gyroflow-niyien-ofx-windows, GyroflowNiyien-OpenFX-windows.zip -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/Win64" -Force
