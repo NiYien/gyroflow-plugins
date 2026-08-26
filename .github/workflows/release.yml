@@ -80,7 +80,7 @@ jobs:
             set -e
             apt-get update -y
             echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
-            apt install -y sudo dialog apt-utils git curl zip clang make ocl-icd-opencl-dev libwayland-client0 libwayland-dev
+            apt install -y sudo dialog apt-utils git curl zip clang make python3 ocl-icd-opencl-dev libwayland-client0 libwayland-dev
             export RUNLEVEL=1
             export CC=clang
             export CXX=clang++
@@ -92,6 +92,7 @@ jobs:
             cd ${{ github.workspace }}
             just install-deps
             just deploy
+            python3 scripts/verify_linux_openfx_package.py target/GyroflowNiyien-OpenFX-linux.zip
           "
           sudo chown -R $(id -u):$(id -g) $HOME/.cargo
           sudo chown -R $(id -u):$(id -g) ${{ github.workspace }}/target
@@ -102,7 +103,7 @@ jobs:
           name: GyroflowNiyien-OpenFX-${{ matrix.targets.type }}
           path: target/GyroflowNiyien-OpenFX*
       - uses: actions/upload-artifact@v4
-        if: ${{ matrix.targets.type != 'macos' }}
+        if: ${{ matrix.targets.type == 'windows' }}
         with:
           name: GyroflowNiyien-Adobe-${{ matrix.targets.type }}
           path: target/GyroflowNiyien-Adobe-*

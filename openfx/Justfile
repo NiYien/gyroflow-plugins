@@ -13,6 +13,7 @@ deploy:
     $ErrorActionPreference = 'Stop'
 
     cargo build --profile deploy
+    version=$(cargo pkgid -p gyroflow-ofx | sed -E 's/.*@([^@]+)$/\1/')
     cd "{{TargetDir}}"
     Remove-Item -Recurse -Force gyroflow-niyien-ofx-windows, GyroflowNiyien-OpenFX-windows.zip -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/Win64" -Force
@@ -94,9 +95,12 @@ deploy:
     mkdir -p gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/Linux-x86-64
     mkdir -p gyroflow-niyien-ofx-linux/ResolveScripts
     cp deploy/libgyroflow_ofx.so gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/Linux-x86-64/GyroflowNiyien.ofx
+    chmod 755 gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/Linux-x86-64/GyroflowNiyien.ofx
     cp "{{justfile_directory()}}/res/Info.plist" gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/
     cp "{{justfile_directory()}}/../LICENSE"     gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/
+    printf '%s\n' "$version" > gyroflow-niyien-ofx-linux/GyroflowNiyien.ofx.bundle/Contents/version.txt
     cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Clip.lua" gyroflow-niyien-ofx-linux/ResolveScripts/
     cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Track.lua" gyroflow-niyien-ofx-linux/ResolveScripts/
     cp "{{justfile_directory()}}/../resolve-scripts/gyroflow_autocut_common.inc" gyroflow-niyien-ofx-linux/ResolveScripts/
     cd gyroflow-niyien-ofx-linux && zip -r ../GyroflowNiyien-OpenFX-linux.zip .
+    python3 "{{justfile_directory()}}/../scripts/verify_linux_openfx_package.py" GyroflowNiyien-OpenFX-linux.zip

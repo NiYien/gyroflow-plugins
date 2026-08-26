@@ -22,7 +22,7 @@ frei0r *param:
     just -f frei0r/Justfile {{param}}
 
 deploy:
-    just -f adobe/Justfile deploy
+    {{ if os() == "linux" { "echo 'Skipping Adobe deploy on Linux'" } else { "just -f adobe/Justfile deploy" } }}
     just -f openfx/Justfile deploy
     just -f frei0r/Justfile deploy
 
@@ -114,7 +114,7 @@ install-deps:
     #!/bin/bash
     set -e
 
-    sudo apt-get install -y p7zip-full clang libclang-dev pkg-config unzip zip git
+    sudo apt-get install -y p7zip-full clang libclang-dev pkg-config unzip zip git python3
 
     mkdir -p {{ExtDir}}
     cd {{ExtDir}}
@@ -130,11 +130,4 @@ install-deps:
     # LLVM
     if [[ ! -d "${LIBCLANG_PATH}" ]]; then
         sudo apt-get install -y libclang-13-dev
-    fi
-
-    # Adobe SDK
-    if [ ! -f "AfterEffects/Examples/Headers/AE_Effect.h" ]; then
-        curl -L "$SDK_BASE/AdobeSDK.zip" -o AdobeSDK.zip
-        7z x -aoa AdobeSDK.zip
-        rm AdobeSDK.zip
     fi
