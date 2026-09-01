@@ -1320,7 +1320,7 @@ dependencies = [
 [[package]]
 name = "gyroflow-core"
 version = "1.6.3"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=f570fdfc3f9f21e271f3bb246cc53ac0f58c430d#f570fdfc3f9f21e271f3bb246cc53ac0f58c430d"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=ea4d94ef7d6366b4cbeff125ac682cb37b47f86d#ea4d94ef7d6366b4cbeff125ac682cb37b47f86d"
 dependencies = [
  "ahrs",
  "akaze",
@@ -2241,7 +2241,7 @@ dependencies = [
 [[package]]
 name = "neuflow-trace-shared"
 version = "0.1.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=f570fdfc3f9f21e271f3bb246cc53ac0f58c430d#f570fdfc3f9f21e271f3bb246cc53ac0f58c430d"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=ea4d94ef7d6366b4cbeff125ac682cb37b47f86d#ea4d94ef7d6366b4cbeff125ac682cb37b47f86d"
 
 [[package]]
 name = "nodrop"
@@ -3467,7 +3467,7 @@ source = "git+https://github.com/Rust-GPU/rust-gpu?rev=854e9ba#854e9ba7da26d52ca
 [[package]]
 name = "stabilize_spirv"
 version = "0.0.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=f570fdfc3f9f21e271f3bb246cc53ac0f58c430d#f570fdfc3f9f21e271f3bb246cc53ac0f58c430d"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=ea4d94ef7d6366b4cbeff125ac682cb37b47f86d#ea4d94ef7d6366b4cbeff125ac682cb37b47f86d"
 dependencies = [
  "spirv-std",
 ]
