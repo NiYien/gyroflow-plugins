@@ -22,6 +22,10 @@ ofx *param:
 frei0r *param:
     just -f frei0r/Justfile {{param}}
 
+[macos]
+finalcut-deploy:
+    python3 scripts/build_finalcut_package.py --output-dir target
+
 deploy:
     {{ if os() == "linux" { "echo 'Skipping Adobe deploy on Linux'" } else { "just -f adobe/Justfile deploy" } }}
     just -f openfx/Justfile deploy

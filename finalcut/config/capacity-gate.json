@@ -1,0 +1,47 @@
+{
+  "schema_version": 2,
+  "minimum_representative_project_bytes": 1048576,
+  "host_parameter_round_trip_validated": true,
+  "validated_at": "2026-09-02",
+  "validated_host": {
+    "macos": "26.6.2",
+    "final_cut": "Creator Studio 12.3",
+    "bundle_identifier": "com.apple.FinalCutApp",
+    "fxplug_sdk": "26.6",
+    "candidate_cdhash": "0f79543fd922d75597734cc90f69f558086fd1dc"
+  },
+  "bank_layout": {
+    "chunk_bytes": 425984,
+    "chunks_per_bank": 10,
+    "encoded_payload_maximum_bytes": 4194304,
+    "legacy_parameter_id": 1902,
+    "manifest_parameter_ids": [1904, 1905],
+    "chunk_parameter_ranges": [[1910, 1919], [1930, 1939]]
+  },
+  "representative_fixture": {
+    "project_bytes": 1860294,
+    "project_sha256": "b7d656fd64d1776b262c8222cd3c351513b6197daa10582a1fc674c87c0baccf",
+    "encoded_payload_bytes": 2035832,
+    "encoded_payload_sha256": "588d3be947d2162ff9fed15baa161240f9fda85eb8958e2ab7dd2007b30dbd3a",
+    "used_chunks": 5,
+    "validated_bank_generations": {
+      "A": 2,
+      "B": 1
+    }
+  },
+  "measurements": {
+    "codec_encode_average_ms": 35.6336,
+    "codec_restore_average_ms": 151.8953,
+    "host_quit_confirmation_upper_bound_ms": 3000,
+    "host_reopen_to_ui_ms": 9500,
+    "xpc_respawn_upper_bound_ms": 1000
+  },
+  "required_host_checks": [
+    "the current 416 KiB chunk geometry stays below the live-validated single-parameter boundary and reconstructs both complete banks",
+    "Final Cut project save completes within the recorded release budget",
+    "Final Cut project closes and reopens with a byte-identical payload",
+    "XPC restart restores the embedded project without source-file access"
+  ],
+  "release_blocked": false,
+  "fallback_path_allowed": false
+}

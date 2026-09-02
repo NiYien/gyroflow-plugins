@@ -1,0 +1,22 @@
+[package]
+name = "gyroflow-finalcut"
+version.workspace = true
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Rust static library for the Gyroflow NiYien Final Cut FxPlug"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+base64 = "0.22"
+flate2 = "1"
+gyroflow-plugin-base = { path = "../common", default-features = false, features = ["metal"] }
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+url = "2"

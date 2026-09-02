@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Gyroflow NiYien Phase 0 Workflow</string>
+    <key>CFBundleExecutable</key>
+    <string>GyroflowNiYienPhase0Workflow</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.niyien.gyroflow.finalcut.workflow</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Gyroflow NiYien Phase 0 Workflow</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.5</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.FinalCut.WorkflowExtension</string>
+        <key>ProExtensionAttributes</key>
+        <dict>
+            <key>ContentViewMinimumHeight</key>
+            <integer>320</integer>
+            <key>ContentViewMinimumWidth</key>
+            <integer>520</integer>
+        </dict>
+        <key>ProExtensionPrincipalViewControllerClass</key>
+        <string>GFPhase0WorkflowViewController</string>
+    </dict>
+    <key>NSViewClipsToBounds</key>
+    <true/>
+</dict>
+</plist>

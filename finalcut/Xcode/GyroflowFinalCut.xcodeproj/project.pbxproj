@@ -1,0 +1,294 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+
+/* Begin PBXBuildFile section */
+        100000000000000000000001 = {isa = PBXBuildFile; fileRef = 200000000000000000000001; };
+        100000000000000000000002 = {isa = PBXBuildFile; fileRef = 200000000000000000000002; };
+        100000000000000000000003 = {isa = PBXBuildFile; fileRef = 200000000000000000000004; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+        100000000000000000000004 = {isa = PBXBuildFile; fileRef = 200000000000000000000007; };
+        100000000000000000000005 = {isa = PBXBuildFile; fileRef = 200000000000000000000009; };
+        100000000000000000000006 = {isa = PBXBuildFile; fileRef = 20000000000000000000000C; };
+        100000000000000000000007 = {isa = PBXBuildFile; fileRef = 20000000000000000000000E; };
+        100000000000000000000008 = {isa = PBXBuildFile; fileRef = 200000000000000000000010; };
+        100000000000000000000009 = {isa = PBXBuildFile; fileRef = 200000000000000000000012; };
+        10000000000000000000000A = {isa = PBXBuildFile; fileRef = 200000000000000000000014; };
+        10000000000000000000000B = {isa = PBXBuildFile; fileRef = 200000000000000000000016; };
+        10000000000000000000000C = {isa = PBXBuildFile; fileRef = 200000000000000000000018; };
+        10000000000000000000000D = {isa = PBXBuildFile; fileRef = 20000000000000000000001A; };
+        10000000000000000000000E = {isa = PBXBuildFile; fileRef = 20000000000000000000001C; };
+        10000000000000000000000F = {isa = PBXBuildFile; fileRef = 20000000000000000000001D; };
+        100000000000000000000010 = {isa = PBXBuildFile; fileRef = 20000000000000000000001E; };
+        100000000000000000000011 = {isa = PBXBuildFile; fileRef = 20000000000000000000001F; };
+        100000000000000000000012 = {isa = PBXBuildFile; fileRef = 200000000000000000000020; };
+        100000000000000000000013 = {isa = PBXBuildFile; fileRef = 200000000000000000000021; };
+        100000000000000000000014 = {isa = PBXBuildFile; fileRef = 200000000000000000000022; };
+        100000000000000000000015 = {isa = PBXBuildFile; fileRef = 200000000000000000000024; };
+        100000000000000000000016 = {isa = PBXBuildFile; fileRef = 200000000000000000000026; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+        300000000000000000000001 = {
+            isa = PBXContainerItemProxy;
+            containerPortal = 900000000000000000000001;
+            proxyType = 1;
+            remoteGlobalIDString = 800000000000000000000002;
+            remoteInfo = GyroflowFinalCutEffect;
+        };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+        400000000000000000000001 = {
+            isa = PBXCopyFilesBuildPhase;
+            buildActionMask = 2147483647;
+            dstPath = "";
+            dstSubfolderSpec = 13;
+            files = (100000000000000000000003, );
+            name = "Embed FxPlug XPC";
+            runOnlyForDeploymentPostprocessing = 0;
+        };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+        200000000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
+        200000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+        200000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        200000000000000000000005 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+        200000000000000000000004 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GyroflowNiYienFinalCutEffect.pluginkit; sourceTree = BUILT_PRODUCTS_DIR; };
+        200000000000000000000006 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "GyroflowNiYien Final Cut.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+        200000000000000000000007 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GyroflowFinalCutEffect.m; sourceTree = "<group>"; };
+        200000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GyroflowFinalCutEffect.h; sourceTree = "<group>"; };
+        200000000000000000000009 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = GFRenderPolicy.c; sourceTree = "<group>"; };
+        20000000000000000000000A = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFRenderPolicy.h; sourceTree = "<group>"; };
+        20000000000000000000000B = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFSourceResolver.h; sourceTree = "<group>"; };
+        20000000000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFSourceResolver.m; sourceTree = "<group>"; };
+        20000000000000000000000D = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFProjectStore.h; sourceTree = "<group>"; };
+        20000000000000000000000E = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFProjectStore.m; sourceTree = "<group>"; };
+        20000000000000000000000F = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFParameterCommitter.h; sourceTree = "<group>"; };
+        200000000000000000000010 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFParameterCommitter.m; sourceTree = "<group>"; };
+        200000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFProjectDropView.h; sourceTree = "<group>"; };
+        200000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFProjectDropView.m; sourceTree = "<group>"; };
+        200000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFRenderState.h; sourceTree = "<group>"; };
+        200000000000000000000014 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFRenderState.m; sourceTree = "<group>"; };
+        200000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFRenderCache.h; sourceTree = "<group>"; };
+        200000000000000000000016 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFRenderCache.m; sourceTree = "<group>"; };
+        200000000000000000000017 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFParameterIDs.h; sourceTree = "<group>"; };
+        200000000000000000000018 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemplateInstaller.swift; sourceTree = "<group>"; };
+        200000000000000000000019 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = RouteDProcessor.h; sourceTree = "<group>"; };
+        20000000000000000000001A = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RouteDProcessor.m; sourceTree = "<group>"; };
+        20000000000000000000001B = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "GyroflowFinalCut-Bridging-Header.h"; sourceTree = "<group>"; };
+        20000000000000000000001C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutAXModel.swift; sourceTree = "<group>"; };
+        20000000000000000000001D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutAXLocator.swift; sourceTree = "<group>"; };
+        20000000000000000000001E = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinalCutAccessibilityDriver.swift; sourceTree = "<group>"; };
+        20000000000000000000001F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FCPXMLDocumentInput.swift; sourceTree = "<group>"; };
+        200000000000000000000020 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessedProjectStore.swift; sourceTree = "<group>"; };
+        200000000000000000000021 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneClickRouteDWorkflow.swift; sourceTree = "<group>"; };
+        200000000000000000000022 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OneClickRouteDProduction.swift; sourceTree = "<group>"; };
+        200000000000000000000023 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFGeometryProbe.h; sourceTree = "<group>"; };
+        200000000000000000000024 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFGeometryProbe.m; sourceTree = "<group>"; };
+        200000000000000000000025 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GFFrameGeometryAdapter.h; sourceTree = "<group>"; };
+        200000000000000000000026 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = GFFrameGeometryAdapter.m; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+        500000000000000000000001 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+        500000000000000000000002 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+        600000000000000000000001 = {
+            isa = PBXGroup;
+            children = (600000000000000000000002, 600000000000000000000003, 600000000000000000000004, );
+            sourceTree = "<group>";
+        };
+        600000000000000000000002 = {
+            isa = PBXGroup;
+            children = (200000000000000000000001, 200000000000000000000018, 200000000000000000000019, 20000000000000000000001A, 20000000000000000000001B, 20000000000000000000001C, 20000000000000000000001D, 20000000000000000000001E, 20000000000000000000001F, 200000000000000000000020, 200000000000000000000021, 200000000000000000000022, 200000000000000000000003, );
+            name = App;
+            path = App;
+            sourceTree = "<group>";
+        };
+        600000000000000000000003 = {
+            isa = PBXGroup;
+            children = (200000000000000000000002, 200000000000000000000007, 200000000000000000000008, 200000000000000000000023, 200000000000000000000024, 200000000000000000000025, 200000000000000000000026, 200000000000000000000009, 20000000000000000000000A, 20000000000000000000000B, 20000000000000000000000C, 20000000000000000000000D, 20000000000000000000000E, 20000000000000000000000F, 200000000000000000000010, 200000000000000000000011, 200000000000000000000012, 200000000000000000000013, 200000000000000000000014, 200000000000000000000015, 200000000000000000000016, 200000000000000000000017, 200000000000000000000005, );
+            name = Effect;
+            path = Effect;
+            sourceTree = "<group>";
+        };
+        600000000000000000000004 = {
+            isa = PBXGroup;
+            children = (200000000000000000000006, 200000000000000000000004, );
+            name = Products;
+            sourceTree = "<group>";
+        };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+        800000000000000000000001 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = B00000000000000000000001;
+            buildPhases = (700000000000000000000001, 500000000000000000000001, 400000000000000000000001, );
+            buildRules = ();
+            dependencies = (A00000000000000000000001, );
+            name = GyroflowFinalCutApp;
+            productName = "GyroflowNiYien Final Cut";
+            productReference = 200000000000000000000006;
+            productType = "com.apple.product-type.application";
+        };
+        800000000000000000000002 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = B00000000000000000000002;
+            buildPhases = (700000000000000000000002, 500000000000000000000002, );
+            buildRules = ();
+            dependencies = ();
+            name = GyroflowFinalCutEffect;
+            productName = GyroflowNiYienFinalCutEffect;
+            productReference = 200000000000000000000004;
+            productType = "com.apple.product-type.bundle";
+        };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+        900000000000000000000001 = {
+            isa = PBXProject;
+            attributes = {
+                BuildIndependentTargetsInParallel = 1;
+                LastSwiftUpdateCheck = 2660;
+                LastUpgradeCheck = 2660;
+                TargetAttributes = {
+                    800000000000000000000001 = {CreatedOnToolsVersion = 26.6; };
+                    800000000000000000000002 = {CreatedOnToolsVersion = 26.6; };
+                };
+            };
+            buildConfigurationList = B00000000000000000000003;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = en;
+            hasScannedForEncodings = 0;
+            knownRegions = (en, Base, );
+            mainGroup = 600000000000000000000001;
+            productRefGroup = 600000000000000000000004;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (800000000000000000000001, 800000000000000000000002, );
+        };
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+        700000000000000000000001 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000001, 10000000000000000000000C, 10000000000000000000000D, 10000000000000000000000E, 10000000000000000000000F, 100000000000000000000010, 100000000000000000000011, 100000000000000000000012, 100000000000000000000013, 100000000000000000000014, ); runOnlyForDeploymentPostprocessing = 0; };
+        700000000000000000000002 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (100000000000000000000002, 100000000000000000000004, 100000000000000000000015, 100000000000000000000016, 100000000000000000000005, 100000000000000000000006, 100000000000000000000007, 100000000000000000000008, 100000000000000000000009, 10000000000000000000000A, 10000000000000000000000B, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+        A00000000000000000000001 = {isa = PBXTargetDependency; target = 800000000000000000000002; targetProxy = 300000000000000000000001; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+        C00000000000000000000001 = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; }; name = Debug; };
+        C00000000000000000000002 = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; }; name = Release; };
+        C00000000000000000000003 = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
+                CODE_SIGN_STYLE = Manual;
+                CURRENT_PROJECT_VERSION = 2;
+                DEVELOPMENT_TEAM = H59FJRN2AM;
+                ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
+                ENABLE_HARDENED_RUNTIME = YES;
+                GENERATE_INFOPLIST_FILE = NO;
+                HEADER_SEARCH_PATHS = ("$(PROJECT_DIR)/../include", "$(inherited)", );
+                INFOPLIST_FILE = App/Info.plist;
+                MACOSX_DEPLOYMENT_TARGET = 13.0;
+                MARKETING_VERSION = 2.1.2;
+                PRODUCT_BUNDLE_IDENTIFIER = com.niyien.gyroflow.finalcut;
+                PRODUCT_NAME = "GyroflowNiYien Final Cut";
+                OTHER_LDFLAGS = ("-framework", AppKit, "-framework", Metal, "$(PROJECT_DIR)/../build/libgyroflow_finalcut.a", );
+                SWIFT_OBJC_BRIDGING_HEADER = "App/GyroflowFinalCut-Bridging-Header.h";
+                SWIFT_VERSION = 5.0;
+            };
+            name = Debug;
+        };
+        C00000000000000000000004 = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
+                CODE_SIGN_STYLE = Manual;
+                CURRENT_PROJECT_VERSION = 2;
+                DEVELOPMENT_TEAM = H59FJRN2AM;
+                ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
+                ENABLE_HARDENED_RUNTIME = YES;
+                GENERATE_INFOPLIST_FILE = NO;
+                HEADER_SEARCH_PATHS = ("$(PROJECT_DIR)/../include", "$(inherited)", );
+                INFOPLIST_FILE = App/Info.plist;
+                MACOSX_DEPLOYMENT_TARGET = 13.0;
+                MARKETING_VERSION = 2.1.2;
+                PRODUCT_BUNDLE_IDENTIFIER = com.niyien.gyroflow.finalcut;
+                PRODUCT_NAME = "GyroflowNiYien Final Cut";
+                OTHER_LDFLAGS = ("-framework", AppKit, "-framework", Metal, "$(PROJECT_DIR)/../build/libgyroflow_finalcut.a", );
+                SWIFT_OBJC_BRIDGING_HEADER = "App/GyroflowFinalCut-Bridging-Header.h";
+                SWIFT_VERSION = 5.0;
+            };
+            name = Release;
+        };
+        C00000000000000000000005 = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = Effect/Effect.entitlements;
+                CODE_SIGN_STYLE = Manual;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CURRENT_PROJECT_VERSION = 2;
+                DEVELOPMENT_TEAM = H59FJRN2AM;
+                ENABLE_HARDENED_RUNTIME = YES;
+                EXECUTABLE_PREFIX = "";
+                FRAMEWORK_SEARCH_PATHS = ("/Library/Developer/SDKs/FxPlug.sdk/Library/Frameworks", "$(inherited)", );
+                HEADER_SEARCH_PATHS = ("$(PROJECT_DIR)/../include", "$(inherited)", );
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = Effect/Info.plist;
+                LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@loader_path/../Frameworks", );
+                MACH_O_TYPE = mh_execute;
+                MACOSX_DEPLOYMENT_TARGET = 13.0;
+                MARKETING_VERSION = 2.1.2;
+                OTHER_LDFLAGS = ("-framework", FxPlug, "-framework", PluginManager, "-framework", Metal, "-framework", AppKit, "-framework", UniformTypeIdentifiers, "-framework", CoreMedia, "$(PROJECT_DIR)/../build/libgyroflow_finalcut.a", );
+                PRODUCT_BUNDLE_IDENTIFIER = com.niyien.gyroflow.finalcut.effect;
+                PRODUCT_NAME = GyroflowNiYienFinalCutEffect;
+                WRAPPER_EXTENSION = pluginkit;
+            };
+            name = Debug;
+        };
+        C00000000000000000000006 = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_ENTITLEMENTS = Effect/Effect.entitlements;
+                CODE_SIGN_STYLE = Manual;
+                CLANG_ENABLE_OBJC_ARC = YES;
+                CURRENT_PROJECT_VERSION = 2;
+                DEVELOPMENT_TEAM = H59FJRN2AM;
+                ENABLE_HARDENED_RUNTIME = YES;
+                EXECUTABLE_PREFIX = "";
+                FRAMEWORK_SEARCH_PATHS = ("/Library/Developer/SDKs/FxPlug.sdk/Library/Frameworks", "$(inherited)", );
+                HEADER_SEARCH_PATHS = ("$(PROJECT_DIR)/../include", "$(inherited)", );
+                GENERATE_INFOPLIST_FILE = NO;
+                INFOPLIST_FILE = Effect/Info.plist;
+                LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@loader_path/../Frameworks", );
+                MACH_O_TYPE = mh_execute;
+                MACOSX_DEPLOYMENT_TARGET = 13.0;
+                MARKETING_VERSION = 2.1.2;
+                OTHER_LDFLAGS = ("-framework", FxPlug, "-framework", PluginManager, "-framework", Metal, "-framework", AppKit, "-framework", UniformTypeIdentifiers, "-framework", CoreMedia, "$(PROJECT_DIR)/../build/libgyroflow_finalcut.a", );
+                PRODUCT_BUNDLE_IDENTIFIER = com.niyien.gyroflow.finalcut.effect;
+                PRODUCT_NAME = GyroflowNiYienFinalCutEffect;
+                WRAPPER_EXTENSION = pluginkit;
+            };
+            name = Release;
+        };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+        B00000000000000000000001 = {isa = XCConfigurationList; buildConfigurations = (C00000000000000000000003, C00000000000000000000004, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        B00000000000000000000002 = {isa = XCConfigurationList; buildConfigurations = (C00000000000000000000005, C00000000000000000000006, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+        B00000000000000000000003 = {isa = XCConfigurationList; buildConfigurations = (C00000000000000000000001, C00000000000000000000002, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+    };
+    rootObject = 900000000000000000000001;
+}

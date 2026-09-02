@@ -6,6 +6,8 @@ on:
   push:
     tags:
       - 'v*'
+  schedule:
+    - cron: '23 3 * * *'
   pull_request:
   workflow_dispatch:
     inputs:
@@ -136,7 +138,7 @@ jobs:
 
   github_release:
     name: Create GitHub release
-    needs: build
+    needs: [build, build_finalcut]
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -149,3 +151,51 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
          files: ./**/*
+
+  build_finalcut:
+    name: Gyroflow NiYien Final Cut signed package
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: [self-hosted, macOS, fxplug-sdk]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/target
+            ~/.cargo
+          key: finalcut-gyroflow-plugins-0
+
+      - name: Install Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERTIFICATES }}
+          p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+
+      - name: Build and sign Final Cut package
+        env:
+          SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
+        run: python3 scripts/build_finalcut_package.py --output-dir release-finalcut
+
+      - name: Notarize, staple, and verify Final Cut package
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_ACCOUNT_USER }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_ACCOUNT_PASS }}
+        run: >-
+          python3 scripts/notarize_finalcut_package.py
+          --app "release-finalcut/GyroflowNiYien Final Cut.app"
+          --zip release-finalcut/GyroflowNiyien-FinalCut-macos.zip
+
+      - name: Upload directly consumable Final Cut zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: GyroflowNiyien-FinalCut-macos
+          path: release-finalcut/GyroflowNiyien-FinalCut-macos.zip
+          if-no-files-found: error

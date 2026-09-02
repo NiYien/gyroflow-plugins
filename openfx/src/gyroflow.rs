@@ -2400,7 +2400,7 @@ impl Execute for GyroflowPlugin {
                         None
                     } else {
                         log::info!(target: "app", "output_post_affine zoom={zoom} rot={rot} off=({off_x},{off_y})");
-                        Some(PostAffine { rotation_deg: rot, zoom, offset_norm: [off_x, off_y] })
+                        Some(PostAffine { rotation_deg: rot, zoom, scale_xy: [1.0, 1.0], offset_norm: [off_x, off_y] })
                     }
                 };
 

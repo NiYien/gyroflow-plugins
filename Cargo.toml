@@ -1,5 +1,5 @@
 [workspace]
-members = ["adobe", "common", "frei0r", "openfx"]
+members = ["adobe", "common", "finalcut", "frei0r", "openfx"]
 resolver = "2"
 
 [workspace.package]

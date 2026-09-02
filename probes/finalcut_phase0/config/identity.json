@@ -1,0 +1,8 @@
+{
+  "app_bundle_id": "com.niyien.gyroflow.finalcut",
+  "xpc_bundle_id": "com.niyien.gyroflow.finalcut.effect",
+  "group_uuid": "6E6AD8F0-BF38-4225-A087-9E58C3DAD88E",
+  "effect_uuid": "ABAD71F5-23F5-46F6-AB08-C11603168AA4",
+  "group_name": "NiYien",
+  "effect_name": "Gyroflow NiYien Phase 0"
+}

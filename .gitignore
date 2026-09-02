@@ -5,3 +5,12 @@ __dev
 /docs/superpowers
 /.codex
 /openspec
+/finalcut/build
+/finalcut/Xcode/build
+/release-finalcut
+/scripts/__pycache__
+/tests/__pycache__
+.DS_Store
+/docs/
+*.[mM][dD]
+openspec/

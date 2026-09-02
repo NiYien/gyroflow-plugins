@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Gyroflow NiYien Phase 0 Renderer</string>
+    <key>CFBundleExecutable</key>
+    <string>GyroflowNiYienPhase0Renderer</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.niyien.gyroflow.finalcut.effect</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Gyroflow NiYien Phase 0 Renderer</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>4</string>
+    <key>PlugInKit</key>
+    <dict>
+        <key>Attributes</key>
+        <dict>
+            <key>com.apple.protocol</key>
+            <string>FxPlug</string>
+            <key>com.apple.version</key>
+            <string>1.1</string>
+        </dict>
+        <key>PrincipalClass</key>
+        <string>FxPrincipal</string>
+        <key>Protocol</key>
+        <string>PROXPCProtocol</string>
+        <key>Subsystems</key>
+        <array>
+            <string>NSViewService_PKSubsystem</string>
+        </array>
+    </dict>
+    <key>ProPlugDictionaryVersion</key>
+    <string>1.0</string>
+    <key>ProPlugDynamicRegistration</key>
+    <false/>
+    <key>ProPlugPlugInGroupList</key>
+    <array>
+        <dict>
+            <key>groupName</key>
+            <string>NiYien</string>
+            <key>uuid</key>
+            <string>6E6AD8F0-BF38-4225-A087-9E58C3DAD88E</string>
+        </dict>
+    </array>
+    <key>ProPlugPlugInList</key>
+    <array>
+        <dict>
+            <key>className</key>
+            <string>GFPhase0Effect</string>
+            <key>displayName</key>
+            <string>Gyroflow NiYien Phase 0</string>
+            <key>group</key>
+            <string>6E6AD8F0-BF38-4225-A087-9E58C3DAD88E</string>
+            <key>infoString</key>
+            <string>Non-production Final Cut feasibility probe</string>
+            <key>protocolNames</key>
+            <array>
+                <string>FxFilter</string>
+            </array>
+            <key>uuid</key>
+            <string>ABAD71F5-23F5-46F6-AB08-C11603168AA4</string>
+            <key>version</key>
+            <string>1.0</string>
+        </dict>
+    </array>
+    <key>XPCService</key>
+    <dict>
+        <key>JoinExistingSession</key>
+        <true/>
+        <key>RunLoopType</key>
+        <string>_NSApplicationMain</string>
+        <key>ServiceType</key>
+        <string>Application</string>
+        <key>_AdditionalSubServices</key>
+        <dict>
+            <key>viewbridge</key>
+            <true/>
+        </dict>
+    </dict>
+</dict>
+</plist>
