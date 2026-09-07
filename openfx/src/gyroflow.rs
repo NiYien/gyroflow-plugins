@@ -893,6 +893,8 @@ define_params!(ParamHandler {
         ReloadProject       => reload_project:   ParamHandle<String>,
         OutputSizeSwap      => output_swap:      ParamHandle<String>,
         OutputSizeToTimeline=> output_size_fit:  ParamHandle<String>,
+        UseDynamicZoom      => use_dynamic_zoom: ParamHandle<String>,
+        UseStaticZoom       => use_static_zoom:  ParamHandle<String>,
         LoadedProject       => loaded_project:   ParamHandle<String>,
         LoadedPreset        => loaded_preset:    ParamHandle<String>,
         LoadedLens          => loaded_lens:      ParamHandle<String>,
@@ -2614,6 +2616,8 @@ impl Execute for GyroflowPlugin {
                         interpolation:            param_set.parameter("Interpolation")?,
                         integration_method:       param_set.parameter("IntegrationMethod")?,
                         zoom_mode:                param_set.parameter("ZoomMode")?,
+                        use_dynamic_zoom:         param_set.parameter("UseDynamicZoom")?,
+                        use_static_zoom:          param_set.parameter("UseStaticZoom")?,
 
                         loaded_project:           param_set.parameter("LoadedProject")?,
                         loaded_lens:              param_set.parameter("LoadedLens")?,
@@ -2888,7 +2892,7 @@ impl Execute for GyroflowPlugin {
                             Params::Smoothness                => { let _ = instance_data.smoothness_manually_edited.set_value(true); }
                             Params::LensCorrectionStrength    => { let _ = instance_data.lens_correction_strength_manually_edited.set_value(true); }
                             Params::HorizonLockAmount         => { let _ = instance_data.horizon_lock_amount_manually_edited.set_value(true); }
-                            Params::ZoomMode                  => { let _ = instance_data.zoom_mode_manually_edited.set_value(true); }
+                            Params::ZoomMode | Params::UseDynamicZoom | Params::UseStaticZoom => { let _ = instance_data.zoom_mode_manually_edited.set_value(true); }
                             Params::InputRotation             => { let _ = instance_data.input_rotation_manually_edited.set_value(true); }
                             _ => {}
                         }
