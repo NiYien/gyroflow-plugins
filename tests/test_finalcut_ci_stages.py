@@ -231,7 +231,8 @@ class CompilationStagesTests(unittest.TestCase):
         for step in distribution.split("      - name: "):
             if "Upload signed and notarized candidate" in step:
                 self.assertIn("if: steps.acceptance.outputs.delivery == 'candidate'", step)
-                self.assertIn("name: GyroflowNiyien-FinalCut-macos-candidate", step)
+                name = "GyroflowNiyien-FCP-macos-zip" if "candidate ZIP" in step else "GyroflowNiyien-FCP-macos"
+                self.assertIn(f"name: {name}\n", step)
             elif "Upload drag-to-Applications installer" in step or "Upload directly consumable" in step:
                 self.assertIn("if: steps.acceptance.outputs.ready == 'true'", step)
             else:

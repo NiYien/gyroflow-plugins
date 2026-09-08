@@ -328,14 +328,14 @@ jobs:
         if: steps.acceptance.outputs.delivery == 'candidate'
         uses: actions/upload-artifact@v4
         with:
-          name: GyroflowNiyien-FinalCut-macos-candidate
+          name: GyroflowNiyien-FCP-macos-zip
           path: release-finalcut/GyroflowNiyien-FinalCut-macos.zip
           if-no-files-found: error
       - name: Upload signed and notarized candidate DMG
         if: steps.acceptance.outputs.delivery == 'candidate'
         uses: actions/upload-artifact@v4
         with:
-          name: GyroflowNiyien-FinalCut-macos-candidate-dmg
+          name: GyroflowNiyien-FCP-macos
           path: release-finalcut/GyroflowNiyien-FinalCut-macos.dmg
           if-no-files-found: error
       - name: Upload release evidence separately
