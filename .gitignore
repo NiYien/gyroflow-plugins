@@ -14,3 +14,5 @@ __dev
 /docs/
 *.[mM][dD]
 openspec/
+/build-finalcut/
+/diagnostics-finalcut/

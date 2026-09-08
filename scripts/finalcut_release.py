@@ -74,13 +74,13 @@ def validate_core(root: Path, inputs: dict) -> None:
             raise ValueError("Production checkout must not override gyroflow-core locally")
 
 
-def require_acceptance(root: Path) -> None:
-    from build_finalcut_package import require_capacity_gate, require_geometry_gate
-    require_capacity_gate(False, root / "finalcut/config/capacity-gate.json")
-    require_geometry_gate(False, root / "finalcut/validation/geometry-support.json")
+def require_performance(root: Path) -> None:
     performance = json.loads((root / "finalcut/validation/performance-baseline.json").read_text())
     if performance.get("release_blocked", True) or performance.get("capture_status") != "captured":
         raise ValueError("Final Cut performance acceptance is not captured or release-ready")
+
+
+def require_runtime_evidence(root: Path) -> None:
     acceptance = json.loads((root / "finalcut/validation/release-acceptance.json").read_text())
     needed = ("branding", "localization", "upgrade", "file_access")
     if acceptance.get("release_blocked", True) or not all(acceptance.get(key) for key in needed):
@@ -94,10 +94,59 @@ def require_acceptance(root: Path) -> None:
             raise ValueError(f"Final Cut {key} acceptance evidence is missing")
 
 
+def acceptance_blockers(root: Path) -> list[str]:
+    from build_finalcut_package import require_capacity_gate, require_geometry_gate
+    checks = (
+        lambda: require_capacity_gate(False, root / "finalcut/config/capacity-gate.json"),
+        lambda: require_geometry_gate(False, root / "finalcut/validation/geometry-support.json"),
+        lambda: require_performance(root),
+        lambda: require_runtime_evidence(root),
+    )
+    blockers = []
+    for check in checks:
+        try:
+            check()
+        except json.JSONDecodeError:
+            raise
+        except (ValueError, RuntimeError) as error:
+            blockers.append(str(error))
+    return blockers
+
+
+def require_acceptance(root: Path) -> None:
+    blockers = acceptance_blockers(root)
+    if blockers:
+        raise ValueError("; ".join(blockers))
+
+
+def check_acceptance(directory: Path, root: Path = ROOT) -> dict:
+    blockers = acceptance_blockers(root)
+    result = {"ready": not blockers, "blockers": blockers}
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "release-readiness.json").write_text(json.dumps(result, indent=2) + "\n")
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if output_path:
+        with open(output_path, "a") as output:
+            output.write(f"ready={str(result['ready']).lower()}\n")
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as output:
+            output.write("### NiYien FCP release acceptance\n\n")
+            if blockers:
+                output.write("**Release pending acceptance.** Signing, notarization and installable artifacts are skipped.\n\n")
+                output.writelines(f"- {reason}\n" for reason in blockers)
+                output.write("\n")
+            else:
+                output.write("Acceptance passed; signing and notarization may proceed.\n\n")
+    if blockers and os.environ.get("GITHUB_ACTIONS") == "true":
+        message = "; ".join(blockers).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::warning title=Final Cut release pending acceptance::{message}")
+    return result
+
+
 def prepare(root: Path = ROOT) -> dict:
     inputs = json.loads((root / "finalcut/config/release-inputs.json").read_text())
     validate_core(root, inputs)
-    require_acceptance(root)
     cargo = (root / "Cargo.toml").read_text()
     base = re.search(r'\[workspace.package\]\s*version\s*=\s*"([^"]+)"', cargo)[1]
     marketing, build = version(base, os.environ.get("GITHUB_EVENT_NAME", ""),
@@ -179,12 +228,15 @@ def summarize(directory: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "summary", "check-toolchain", "check-signing"))
+    parser.add_argument("action", choices=("prepare", "summary", "check-toolchain", "check-signing",
+                                          "check-acceptance", "require-acceptance"))
     parser.add_argument("--directory", type=Path, default=ROOT / "release-finalcut")
     args = parser.parse_args()
     try:
         actions = {"prepare": prepare, "summary": lambda: summarize(args.directory),
-                   "check-toolchain": check_toolchain, "check-signing": check_signing}
+                   "check-toolchain": check_toolchain, "check-signing": check_signing,
+                   "check-acceptance": lambda: check_acceptance(args.directory),
+                   "require-acceptance": lambda: require_acceptance(ROOT) or {"ready": True}}
         print(json.dumps(actions[args.action](), indent=2))
     except (ValueError, OSError, KeyError, RuntimeError) as error:
         if os.environ.get("GITHUB_ACTIONS") == "true":
