@@ -4,6 +4,8 @@ _Static_assert(sizeof(GFTime) == 16, "GFTime must remain two signed 64-bit value
 _Static_assert(sizeof(GFFrameGeometry) == 256, "GFFrameGeometry ABI size changed");
 _Static_assert(offsetof(GFMetalRenderRequest, geometry) == 136,
                "GFMetalRenderRequest geometry offset changed");
+_Static_assert(sizeof(GFRouteDProjectInput) == 40,
+               "GFRouteDProjectInput ABI size changed");
 
 int main(void) {
     GFFinalCutInstance *(*create_instance)(GFError **) = gf_finalcut_instance_create;
@@ -18,11 +20,23 @@ int main(void) {
         gf_finalcut_instance_load_project_payload;
     GFStatus (*set_parameters)(GFFinalCutInstance *, const GFRenderParameters *, GFError **) =
         gf_finalcut_instance_set_render_parameters;
+    GFStatus (*get_parameters)(const GFFinalCutInstance *, GFRenderParameters *, GFError **) =
+        gf_finalcut_instance_get_project_render_parameters;
+    GFStatus (*decode_payload)(const uint8_t *, size_t, GFOwnedBytes *, GFError **) =
+        gf_finalcut_project_payload_decode;
     GFStatus (*patch_fcpxml)(const uint8_t *, size_t, const uint8_t *, size_t,
                             GFRouteDPatchResult *, GFError **) = gf_finalcut_route_d_patch;
-    GFStatus (*batch_patch_fcpxml)(const uint8_t *, size_t, const uint8_t *, size_t,
+    GFStatus (*batch_patch_fcpxml)(const uint8_t *, size_t,
                                   GFRouteDPatchResult *, GFError **) =
         gf_finalcut_route_d_batch_patch;
+    GFStatus (*rooted_batch_patch_fcpxml)(const uint8_t *, size_t,
+                                         const uint8_t *, size_t,
+                                         GFRouteDPatchResult *, GFError **) =
+        gf_finalcut_route_d_batch_patch_with_media_roots;
+    GFStatus (*snapshot_batch_patch_fcpxml)(const uint8_t *, size_t,
+                                           const GFRouteDProjectInput *, size_t,
+                                           GFRouteDPatchResult *, GFError **) =
+        gf_finalcut_route_d_batch_patch_with_project_inputs;
     GFStatus (*load_timing)(GFFinalCutInstance *, const uint8_t *, size_t,
                            const GFTimeRange *, const GFTimeRange *, GFError **) =
         gf_finalcut_instance_load_timing_payload;
@@ -41,8 +55,12 @@ int main(void) {
     (void)encode_payload;
     (void)load_payload;
     (void)set_parameters;
+    (void)get_parameters;
+    (void)decode_payload;
     (void)patch_fcpxml;
     (void)batch_patch_fcpxml;
+    (void)rooted_batch_patch_fcpxml;
+    (void)snapshot_batch_patch_fcpxml;
     (void)load_timing;
     (void)resolve_time;
     (void)render_metal;

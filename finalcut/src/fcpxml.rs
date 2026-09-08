@@ -1,7 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use num_bigint::BigInt;
@@ -18,7 +29,17 @@ const PROJECT_BANK_MANIFEST_VERSION: u32 = 1;
 const PROJECT_BANK_CHUNK_BYTES: usize = 416 * 1024;
 const PROJECT_BANK_CHUNKS: usize = 10;
 const PROJECT_BANK_MAXIMUM_BYTES: usize = 4 * 1024 * 1024;
+const RAW_PROJECT_TOO_LARGE: &str = "raw project exceeds the 256 MiB limit";
 const PROJECT_PARAMETER_KEY_PREFIX: &str = "9999/10013/10016/3/10036";
+const VISIBLE_PARAMETER_IDS: [(&str, u32); 7] = [
+    ("FOV", 2001),
+    ("Smoothness", 2002),
+    ("Lens Correction", 2003),
+    ("Horizon Lock", 2004),
+    ("Horizon Roll", 2005),
+    ("Zoom Mode", 2006),
+    ("Stabilization Overview", 2007),
+];
 const SUPPORTED_FCPXML_VERSIONS: &[&str] = &["1.12", "1.13", "1.14"];
 // Final Cut 12.3 normalizes evaluated retime values to this internal timescale
 // before applying the timeMap frame-sampling policy.
@@ -29,13 +50,40 @@ type Rational = Ratio<i128>;
 #[derive(Debug)]
 pub struct RouteDError {
     message: String,
+    category: RouteDErrorCategory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteDErrorCategory {
+    InvalidInput,
+    UnsafeStructure,
+    NoUpdateableTargets,
 }
 
 impl RouteDError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            category: RouteDErrorCategory::InvalidInput,
         }
+    }
+
+    fn unsafe_structure(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            category: RouteDErrorCategory::UnsafeStructure,
+        }
+    }
+
+    fn no_updateable_targets(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            category: RouteDErrorCategory::NoUpdateableTargets,
+        }
+    }
+
+    pub fn category(&self) -> RouteDErrorCategory {
+        self.category
     }
 }
 
@@ -57,20 +105,38 @@ pub struct RouteDPatchResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum BatchTargetAction {
-    Inserted,
-    Updated,
+    UpdatedProject,
+    TimingOnly,
     Skipped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchSkipReason {
+    MissingProject,
+    PermissionDenied,
+    InvalidProject,
+    IncompatibleProject,
+    PayloadTooLarge,
+    AmbiguousMedia,
+    UnsupportedStructure,
+    InvalidTiming,
+    BlockedGeometry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BatchTargetReport {
-    pub occurrence: Option<usize>,
+    pub occurrence: usize,
     pub clip_name: String,
     pub asset_ref: Option<String>,
     pub media_url: Option<String>,
+    pub expected_project_path: Option<String>,
+    pub project_display_name: Option<String>,
     pub action: BatchTargetAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<BatchSkipReason>,
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub geometry_status: Option<GeometryStatus>,
@@ -96,11 +162,9 @@ struct GeometryPreflight {
 pub struct BatchRouteDPatchResult {
     pub xml: Vec<u8>,
     pub original_project_name: String,
-    pub processed_project_name: String,
-    pub import_token: String,
     pub occurrence_count: usize,
-    pub inserted_count: usize,
-    pub updated_count: usize,
+    pub updated_project_count: usize,
+    pub timing_only_count: usize,
     pub skipped_count: usize,
     pub targets: Vec<BatchTargetReport>,
 }
@@ -162,6 +226,11 @@ struct ResolvedClip {
 struct Replacement {
     range: Range<usize>,
     value: String,
+}
+
+struct TargetPatchPlan {
+    replacements: Vec<Replacement>,
+    report: BatchTargetReport,
 }
 
 #[derive(Deserialize)]
@@ -247,7 +316,7 @@ fn resource_by_id<'a>(
         .filter(|node| node.has_tag_name(tag) && node.attribute("id") == Some(id))
         .collect();
     if matches.len() != 1 {
-        return Err(RouteDError::new(format!(
+        return Err(RouteDError::unsafe_structure(format!(
             "expected one {tag} resource for {id}, found {}",
             matches.len()
         )));
@@ -263,7 +332,7 @@ fn frame_duration_for_format(
     let format = resource_by_id(document, "format", format_id)?;
     let frame_duration = required_time(format, "frameDuration")?;
     if frame_duration <= Ratio::from_integer(0) {
-        return Err(RouteDError::new(format!(
+        return Err(RouteDError::unsafe_structure(format!(
             "{context} frameDuration must be positive"
         )));
     }
@@ -1005,6 +1074,19 @@ fn valid_lowercase_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn reserved_project_parameter_id_from_key(key: &str) -> Option<u32> {
+    let suffix = key.strip_prefix(&format!("{PROJECT_PARAMETER_KEY_PREFIX}/"))?;
+    if suffix.contains('/') {
+        return None;
+    }
+    let identifier = suffix.parse::<u32>().ok()?;
+    matches!(
+        identifier,
+        1901..=1906 | 1910..=1919 | 1930..=1939 | 2001..=2007
+    )
+    .then_some(identifier)
+}
+
 fn decode_project_bank(
     filter: Node<'_, '_>,
     occurrence: usize,
@@ -1015,11 +1097,7 @@ fn decode_project_bank(
         'B' => (1905_u32, 1930_u32),
         _ => return Err(RouteDError::new("internal project payload bank is unknown")),
     };
-    let manifest_name = format!("Project Payload Manifest {bank}");
-    let manifest_params: Vec<_> = filter
-        .children()
-        .filter(|node| node.has_tag_name("param") && node.attribute("name") == Some(&manifest_name))
-        .collect();
+    let manifest_params = parameter_with_production_id(filter, manifest_id);
     if manifest_params.len() > 1 {
         return Err(RouteDError::new(format!(
             "NiYien occurrence {occurrence} project payload bank {bank} has multiple manifests"
@@ -1061,44 +1139,18 @@ fn decode_project_bank(
             "NiYien occurrence {occurrence} project payload bank {bank} manifest bounds are invalid"
         )));
     }
-    let manifest_key = manifest_param.attribute("key").ok_or_else(|| {
-        RouteDError::new(format!(
-            "NiYien occurrence {occurrence} project payload bank {bank} manifest key is missing"
-        ))
-    })?;
-    let manifest_suffix = format!("/{manifest_id}");
-    let key_prefix = manifest_key
-        .strip_suffix(&manifest_suffix)
-        .ok_or_else(|| {
-            RouteDError::new(format!(
-                "NiYien occurrence {occurrence} project payload bank {bank} manifest key is unknown"
-            ))
-        })?
-        .to_string();
+    let key_prefix = PROJECT_PARAMETER_KEY_PREFIX.to_string();
 
     let mut payload = String::with_capacity(manifest.encoded_length);
     for index in 0..manifest.chunk_count {
-        let chunk_name = format!("Project Payload {bank} {:02}", index + 1);
-        let chunk_params: Vec<_> = filter
-            .children()
-            .filter(|node| {
-                node.has_tag_name("param") && node.attribute("name") == Some(&chunk_name)
-            })
-            .collect();
+        let chunk_params = parameter_with_production_id(filter, chunk_start + index as u32);
         if chunk_params.len() != 1 {
-            return Err(RouteDError::new(format!(
+            return Err(RouteDError::unsafe_structure(format!(
                 "NiYien occurrence {occurrence} project payload bank {bank} chunk {} is missing or ambiguous",
                 index + 1
             )));
         }
         let chunk = chunk_params[0];
-        let expected_key = format!("{key_prefix}/{}", chunk_start + index as u32);
-        if chunk.attribute("key") != Some(expected_key.as_str()) {
-            return Err(RouteDError::new(format!(
-                "NiYien occurrence {occurrence} project payload bank {bank} chunk {} key is unknown",
-                index + 1
-            )));
-        }
         let value = chunk.attribute("value").ok_or_else(|| {
             RouteDError::new(format!(
                 "NiYien occurrence {occurrence} project payload bank {bank} chunk {} has no value",
@@ -1111,7 +1163,7 @@ fn decode_project_bank(
             manifest.encoded_length - PROJECT_BANK_CHUNK_BYTES * (manifest.chunk_count - 1)
         };
         if !value.is_ascii() || value.len() != expected_length {
-            return Err(RouteDError::new(format!(
+            return Err(RouteDError::unsafe_structure(format!(
                 "NiYien occurrence {occurrence} project payload bank {bank} chunk {} length is invalid",
                 index + 1
             )));
@@ -1152,7 +1204,7 @@ fn project_payload_key_prefix(
     let selected = match (candidate_a, candidate_b) {
         (Some(first), Some(second)) => {
             if first.key_prefix != second.key_prefix {
-                return Err(RouteDError::new(format!(
+                return Err(RouteDError::unsafe_structure(format!(
                     "NiYien occurrence {occurrence} project payload banks have different key prefixes"
                 )));
             }
@@ -1176,12 +1228,7 @@ fn project_payload_key_prefix(
         return Ok(selected.key_prefix);
     }
 
-    let legacy_params: Vec<_> = filter
-        .children()
-        .filter(|node| {
-            node.has_tag_name("param") && node.attribute("name") == Some("Project Payload")
-        })
-        .collect();
+    let legacy_params = parameter_with_production_id(filter, 1902);
     if legacy_params.len() > 1 {
         return Err(RouteDError::new(format!(
             "NiYien occurrence {occurrence} has multiple legacy Project Payload parameters"
@@ -1192,19 +1239,7 @@ fn project_payload_key_prefix(
             .attribute("value")
             .is_some_and(|value| !value.is_empty())
         {
-            let key = legacy.attribute("key").ok_or_else(|| {
-                RouteDError::new(format!(
-                    "NiYien occurrence {occurrence} legacy Project Payload key is missing"
-                ))
-            })?;
-            return key
-                .strip_suffix("/1902")
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    RouteDError::new(format!(
-                        "NiYien occurrence {occurrence} legacy Project Payload key is unknown"
-                    ))
-                });
+            return Ok(PROJECT_PARAMETER_KEY_PREFIX.to_string());
         }
     }
     if let Some(error) = error_a.or(error_b) {
@@ -1250,12 +1285,7 @@ fn selected_valid_project_payload(
         return Ok(Some(candidate));
     }
 
-    let legacy: Vec<_> = filter
-        .children()
-        .filter(|node| {
-            node.has_tag_name("param") && node.attribute("name") == Some("Project Payload")
-        })
-        .collect();
+    let legacy = parameter_with_production_id(filter, 1902);
     if legacy.len() > 1 {
         return Err(RouteDError::new(format!(
             "NiYien occurrence {occurrence} has multiple legacy Project Payload parameters"
@@ -1268,104 +1298,11 @@ fn selected_valid_project_payload(
     if payload.is_empty() || validate_encoded_project_payload(payload).is_err() {
         return Ok(None);
     }
-    let key = legacy.attribute("key").ok_or_else(|| {
-        RouteDError::new(format!(
-            "NiYien occurrence {occurrence} legacy Project Payload key is missing"
-        ))
-    })?;
-    let key_prefix = key.strip_suffix("/1902").ok_or_else(|| {
-        RouteDError::new(format!(
-            "NiYien occurrence {occurrence} legacy Project Payload key is unknown"
-        ))
-    })?;
     Ok(Some(ProjectBankCandidate {
         generation: 0,
         payload: payload.to_string(),
-        key_prefix: key_prefix.to_string(),
+        key_prefix: PROJECT_PARAMETER_KEY_PREFIX.to_string(),
     }))
-}
-
-fn project_parameter_id(name: &str) -> Result<Option<u32>, RouteDError> {
-    let fixed = match name {
-        "Instance Identity" => Some(1901),
-        "Project Payload" => Some(1902),
-        "Timing Payload" => Some(1903),
-        "Project Payload Manifest A" => Some(1904),
-        "Project Payload Manifest B" => Some(1905),
-        _ => None,
-    };
-    if fixed.is_some() {
-        return Ok(fixed);
-    }
-    for (prefix, start) in [("Project Payload A ", 1910), ("Project Payload B ", 1930)] {
-        if let Some(index) = name.strip_prefix(prefix) {
-            let index = index.parse::<u32>().map_err(|_| {
-                RouteDError::new(format!("project payload parameter name is invalid: {name}"))
-            })?;
-            if index == 0 || index as usize > PROJECT_BANK_CHUNKS {
-                return Err(RouteDError::new(format!(
-                    "project payload parameter index is invalid: {name}"
-                )));
-            }
-            return Ok(Some(start + index - 1));
-        }
-    }
-    Ok(None)
-}
-
-fn project_parameter_key_prefix(
-    filter: Node<'_, '_>,
-    occurrence: usize,
-) -> Result<String, RouteDError> {
-    let mut prefixes = HashSet::new();
-    let mut names = HashSet::new();
-    for parameter in filter.children().filter(|node| node.has_tag_name("param")) {
-        let Some(name) = parameter.attribute("name") else {
-            continue;
-        };
-        let Some(parameter_id) = project_parameter_id(name)? else {
-            continue;
-        };
-        if !names.insert(name) {
-            return Err(RouteDError::new(format!(
-                "NiYien occurrence {occurrence} has duplicate {name} parameters"
-            )));
-        }
-        let key = parameter.attribute("key").ok_or_else(|| {
-            RouteDError::new(format!(
-                "NiYien occurrence {occurrence} {name} key is missing"
-            ))
-        })?;
-        let suffix = format!("/{parameter_id}");
-        let prefix = key.strip_suffix(&suffix).ok_or_else(|| {
-            RouteDError::new(format!(
-                "NiYien occurrence {occurrence} {name} key is unknown"
-            ))
-        })?;
-        prefixes.insert(prefix.to_string());
-    }
-    if prefixes.len() > 1 {
-        return Err(RouteDError::new(format!(
-            "NiYien occurrence {occurrence} project parameter key prefix is ambiguous"
-        )));
-    }
-    Ok(prefixes
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| PROJECT_PARAMETER_KEY_PREFIX.to_string()))
-}
-
-fn project_parameter_ranges(filter: Node<'_, '_>) -> Result<Vec<Range<usize>>, RouteDError> {
-    let mut ranges = Vec::new();
-    for parameter in filter.children().filter(|node| node.has_tag_name("param")) {
-        let Some(name) = parameter.attribute("name") else {
-            continue;
-        };
-        if project_parameter_id(name)?.is_some() && name != "Timing Payload" {
-            ranges.push(parameter.range());
-        }
-    }
-    Ok(ranges)
 }
 
 fn route_d_instance_identity(input: &[u8], node_offset: usize) -> String {
@@ -1431,22 +1368,194 @@ fn encoded_project_banks(
     Ok(parameters)
 }
 
-enum SiblingProject {
-    Missing {
-        media_url: String,
-        expected_path: PathBuf,
-    },
-    Found {
-        media_url: String,
-        payload: String,
-    },
+struct SiblingProject {
+    media_url: String,
+    expected_path: PathBuf,
+    display_name: String,
+    bytes: Vec<u8>,
+    payload: String,
+    parameters: super::GFRenderParameters,
 }
 
-fn sibling_project_for_asset(
+struct SiblingProjectError {
+    reason: BatchSkipReason,
+    detail: String,
+    media_url: Option<String>,
+    expected_path: Option<PathBuf>,
+    display_name: Option<String>,
+}
+
+fn read_bounded_project_file(mut file: File) -> io::Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sibling project is not a regular file",
+        ));
+    }
+    if metadata.len() > super::MAX_PROJECT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            RAW_PROJECT_TOO_LARGE,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(super::MAX_PROJECT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > super::MAX_PROJECT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            RAW_PROJECT_TOO_LARGE,
+        ));
+    }
+    Ok(bytes)
+}
+
+fn open_project_file_nofollow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    options.open(path)
+}
+
+fn read_project_file(path: &Path) -> io::Result<Vec<u8>> {
+    read_bounded_project_file(open_project_file_nofollow(path)?)
+}
+
+struct AuthorizedRoot {
+    selected: PathBuf,
+    canonical: PathBuf,
+}
+
+fn canonical_authorized_roots(roots: &[PathBuf]) -> Result<Vec<AuthorizedRoot>, RouteDError> {
+    let mut authorized = Vec::new();
+    for root in roots {
+        let resolved = std::fs::canonicalize(root).map_err(|error| {
+            RouteDError::new(format!(
+                "authorized media root {} cannot be resolved: {error}",
+                root.display()
+            ))
+        })?;
+        if !resolved.is_dir() {
+            return Err(RouteDError::new(format!(
+                "authorized media root is not a directory: {}",
+                root.display()
+            )));
+        }
+        if !authorized
+            .iter()
+            .any(|entry: &AuthorizedRoot| entry.canonical == resolved)
+        {
+            authorized.push(AuthorizedRoot {
+                selected: root.to_path_buf(),
+                canonical: resolved,
+            });
+        }
+    }
+    Ok(authorized)
+}
+
+#[cfg(unix)]
+fn open_relative_project_nofollow(root: &Path, relative: &Path) -> io::Result<File> {
+    let mut root_options = OpenOptions::new();
+    root_options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    let mut current = root_options.open(root)?;
+    let components: Vec<_> = relative.components().collect();
+    if components.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sibling project path resolves to the authorized directory",
+        ));
+    }
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "sibling project path escapes the authorized media root",
+            ));
+        };
+        let name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sibling project path contains an embedded NUL",
+            )
+        })?;
+        let final_component = index + 1 == components.len();
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | if final_component {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+        let descriptor = unsafe { libc::openat(current.as_raw_fd(), name.as_ptr(), flags) };
+        if descriptor < 0 {
+            let error = io::Error::last_os_error();
+            if !final_component
+                && matches!(
+                    error.raw_os_error(),
+                    Some(code) if code == libc::ELOOP || code == libc::ENOTDIR
+                )
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "sibling project ancestor is not a no-follow directory",
+                ));
+            }
+            return Err(error);
+        }
+        current = unsafe { File::from_raw_fd(descriptor) };
+    }
+    Ok(current)
+}
+
+fn read_authorized_project_file(path: &Path, roots: &[AuthorizedRoot]) -> io::Result<Vec<u8>> {
+    for root in roots {
+        let relative = path
+            .strip_prefix(&root.selected)
+            .or_else(|_| path.strip_prefix(&root.canonical));
+        let Ok(relative) = relative else {
+            continue;
+        };
+        #[cfg(unix)]
+        let file = open_relative_project_nofollow(&root.canonical, relative)?;
+        #[cfg(not(unix))]
+        let file = {
+            let canonical = std::fs::canonicalize(path)?;
+            if !canonical.starts_with(&root.canonical) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "sibling project path escapes the authorized media root",
+                ));
+            }
+            open_project_file_nofollow(&canonical)?
+        };
+        return read_bounded_project_file(file);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "sibling project is outside the authorized media roots",
+    ))
+}
+
+fn sibling_project_for_asset_with_reader(
     document: &Document<'_>,
     asset_ref: &str,
-) -> Result<SiblingProject, RouteDError> {
-    let asset = resource_by_id(document, "asset", asset_ref)?;
+    project_reader: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> Result<SiblingProject, SiblingProjectError> {
+    let asset =
+        resource_by_id(document, "asset", asset_ref).map_err(|error| SiblingProjectError {
+            reason: BatchSkipReason::UnsupportedStructure,
+            detail: error.to_string(),
+            media_url: None,
+            expected_path: None,
+            display_name: None,
+        })?;
     let originals: Vec<_> = asset
         .children()
         .filter(|node| {
@@ -1454,73 +1563,146 @@ fn sibling_project_for_asset(
         })
         .collect();
     if originals.len() != 1 {
-        return Err(RouteDError::new(format!(
-            "asset {asset_ref} must have exactly one original-media URL; found {}",
-            originals.len()
-        )));
+        return Err(SiblingProjectError {
+            reason: BatchSkipReason::AmbiguousMedia,
+            detail: format!(
+                "asset {asset_ref} must have exactly one original-media URL; found {}",
+                originals.len()
+            ),
+            media_url: None,
+            expected_path: None,
+            display_name: None,
+        });
     }
     let media_url = originals[0]
         .attribute("src")
-        .ok_or_else(|| {
-            RouteDError::new(format!("asset {asset_ref} original-media URL is missing"))
+        .ok_or_else(|| SiblingProjectError {
+            reason: BatchSkipReason::AmbiguousMedia,
+            detail: format!("asset {asset_ref} original-media URL is missing"),
+            media_url: None,
+            expected_path: None,
+            display_name: None,
         })?
         .to_string();
-    let parsed = url::Url::parse(&media_url).map_err(|error| {
-        RouteDError::new(format!(
-            "asset {asset_ref} original-media URL is invalid: {error}"
-        ))
+    let parsed = url::Url::parse(&media_url).map_err(|error| SiblingProjectError {
+        reason: BatchSkipReason::AmbiguousMedia,
+        detail: format!("asset {asset_ref} original-media URL is invalid: {error}"),
+        media_url: Some(media_url.clone()),
+        expected_path: None,
+        display_name: None,
     })?;
     if parsed.scheme() != "file" {
-        return Err(RouteDError::new(format!(
-            "asset {asset_ref} original-media URL is not local"
-        )));
-    }
-    let media_path = parsed.to_file_path().map_err(|_| {
-        RouteDError::new(format!(
-            "asset {asset_ref} original-media URL is not a local path"
-        ))
-    })?;
-    let candidate = sibling_project_path(&media_path)?;
-    if !candidate.exists() {
-        return Ok(SiblingProject::Missing {
-            media_url,
-            expected_path: candidate,
+        return Err(SiblingProjectError {
+            reason: BatchSkipReason::IncompatibleProject,
+            detail: format!("asset {asset_ref} original-media URL is not local"),
+            media_url: Some(media_url),
+            expected_path: None,
+            display_name: None,
         });
     }
-    let metadata = std::fs::symlink_metadata(&candidate).map_err(|error| {
-        RouteDError::new(format!(
-            "unable to inspect sibling project {}: {error}",
-            candidate.display()
-        ))
+    let media_path = parsed.to_file_path().map_err(|_| SiblingProjectError {
+        reason: BatchSkipReason::IncompatibleProject,
+        detail: format!("asset {asset_ref} original-media URL is not a local path"),
+        media_url: Some(media_url.clone()),
+        expected_path: None,
+        display_name: None,
     })?;
-    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-        return Err(RouteDError::new(format!(
-            "sibling project is not a regular file: {}",
-            candidate.display()
-        )));
-    }
-    let bytes = std::fs::read(&candidate).map_err(|error| {
-        RouteDError::new(format!(
+    let candidate = sibling_project_path(&media_path).map_err(|error| SiblingProjectError {
+        reason: BatchSkipReason::IncompatibleProject,
+        detail: error.to_string(),
+        media_url: Some(media_url.clone()),
+        expected_path: None,
+        display_name: None,
+    })?;
+    let display_name = candidate
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| SiblingProjectError {
+            reason: BatchSkipReason::IncompatibleProject,
+            detail: format!(
+                "sibling project path has no filename: {}",
+                candidate.display()
+            ),
+            media_url: Some(media_url.clone()),
+            expected_path: Some(candidate.clone()),
+            display_name: None,
+        })?;
+    let bytes = project_reader(&candidate).map_err(|error| SiblingProjectError {
+        reason: match error.kind() {
+            io::ErrorKind::NotFound => BatchSkipReason::MissingProject,
+            io::ErrorKind::PermissionDenied => BatchSkipReason::PermissionDenied,
+            io::ErrorKind::InvalidData if error.to_string().contains(RAW_PROJECT_TOO_LARGE) => {
+                BatchSkipReason::PayloadTooLarge
+            }
+            _ => BatchSkipReason::IncompatibleProject,
+        },
+        detail: format!(
             "unable to read sibling project {}: {error}",
             candidate.display()
-        ))
+        ),
+        media_url: Some(media_url.clone()),
+        expected_path: Some(candidate.clone()),
+        display_name: Some(display_name.clone()),
     })?;
-    super::parse_project(&bytes).map_err(|error| {
-        RouteDError::new(format!(
+    let project = super::parse_project(&bytes).map_err(|error| SiblingProjectError {
+        reason: BatchSkipReason::InvalidProject,
+        detail: format!(
             "sibling project {} is invalid: {error}",
             candidate.display()
-        ))
+        ),
+        media_url: Some(media_url.clone()),
+        expected_path: Some(candidate.clone()),
+        display_name: Some(display_name.clone()),
     })?;
-    let payload = super::encode_project_payload(&bytes).map_err(RouteDError::new)?;
-    let payload = String::from_utf8(payload)
-        .map_err(|_| RouteDError::new("encoded sibling project payload is not ASCII"))?;
-    if payload.len() > PROJECT_BANK_MAXIMUM_BYTES {
-        return Err(RouteDError::new(format!(
-            "sibling project {} encodes beyond the 4 MiB limit",
+    let parameters = super::snapshot_project_parameters(&project.manager).map_err(|error| {
+        SiblingProjectError {
+            reason: BatchSkipReason::InvalidProject,
+            detail: format!(
+                "sibling project {} parameters are invalid: {error}",
+                candidate.display()
+            ),
+            media_url: Some(media_url.clone()),
+            expected_path: Some(candidate.clone()),
+            display_name: Some(display_name.clone()),
+        }
+    })?;
+    let payload = super::encode_project_payload(&bytes).map_err(|error| SiblingProjectError {
+        reason: BatchSkipReason::InvalidProject,
+        detail: format!(
+            "sibling project {} cannot be encoded: {error}",
             candidate.display()
-        )));
+        ),
+        media_url: Some(media_url.clone()),
+        expected_path: Some(candidate.clone()),
+        display_name: Some(display_name.clone()),
+    })?;
+    let payload = String::from_utf8(payload).map_err(|_| SiblingProjectError {
+        reason: BatchSkipReason::InvalidProject,
+        detail: "encoded sibling project payload is not ASCII".to_string(),
+        media_url: Some(media_url.clone()),
+        expected_path: Some(candidate.clone()),
+        display_name: Some(display_name.clone()),
+    })?;
+    if payload.len() > PROJECT_BANK_MAXIMUM_BYTES {
+        return Err(SiblingProjectError {
+            reason: BatchSkipReason::PayloadTooLarge,
+            detail: format!(
+                "sibling project {} encodes beyond the 4 MiB limit",
+                candidate.display()
+            ),
+            media_url: Some(media_url),
+            expected_path: Some(candidate),
+            display_name: Some(display_name),
+        });
     }
-    Ok(SiblingProject::Found { media_url, payload })
+    Ok(SiblingProject {
+        media_url,
+        expected_path: candidate,
+        display_name,
+        bytes,
+        payload,
+        parameters,
+    })
 }
 
 fn sibling_project_path(media_path: &Path) -> Result<PathBuf, RouteDError> {
@@ -1558,51 +1740,6 @@ fn filter_children_replacement(
         }
     }
     Err(RouteDError::new("NiYien filter-video is not expandable"))
-}
-
-fn clip_filter_replacement(
-    input: &str,
-    clip: Node<'_, '_>,
-    filter: String,
-) -> Result<Replacement, RouteDError> {
-    if let Some(last_filter) = clip
-        .children()
-        .filter(|node| node.has_tag_name("filter-video"))
-        .next_back()
-    {
-        let insertion = last_filter.range().end;
-        return Ok(Replacement {
-            range: insertion..insertion,
-            value: filter,
-        });
-    }
-    if let Some(later_child) = clip
-        .children()
-        .find(|node| matches!(node.tag_name().name(), "filter-audio" | "metadata"))
-    {
-        let insertion = later_child.range().start;
-        return Ok(Replacement {
-            range: insertion..insertion,
-            value: filter,
-        });
-    }
-    let range = clip.range();
-    let source = &input[range.clone()];
-    let closing_tag = format!("</{}>", clip.tag_name().name());
-    if let Some(offset) = source.rfind(&closing_tag) {
-        let insertion = range.start + offset;
-        return Ok(Replacement {
-            range: insertion..insertion,
-            value: filter,
-        });
-    }
-    if let Some(offset) = source.rfind("/>") {
-        return Ok(Replacement {
-            range: range.start + offset..range.end,
-            value: format!(">{filter}{closing_tag}"),
-        });
-    }
-    Err(RouteDError::new("asset-clip is not expandable"))
 }
 
 fn clip_name(clip: Node<'_, '_>, asset_ref: &str) -> String {
@@ -1784,7 +1921,7 @@ fn finite_values(
                 RouteDError::new(format!("{context} values must be finite numbers"))
             })?;
             if !component.is_finite() {
-                return Err(RouteDError::new(format!(
+                return Err(RouteDError::unsafe_structure(format!(
                     "{context} values must be finite numbers"
                 )));
             }
@@ -1809,12 +1946,42 @@ fn validate_scale(values: &[f64], context: &str) -> Result<(), RouteDError> {
 
 fn parameter_kind(name: &str, parent: Option<GeometryValueKind>) -> Option<GeometryValueKind> {
     match name.trim() {
-        "位置" | "锚点" => return Some(GeometryValueKind::Point),
-        "缩放" | "缩放（全部）" | "缩放 X" | "缩放 Y" => {
+        "位置"
+        | "锚点"
+        | "錨點"
+        | "アンカー"
+        | "위치"
+        | "앵커"
+        | "Положение"
+        | "Привязка"
+        | "Опорная точка" => return Some(GeometryValueKind::Point),
+        "缩放"
+        | "缩放（全部）"
+        | "缩放 X"
+        | "缩放 Y"
+        | "縮放"
+        | "縮放（全部）"
+        | "縮放 X"
+        | "縮放 Y"
+        | "調整"
+        | "調整（すべて）"
+        | "調整 X"
+        | "調整 Y"
+        | "크기"
+        | "크기 조절"
+        | "크기(전체)"
+        | "크기 X"
+        | "크기 Y"
+        | "Масштаб"
+        | "Масштаб (все)"
+        | "Масштаб X"
+        | "Масштаб Y" => {
             return Some(GeometryValueKind::Scale);
         }
-        "旋转" | "左" | "上" | "右" | "下" => return Some(GeometryValueKind::Scalar),
-        "全部" => return parent,
+        "旋转" | "旋轉" | "回転" | "회전" | "Поворот" | "左" | "上" | "右" | "下" | "왼쪽"
+        | "위" | "위쪽" | "오른쪽" | "아래" | "아래쪽" | "Слева" | "Сверху" | "Справа"
+        | "Снизу" => return Some(GeometryValueKind::Scalar),
+        "全部" | "すべて" | "전체" | "Все" => return parent,
         _ => {}
     }
     let normalized: String = name
@@ -2134,10 +2301,10 @@ fn validate_static_crop_extent(
 
 fn crop_edge(name: &str) -> Option<CropEdge> {
     match name.trim() {
-        "左" => return Some(CropEdge::Left),
-        "上" => return Some(CropEdge::Top),
-        "右" => return Some(CropEdge::Right),
-        "下" => return Some(CropEdge::Bottom),
+        "左" | "왼쪽" | "Слева" => return Some(CropEdge::Left),
+        "上" | "위" | "위쪽" | "Сверху" => return Some(CropEdge::Top),
+        "右" | "오른쪽" | "Справа" => return Some(CropEdge::Right),
+        "下" | "아래" | "아래쪽" | "Снизу" => return Some(CropEdge::Bottom),
         _ => {}
     }
     let normalized: String = name
@@ -2671,40 +2838,6 @@ fn geometry_preflight(
     })
 }
 
-fn is_unsupported_container(node: Node<'_, '_>) -> bool {
-    matches!(
-        node.tag_name().name(),
-        "ref-clip" | "sync-clip" | "mc-clip" | "multicam" | "compound-clip"
-    )
-}
-
-fn is_supported_batch_leaf(clip: Node<'_, '_>, project: Node<'_, '_>) -> bool {
-    if !matches!(clip.tag_name().name(), "asset-clip" | "clip") {
-        return false;
-    }
-    if clip
-        .descendants()
-        .skip(1)
-        .any(|node| node.has_tag_name("asset-clip"))
-    {
-        return false;
-    }
-    let mut reached_project = false;
-    for ancestor in clip.ancestors().skip(1) {
-        if ancestor == project {
-            reached_project = true;
-            break;
-        }
-        if is_unsupported_container(ancestor)
-            || ancestor.has_tag_name("media")
-            || ancestor.has_tag_name("clip")
-        {
-            return false;
-        }
-    }
-    reached_project
-}
-
 fn apply_replacements(
     input: &str,
     mut replacements: Vec<Replacement>,
@@ -2722,9 +2855,490 @@ fn apply_replacements(
     Ok(output)
 }
 
-pub fn patch_fcpxml_project_batch(
+fn parameter_with_production_id<'a, 'input>(
+    filter: Node<'a, 'input>,
+    parameter_id: u32,
+) -> Vec<Node<'a, 'input>> {
+    let expected_key = format!("{PROJECT_PARAMETER_KEY_PREFIX}/{parameter_id}");
+    filter
+        .children()
+        .filter(|node| {
+            node.has_tag_name("param") && node.attribute("key") == Some(expected_key.as_str())
+        })
+        .collect()
+}
+
+fn validate_global_resource_ids(document: &Document<'_>) -> Result<(), RouteDError> {
+    let resources: Vec<_> = document
+        .root_element()
+        .children()
+        .filter(|node| node.has_tag_name("resources"))
+        .collect();
+    if resources.len() != 1 {
+        return Err(RouteDError::unsafe_structure(format!(
+            "expected exactly one global resources table, found {}",
+            resources.len()
+        )));
+    }
+    let mut seen = HashMap::new();
+    for resource in resources[0].children().filter(Node::is_element) {
+        let Some(identifier) = resource.attribute("id") else {
+            continue;
+        };
+        if let Some(previous_tag) = seen.insert(identifier, resource.tag_name().name()) {
+            return Err(RouteDError::unsafe_structure(format!(
+                "duplicate global resource id {identifier} is used by {previous_tag} and {}",
+                resource.tag_name().name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_global_reserved_parameter_keys(filters: &[Node<'_, '_>]) -> Result<(), RouteDError> {
+    for (index, filter) in filters.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for parameter in filter.children().filter(|node| node.has_tag_name("param")) {
+            let Some(key) = parameter.attribute("key") else {
+                continue;
+            };
+            if reserved_project_parameter_id_from_key(key).is_some()
+                && !seen.insert(key.to_string())
+            {
+                return Err(RouteDError::unsafe_structure(format!(
+                    "NiYien occurrence {} has duplicate reserved parameter key {key}",
+                    index + 1
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn visible_parameter_values(parameters: &super::GFRenderParameters) -> [String; 7] {
+    [
+        parameters.fov.to_string(),
+        parameters.smoothness.to_string(),
+        parameters.lens_correction.to_string(),
+        parameters.horizon_lock_amount.to_string(),
+        parameters.horizon_lock_roll.to_string(),
+        parameters.zoom_mode.to_string(),
+        parameters.overview.to_string(),
+    ]
+}
+
+fn updated_project_parameters(
     input: &[u8],
-    requested_name: Option<&str>,
+    filter: Node<'_, '_>,
+    occurrence: usize,
+    sibling: &SiblingProject,
+) -> Result<(Vec<Replacement>, String), RouteDError> {
+    let mut replacements = Vec::new();
+    let mut ranges = Vec::new();
+    let replaced_ids: HashSet<u32> = [
+        1901_u32, 1902, 1904, 1905, 1906, 1910, 1911, 1912, 1913, 1914, 1915, 1916, 1917, 1918,
+        1919, 1930, 1931, 1932, 1933, 1934, 1935, 1936, 1937, 1938, 1939, 2001, 2002, 2003, 2004,
+        2005, 2006, 2007,
+    ]
+    .into_iter()
+    .collect();
+    for parameter in filter.children().filter(|node| node.has_tag_name("param")) {
+        let known_by_key = parameter
+            .attribute("key")
+            .and_then(reserved_project_parameter_id_from_key)
+            .is_some_and(|id| replaced_ids.contains(&id));
+        if known_by_key {
+            ranges.push(parameter.range());
+        }
+    }
+    for range in ranges {
+        replacements.push(Replacement {
+            range,
+            value: String::new(),
+        });
+    }
+
+    let identity = route_d_instance_identity(input, filter.range().start);
+    let mut appended =
+        encoded_project_banks(&sibling.payload, PROJECT_PARAMETER_KEY_PREFIX, &identity)?;
+    appended.push_str(&format!(
+        "<param name=\"Project Display Name\" key=\"{PROJECT_PARAMETER_KEY_PREFIX}/1906\" value=\"{}\"/>",
+        xml_attribute_escape(&sibling.display_name)
+    ));
+    let values = visible_parameter_values(&sibling.parameters);
+    for ((canonical_name, parameter_id), value) in VISIBLE_PARAMETER_IDS.iter().zip(values.iter()) {
+        let existing = parameter_with_production_id(filter, *parameter_id);
+        if existing.len() > 1 {
+            return Err(RouteDError::new(format!(
+                "NiYien occurrence {occurrence} has duplicate /{parameter_id} parameters"
+            )));
+        }
+        let name = existing
+            .first()
+            .and_then(|node| node.attribute("name"))
+            .unwrap_or(canonical_name);
+        appended.push_str(&format!(
+            "<param name=\"{}\" key=\"{PROJECT_PARAMETER_KEY_PREFIX}/{parameter_id}\" value=\"{}\"/>",
+            xml_attribute_escape(name),
+            xml_attribute_escape(value)
+        ));
+    }
+    Ok((replacements, appended))
+}
+
+fn timing_replacements(
+    document: &Document<'_>,
+    input: &str,
+    project: Node<'_, '_>,
+    filter: Node<'_, '_>,
+    occurrence: usize,
+    appended: &mut String,
+) -> Result<Vec<Replacement>, RouteDError> {
+    let version = document
+        .root_element()
+        .attribute("version")
+        .ok_or_else(|| RouteDError::new("FCPXML version is missing"))?;
+    let resolved = resolve_clip(document, project, filter, version)?;
+    let timing_parameters = parameter_with_production_id(filter, 1903);
+    if timing_parameters.len() > 1 {
+        return Err(RouteDError::new(format!(
+            "NiYien occurrence {occurrence} has multiple Timing Payload parameters"
+        )));
+    }
+    let bounds = Bounds {
+        start: rational_string(&resolved.bounds_start),
+        duration: rational_string(&resolved.duration),
+    };
+    let payload = TimingPayload {
+        version: TIMING_PAYLOAD_VERSION,
+        fcpxml_version: version.to_string(),
+        occurrence,
+        structure_sha256: resolved.structure_sha256,
+        asset_ref: resolved.asset_ref,
+        mapping: resolved.mapping,
+        effect_bounds: bounds.clone(),
+        input_bounds: bounds,
+        render_ready_snapshot: true,
+    };
+    let payload = serde_json::to_vec(&payload)
+        .map(|bytes| STANDARD.encode(bytes))
+        .map_err(|error| RouteDError::new(format!("timing payload encoding failed: {error}")))?;
+    if let Some(parameter) = timing_parameters.first() {
+        let value = parameter.attribute_node("value").ok_or_else(|| {
+            RouteDError::new(format!(
+                "NiYien occurrence {occurrence} Timing Payload has no value"
+            ))
+        })?;
+        Ok(vec![Replacement {
+            range: attribute_value_range(input, value)?,
+            value: payload,
+        }])
+    } else {
+        appended.push_str(&format!(
+            "<param name=\"Timing Payload\" key=\"{PROJECT_PARAMETER_KEY_PREFIX}/1903\" value=\"{}\"/>",
+            xml_attribute_escape(&payload)
+        ));
+        Ok(Vec::new())
+    }
+}
+
+fn skipped_report(
+    occurrence: usize,
+    clip_name: String,
+    asset_ref: Option<String>,
+    error: SiblingProjectError,
+) -> BatchTargetReport {
+    BatchTargetReport {
+        occurrence,
+        clip_name,
+        asset_ref,
+        media_url: error.media_url,
+        expected_project_path: error.expected_path.map(|path| path.display().to_string()),
+        project_display_name: error.display_name,
+        action: BatchTargetAction::Skipped,
+        skip_reason: Some(error.reason),
+        detail: error.detail,
+        geometry_status: None,
+        geometry_reasons: Vec::new(),
+        geometry_detail: None,
+    }
+}
+
+fn local_skip_report(
+    occurrence: usize,
+    clip_name: String,
+    asset_ref: Option<String>,
+    reason: BatchSkipReason,
+    detail: String,
+) -> BatchTargetReport {
+    BatchTargetReport {
+        occurrence,
+        clip_name,
+        asset_ref,
+        media_url: None,
+        expected_project_path: None,
+        project_display_name: None,
+        action: BatchTargetAction::Skipped,
+        skip_reason: Some(reason),
+        detail,
+        geometry_status: None,
+        geometry_reasons: Vec::new(),
+        geometry_detail: None,
+    }
+}
+
+fn enrich_report_with_sibling(
+    mut report: BatchTargetReport,
+    sibling: &SiblingProject,
+) -> BatchTargetReport {
+    report.media_url = Some(sibling.media_url.clone());
+    report.expected_project_path = Some(sibling.expected_path.display().to_string());
+    report.project_display_name = Some(sibling.display_name.clone());
+    report
+}
+
+fn unproved_project_ancestor(clip: Node<'_, '_>, project: Node<'_, '_>) -> Option<String> {
+    let ancestors: Vec<_> = clip.ancestors().skip(1).collect();
+    let boundary = ancestors
+        .iter()
+        .position(|ancestor| *ancestor == project)
+        .or_else(|| {
+            ancestors.iter().position(|ancestor| {
+                ancestor.has_tag_name("media") && ancestor.attribute("id").is_some()
+            })
+        });
+    let Some(boundary) = boundary else {
+        return Some("unreachable project wrapper".to_string());
+    };
+    let path: Vec<_> = ancestors[..boundary]
+        .iter()
+        .map(|ancestor| ancestor.tag_name().name())
+        .collect();
+    if path == ["spine", "sequence"] {
+        None
+    } else {
+        Some(
+            path.first()
+                .copied()
+                .unwrap_or("unproved direct project wrapper")
+                .to_string(),
+        )
+    }
+}
+
+fn plan_existing_occurrence(
+    document: &Document<'_>,
+    input: &str,
+    project: Node<'_, '_>,
+    filter: Node<'_, '_>,
+    occurrence: usize,
+) -> Result<TargetPatchPlan, BatchTargetReport> {
+    plan_existing_occurrence_with_reader(
+        document,
+        input,
+        project,
+        filter,
+        occurrence,
+        &read_project_file,
+    )
+}
+
+fn plan_existing_occurrence_with_reader(
+    document: &Document<'_>,
+    input: &str,
+    project: Node<'_, '_>,
+    filter: Node<'_, '_>,
+    occurrence: usize,
+    project_reader: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> Result<TargetPatchPlan, BatchTargetReport> {
+    let clip = effect_clip_container(filter).map_err(|error| {
+        local_skip_report(
+            occurrence,
+            format!("Occurrence {occurrence}"),
+            None,
+            BatchSkipReason::UnsupportedStructure,
+            error.to_string(),
+        )
+    })?;
+    let asset_ref = clip_asset_ref(clip).map_err(|error| {
+        local_skip_report(
+            occurrence,
+            clip.attribute("name").unwrap_or("Unnamed clip").to_string(),
+            None,
+            BatchSkipReason::UnsupportedStructure,
+            error.to_string(),
+        )
+    })?;
+    let clip_name = clip_name(clip, asset_ref);
+    if let Some(container) = unproved_project_ancestor(clip, project) {
+        return Err(local_skip_report(
+            occurrence,
+            clip_name,
+            Some(asset_ref.to_string()),
+            BatchSkipReason::UnsupportedStructure,
+            format!("NiYien occurrence {occurrence} is nested below unsupported {container}"),
+        ));
+    }
+    let sibling = sibling_project_for_asset_with_reader(document, asset_ref, project_reader)
+        .map_err(|error| {
+            skipped_report(
+                occurrence,
+                clip_name.clone(),
+                Some(asset_ref.to_string()),
+                error,
+            )
+        })?;
+    let geometry = geometry_preflight(document, clip).map_err(|error| {
+        enrich_report_with_sibling(
+            local_skip_report(
+                occurrence,
+                clip_name.clone(),
+                Some(asset_ref.to_string()),
+                BatchSkipReason::BlockedGeometry,
+                error.to_string(),
+            ),
+            &sibling,
+        )
+    })?;
+    let current = selected_valid_project_payload(filter, occurrence).map_err(|error| {
+        enrich_report_with_sibling(
+            local_skip_report(
+                occurrence,
+                clip_name.clone(),
+                Some(asset_ref.to_string()),
+                BatchSkipReason::UnsupportedStructure,
+                error.to_string(),
+            ),
+            &sibling,
+        )
+    })?;
+    let same_hash = current
+        .as_ref()
+        .and_then(|candidate| super::decode_project_payload(candidate.payload.as_bytes()).ok())
+        .is_some_and(|bytes| Sha256::digest(bytes) == Sha256::digest(&sibling.bytes));
+
+    let mut replacements = Vec::new();
+    let mut appended = String::new();
+    let (action, detail) = if same_hash {
+        let display = parameter_with_production_id(filter, 1906);
+        if display.len() > 1 {
+            return Err(enrich_report_with_sibling(
+                local_skip_report(
+                    occurrence,
+                    clip_name,
+                    Some(asset_ref.to_string()),
+                    BatchSkipReason::UnsupportedStructure,
+                    format!("NiYien occurrence {occurrence} has duplicate /1906 parameters"),
+                ),
+                &sibling,
+            ));
+        }
+        if display.is_empty() {
+            appended.push_str(&format!(
+                "<param name=\"Project Display Name\" key=\"{PROJECT_PARAMETER_KEY_PREFIX}/1906\" value=\"{}\"/>",
+                xml_attribute_escape(&sibling.display_name)
+            ));
+        } else if let Some(value) = display[0].attribute_node("value")
+            && value.value().is_empty()
+        {
+            replacements.push(Replacement {
+                range: attribute_value_range(input, value).map_err(|error| {
+                    enrich_report_with_sibling(
+                        local_skip_report(
+                            occurrence,
+                            clip_name.clone(),
+                            Some(asset_ref.to_string()),
+                            BatchSkipReason::UnsupportedStructure,
+                            error.to_string(),
+                        ),
+                        &sibling,
+                    )
+                })?,
+                value: xml_attribute_escape(&sibling.display_name),
+            });
+        }
+        (
+            BatchTargetAction::TimingOnly,
+            "Exact sibling matches the selected project payload; refreshed timing only".to_string(),
+        )
+    } else {
+        let (parameter_replacements, parameters) =
+            updated_project_parameters(input.as_bytes(), filter, occurrence, &sibling).map_err(
+                |error| {
+                    enrich_report_with_sibling(
+                        local_skip_report(
+                            occurrence,
+                            clip_name.clone(),
+                            Some(asset_ref.to_string()),
+                            BatchSkipReason::UnsupportedStructure,
+                            error.to_string(),
+                        ),
+                        &sibling,
+                    )
+                },
+            )?;
+        replacements.extend(parameter_replacements);
+        appended.push_str(&parameters);
+        (
+            BatchTargetAction::UpdatedProject,
+            "Replaced project payload and visible parameters from the exact sibling".to_string(),
+        )
+    };
+    replacements.extend(
+        timing_replacements(document, input, project, filter, occurrence, &mut appended).map_err(
+            |error| {
+                enrich_report_with_sibling(
+                    local_skip_report(
+                        occurrence,
+                        clip_name.clone(),
+                        Some(asset_ref.to_string()),
+                        BatchSkipReason::InvalidTiming,
+                        error.to_string(),
+                    ),
+                    &sibling,
+                )
+            },
+        )?,
+    );
+    if !appended.is_empty() {
+        replacements.push(
+            filter_children_replacement(input, filter, appended).map_err(|error| {
+                enrich_report_with_sibling(
+                    local_skip_report(
+                        occurrence,
+                        clip_name.clone(),
+                        Some(asset_ref.to_string()),
+                        BatchSkipReason::UnsupportedStructure,
+                        error.to_string(),
+                    ),
+                    &sibling,
+                )
+            })?,
+        );
+    }
+    Ok(TargetPatchPlan {
+        replacements,
+        report: BatchTargetReport {
+            occurrence,
+            clip_name,
+            asset_ref: Some(asset_ref.to_string()),
+            media_url: Some(sibling.media_url),
+            expected_project_path: Some(sibling.expected_path.display().to_string()),
+            project_display_name: Some(sibling.display_name),
+            action,
+            skip_reason: None,
+            detail,
+            geometry_status: Some(geometry.status),
+            geometry_reasons: geometry.reasons,
+            geometry_detail: Some(geometry.detail),
+        },
+    })
+}
+
+fn patch_fcpxml_project_batch_with_reader(
+    input: &[u8],
+    project_reader: Option<&dyn Fn(&Path) -> io::Result<Vec<u8>>>,
+    report_all_skipped: bool,
 ) -> Result<BatchRouteDPatchResult, RouteDError> {
     let input_text = std::str::from_utf8(input)
         .map_err(|error| RouteDError::new(format!("FCPXML is not UTF-8: {error}")))?;
@@ -2740,6 +3354,15 @@ pub fn patch_fcpxml_project_batch(
     if !root.has_tag_name("fcpxml") {
         return Err(RouteDError::new("document root is not fcpxml"));
     }
+    let version = root
+        .attribute("version")
+        .ok_or_else(|| RouteDError::new("FCPXML version is missing"))?;
+    if !SUPPORTED_FCPXML_VERSIONS.contains(&version) {
+        return Err(RouteDError::new(format!(
+            "unsupported FCPXML version {version}"
+        )));
+    }
+    validate_global_resource_ids(&document)?;
     let projects: Vec<_> = root
         .descendants()
         .filter(|node| node.has_tag_name("project"))
@@ -2751,6 +3374,14 @@ pub fn patch_fcpxml_project_batch(
         )));
     }
     let project = projects[0];
+    let original_project_name = project
+        .attribute("name")
+        .ok_or_else(|| RouteDError::new("project name is missing"))?
+        .to_string();
+    let original_project_uid = project
+        .attribute("uid")
+        .ok_or_else(|| RouteDError::new("project UID is missing"))?
+        .to_string();
     let effect_resources: Vec<_> = document
         .descendants()
         .filter(|node| {
@@ -2761,7 +3392,6 @@ pub fn patch_fcpxml_project_batch(
                 )
         })
         .collect();
-    let mut replacements = Vec::new();
     let effect_ref = match effect_resources.as_slice() {
         [effect] => {
             let effect_ref = effect.attribute("id").ok_or_else(|| {
@@ -2773,49 +3403,20 @@ pub fn patch_fcpxml_project_batch(
                 .count()
                 != 1
             {
-                return Err(RouteDError::new(
+                return Err(RouteDError::unsafe_structure(
                     "production NiYien effect resource id is not unique",
                 ));
             }
             effect_ref.to_string()
         }
         [] => {
-            let resources: Vec<_> = document
-                .descendants()
-                .filter(|node| node.has_tag_name("resources"))
-                .collect();
-            if resources.len() != 1 {
-                return Err(RouteDError::new(format!(
-                    "expected exactly one resources element, found {}",
-                    resources.len()
-                )));
-            }
-            let used_ids: HashSet<_> = document
-                .descendants()
-                .filter_map(|node| node.attribute("id"))
-                .collect();
-            let effect_ref = (1_u64..)
-                .map(|index| format!("r{index}"))
-                .find(|candidate| !used_ids.contains(candidate.as_str()))
-                .ok_or_else(|| RouteDError::new("unable to allocate effect resource id"))?;
-            let resources_range = resources[0].range();
-            let insertion = input_text[resources_range.clone()]
-                .rfind("</resources>")
-                .map(|offset| resources_range.start + offset)
-                .ok_or_else(|| RouteDError::new("resources element is not expandable"))?;
-            replacements.push(Replacement {
-                range: insertion..insertion,
-                value: format!(
-                    "<effect id=\"{}\" name=\"Gyroflow NiYien\" uid=\"{}\"/>",
-                    xml_attribute_escape(&effect_ref),
-                    xml_attribute_escape(EFFECT_TEMPLATE_UID)
-                ),
-            });
-            effect_ref
+            return Err(RouteDError::no_updateable_targets(
+                "project has no production NiYien effect resource",
+            ));
         }
         _ => {
-            return Err(RouteDError::new(format!(
-                "expected at most one production NiYien effect resource, found {}",
+            return Err(RouteDError::unsafe_structure(format!(
+                "expected exactly one production NiYien effect resource, found {}",
                 effect_resources.len()
             )));
         }
@@ -2832,218 +3433,128 @@ pub fn patch_fcpxml_project_batch(
                 || filter.ancestors().any(|node| node.has_tag_name("media"))
         })
         .collect();
+    validate_global_reserved_parameter_keys(&existing_filters)?;
+    if existing_filters.is_empty() {
+        return Err(RouteDError::no_updateable_targets(
+            "project has no updateable existing NiYien effect targets",
+        ));
+    }
+    let mut replacements = Vec::new();
     for (index, filter) in existing_filters.iter().copied().enumerate() {
-        let occurrence = index + 1;
-        let clip = effect_clip_container(filter).map_err(|_| {
-            RouteDError::new(format!(
-                "NiYien occurrence {occurrence} has no supported clip ancestor"
-            ))
-        })?;
-        let asset_ref = clip_asset_ref(clip).map_err(|error| {
-            RouteDError::new(format!(
-                "NiYien occurrence {occurrence} asset ref is invalid: {error}"
-            ))
-        })?;
-        let geometry = geometry_preflight(&document, clip).map_err(|error| {
-            RouteDError::new(format!(
-                "NiYien occurrence {occurrence} blocked geometry: {error}"
-            ))
-        })?;
-        let key_prefix = project_parameter_key_prefix(filter, occurrence)?;
-        let existing = selected_valid_project_payload(filter, occurrence)?;
-        let (media_url, detail) = if existing.is_some() {
-            let identity = route_d_instance_identity(input, filter.range().start);
-            for parameter in filter.children().filter(|node| {
-                node.has_tag_name("param") && node.attribute("name") == Some("Instance Identity")
-            }) {
-                replacements.push(Replacement {
-                    range: parameter.range(),
-                    value: String::new(),
-                });
-            }
-            replacements.push(filter_children_replacement(
+        let plan = match project_reader {
+            Some(project_reader) => plan_existing_occurrence_with_reader(
+                &document,
                 input_text,
+                project,
                 filter,
-                format!(
-                    "<param name=\"Instance Identity\" key=\"{key_prefix}/1901\" value=\"{identity}\"/>"
-                ),
-            )?);
-            (
-                None,
-                "Preserved validated project bank and refreshed timing".to_string(),
-            )
-        } else {
-            let (media_url, payload) = match sibling_project_for_asset(&document, asset_ref)? {
-                SiblingProject::Found { media_url, payload } => (media_url, payload),
-                SiblingProject::Missing { expected_path, .. } => {
-                    return Err(RouteDError::new(format!(
-                        "NiYien occurrence {occurrence} has no valid bank or sibling .gyroflow; expected {}",
-                        expected_path.display()
-                    )));
-                }
-            };
-            for range in project_parameter_ranges(filter)? {
-                replacements.push(Replacement {
-                    range,
-                    value: String::new(),
-                });
-            }
-            replacements.push(filter_children_replacement(
-                input_text,
-                filter,
-                encoded_project_banks(
-                    &payload,
-                    &key_prefix,
-                    &route_d_instance_identity(input, filter.range().start),
-                )?,
-            )?);
-            (
-                Some(media_url),
-                "Recovered project from exact sibling and wrote dual banks".to_string(),
-            )
-        };
-        targets.push(BatchTargetReport {
-            occurrence: Some(occurrence),
-            clip_name: clip_name(clip, asset_ref),
-            asset_ref: Some(asset_ref.to_string()),
-            media_url,
-            action: BatchTargetAction::Updated,
-            detail,
-            geometry_status: Some(geometry.status),
-            geometry_reasons: geometry.reasons,
-            geometry_detail: Some(geometry.detail),
-        });
-    }
-
-    for clip in project
-        .descendants()
-        .filter(|node| matches!(node.tag_name().name(), "asset-clip" | "clip"))
-    {
-        if clip.descendants().skip(1).any(|node| {
-            node.has_tag_name("filter-video") && node.attribute("ref") == Some(effect_ref.as_str())
-        }) {
-            continue;
-        }
-        if !is_supported_batch_leaf(clip, project) {
-            continue;
-        }
-        let asset_ref = clip_asset_ref(clip)?;
-        match sibling_project_for_asset(&document, asset_ref)? {
-            SiblingProject::Missing {
-                media_url,
-                expected_path,
-            } => targets.push(BatchTargetReport {
-                occurrence: None,
-                clip_name: clip_name(clip, asset_ref),
-                asset_ref: Some(asset_ref.to_string()),
-                media_url: Some(media_url),
-                action: BatchTargetAction::Skipped,
-                detail: format!(
-                    "Exact sibling .gyroflow was not found; expected {}",
-                    expected_path.display()
-                ),
-                geometry_status: None,
-                geometry_reasons: Vec::new(),
-                geometry_detail: None,
-            }),
-            SiblingProject::Found { media_url, payload } => {
-                let geometry = geometry_preflight(&document, clip).map_err(|error| {
-                    RouteDError::new(format!(
-                        "clip {} blocked geometry: {error}",
-                        clip_name(clip, asset_ref)
-                    ))
-                })?;
-                let parameters = encoded_project_banks(
-                    &payload,
-                    PROJECT_PARAMETER_KEY_PREFIX,
-                    &route_d_instance_identity(input, clip.range().start),
-                )?;
-                replacements.push(clip_filter_replacement(
-                    input_text,
-                    clip,
-                    format!(
-                        "<filter-video ref=\"{}\" name=\"Gyroflow NiYien\">{}<param name=\"Timing Payload\" key=\"{}/1903\" value=\"\"/></filter-video>",
-                        xml_attribute_escape(&effect_ref),
-                        parameters,
-                        PROJECT_PARAMETER_KEY_PREFIX
-                    ),
-                )?);
-                targets.push(BatchTargetReport {
-                    occurrence: None,
-                    clip_name: clip_name(clip, asset_ref),
-                    asset_ref: Some(asset_ref.to_string()),
-                    media_url: Some(media_url),
-                    action: BatchTargetAction::Inserted,
-                    detail: "Inserted production NiYien effect with dual project banks".to_string(),
-                    geometry_status: Some(geometry.status),
-                    geometry_reasons: geometry.reasons,
-                    geometry_detail: Some(geometry.detail),
-                });
-            }
-        }
-    }
-    for container in project
-        .descendants()
-        .filter(|node| is_unsupported_container(*node))
-    {
-        if container
-            .ancestors()
-            .skip(1)
-            .take_while(|ancestor| *ancestor != project)
-            .any(is_unsupported_container)
-            || container.descendants().any(|node| {
-                node.has_tag_name("filter-video")
-                    && node.attribute("ref") == Some(effect_ref.as_str())
-            })
-        {
-            continue;
-        }
-        targets.push(BatchTargetReport {
-            occurrence: None,
-            clip_name: container
-                .attribute("name")
-                .unwrap_or_else(|| container.tag_name().name())
-                .to_string(),
-            asset_ref: container.attribute("ref").map(str::to_string),
-            media_url: None,
-            action: BatchTargetAction::Skipped,
-            detail: format!(
-                "Unsupported {} container; add the effect manually before Route D processing",
-                container.tag_name().name()
+                index + 1,
+                project_reader,
             ),
-            geometry_status: None,
-            geometry_reasons: Vec::new(),
-            geometry_detail: None,
-        });
+            None => plan_existing_occurrence(&document, input_text, project, filter, index + 1),
+        };
+        match plan {
+            Ok(plan) => {
+                replacements.extend(plan.replacements);
+                targets.push(plan.report);
+            }
+            Err(report) => targets.push(report),
+        }
     }
-    if targets.is_empty() {
-        return Err(RouteDError::new("project has no batch Route D targets"));
+    if targets
+        .iter()
+        .all(|target| target.action == BatchTargetAction::Skipped)
+    {
+        if report_all_skipped {
+            return Ok(BatchRouteDPatchResult {
+                xml: input.to_vec(),
+                original_project_name,
+                occurrence_count: existing_filters.len(),
+                updated_project_count: 0,
+                timing_only_count: 0,
+                skipped_count: targets.len(),
+                targets,
+            });
+        }
+        return Err(RouteDError::no_updateable_targets(
+            "batch has no updateable targets",
+        ));
     }
     let intermediate = apply_replacements(input_text, replacements)?;
-    let patched = patch_fcpxml_project(intermediate.as_bytes(), requested_name)?;
-    let inserted_count = targets
+    if intermediate.as_bytes() == input {
+        return Err(RouteDError::no_updateable_targets(
+            "batch produced no XML changes",
+        ));
+    }
+    let output_document = Document::parse_with_options(
+        &intermediate,
+        ParsingOptions {
+            allow_dtd: true,
+            ..ParsingOptions::default()
+        },
+    )
+    .map_err(|error| RouteDError::new(format!("patched FCPXML parse failed: {error}")))?;
+    let output_projects: Vec<_> = output_document
+        .descendants()
+        .filter(|node| node.has_tag_name("project"))
+        .collect();
+    if output_projects.len() != 1
+        || output_projects[0].attribute("name") != Some(original_project_name.as_str())
+        || output_projects[0].attribute("uid") != Some(original_project_uid.as_str())
+    {
+        return Err(RouteDError::new(
+            "batch patch did not preserve the original project name and UID",
+        ));
+    }
+    let updated_project_count = targets
         .iter()
-        .filter(|target| target.action == BatchTargetAction::Inserted)
+        .filter(|target| target.action == BatchTargetAction::UpdatedProject)
         .count();
-    let updated_count = targets
+    let timing_only_count = targets
         .iter()
-        .filter(|target| target.action == BatchTargetAction::Updated)
+        .filter(|target| target.action == BatchTargetAction::TimingOnly)
         .count();
     let skipped_count = targets
         .iter()
         .filter(|target| target.action == BatchTargetAction::Skipped)
         .count();
     Ok(BatchRouteDPatchResult {
-        xml: patched.xml,
-        original_project_name: patched.original_project_name,
-        processed_project_name: patched.processed_project_name,
-        import_token: patched.import_token,
-        occurrence_count: patched.occurrence_count,
-        inserted_count,
-        updated_count,
+        xml: intermediate.into_bytes(),
+        original_project_name,
+        occurrence_count: existing_filters.len(),
+        updated_project_count,
+        timing_only_count,
         skipped_count,
         targets,
     })
+}
+
+pub fn patch_fcpxml_project_batch(input: &[u8]) -> Result<BatchRouteDPatchResult, RouteDError> {
+    patch_fcpxml_project_batch_with_reader(input, None, false)
+}
+
+pub fn patch_fcpxml_project_batch_with_media_roots(
+    input: &[u8],
+    media_roots: &[PathBuf],
+) -> Result<BatchRouteDPatchResult, RouteDError> {
+    let roots = canonical_authorized_roots(media_roots)?;
+    let reader = |path: &Path| read_authorized_project_file(path, &roots);
+    patch_fcpxml_project_batch_with_reader(input, Some(&reader), false)
+}
+
+#[doc(hidden)]
+pub fn patch_fcpxml_project_batch_with_project_reader(
+    input: &[u8],
+    project_reader: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> Result<BatchRouteDPatchResult, RouteDError> {
+    patch_fcpxml_project_batch_with_reader(input, Some(project_reader), false)
+}
+
+#[doc(hidden)]
+pub fn patch_fcpxml_project_batch_with_project_reader_report_all_skipped(
+    input: &[u8],
+    project_reader: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+) -> Result<BatchRouteDPatchResult, RouteDError> {
+    patch_fcpxml_project_batch_with_reader(input, Some(project_reader), true)
 }
 
 fn import_token(input: &[u8]) -> String {

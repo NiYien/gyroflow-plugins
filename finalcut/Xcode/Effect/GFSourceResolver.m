@@ -1,5 +1,7 @@
 #import "GFSourceResolver.h"
 
+#import "GFLocalization.h"
+
 static NSString *const GFSourceResolverErrorDomain =
     @"com.niyien.gyroflow.finalcut.source-resolver";
 
@@ -21,7 +23,9 @@ static NSDictionary<NSString *, id> * _Nullable GFResolution(
     NSError **error
 ) {
     if (!mediaURL.isFileURL || mediaURL.path.length == 0) {
-        return GFResolverFailure(@"original media must be a local file URL", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.resolver_local",
+            @"Original media must be a local file URL"), error);
     }
     NSURL *standardizedMediaURL = mediaURL.URLByStandardizingPath;
     NSURL *projectURL = [[standardizedMediaURL URLByDeletingPathExtension]
@@ -42,11 +46,15 @@ NSDictionary<NSString *, id> * _Nullable GFResolveFinderURLs(
     NSError **error
 ) {
     if (urls.count != 1) {
-        return GFResolverFailure(@"drop must contain exactly one Finder file", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.finder_count",
+            @"Drop must contain exactly one Finder file"), error);
     }
     NSURL *mediaURL = urls.firstObject;
     if (!mediaURL.isFileURL) {
-        return GFResolverFailure(@"Finder item must be a local file URL", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.finder_local",
+            @"Finder item must be a local file URL"), error);
     }
     return GFResolution(@"finder", mediaURL, error);
 }
@@ -56,7 +64,9 @@ NSDictionary<NSString *, id> * _Nullable GFResolveFCPXMLData(
     NSError **error
 ) {
     if (data.length == 0) {
-        return GFResolverFailure(@"Final Cut pasteboard contains no FCPXML data", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.fcpxml_empty",
+            @"Final Cut pasteboard contains no FCPXML data"), error);
     }
     NSError *parseError = nil;
     NSXMLDocument *document = [[NSXMLDocument alloc]
@@ -65,8 +75,12 @@ NSDictionary<NSString *, id> * _Nullable GFResolveFCPXMLData(
                error:&parseError];
     if (document == nil) {
         return GFResolverFailure(
-            [NSString stringWithFormat:@"invalid FCPXML: %@",
-                                       parseError.localizedDescription ?: @"unknown parse error"],
+            [NSString stringWithFormat:GFLocalized(
+                                       @"effect.error.fcpxml_invalid",
+                                       @"Invalid FCPXML: %@"),
+                                       parseError.localizedDescription
+                                           ?: GFLocalized(@"effect.error.unknown",
+                                                          @"unknown error")],
             error
         );
     }
@@ -75,26 +89,38 @@ NSDictionary<NSString *, id> * _Nullable GFResolveFCPXMLData(
                 error:&parseError];
     if (clipNodes == nil) {
         return GFResolverFailure(
-            [NSString stringWithFormat:@"unable to query FCPXML clips: %@",
-                                       parseError.localizedDescription ?: @"unknown query error"],
+            [NSString stringWithFormat:GFLocalized(
+                                       @"effect.error.fcpxml_query_clips",
+                                       @"Unable to query FCPXML clips: %@"),
+                                       parseError.localizedDescription
+                                           ?: GFLocalized(@"effect.error.unknown",
+                                                          @"unknown error")],
             error
         );
     }
     if (clipNodes.count != 1) {
-        return GFResolverFailure(@"FCPXML must contain exactly one clip reference", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.fcpxml_clip_count",
+            @"FCPXML must contain exactly one clip reference"), error);
     }
     NSArray<NSXMLNode *> *assetNodes = [document
         nodesForXPath:@"//*[local-name()='asset']"
                 error:&parseError];
     if (assetNodes == nil) {
         return GFResolverFailure(
-            [NSString stringWithFormat:@"unable to query FCPXML assets: %@",
-                                       parseError.localizedDescription ?: @"unknown query error"],
+            [NSString stringWithFormat:GFLocalized(
+                                       @"effect.error.fcpxml_query_assets",
+                                       @"Unable to query FCPXML assets: %@"),
+                                       parseError.localizedDescription
+                                           ?: GFLocalized(@"effect.error.unknown",
+                                                          @"unknown error")],
             error
         );
     }
     if (assetNodes.count != 1) {
-        return GFResolverFailure(@"FCPXML must contain exactly one asset", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.fcpxml_asset_count",
+            @"FCPXML must contain exactly one asset"), error);
     }
 
     NSXMLElement *clip = (NSXMLElement *)clipNodes.firstObject;
@@ -102,21 +128,29 @@ NSDictionary<NSString *, id> * _Nullable GFResolveFCPXMLData(
     NSString *clipReference = [clip attributeForName:@"ref"].stringValue;
     NSString *assetIdentifier = [asset attributeForName:@"id"].stringValue;
     if (clipReference.length == 0 || ![clipReference isEqualToString:assetIdentifier]) {
-        return GFResolverFailure(@"the single clip must reference the single asset", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.fcpxml_clip_reference",
+            @"The single clip must reference the single asset"), error);
     }
     NSArray<NSXMLNode *> *originalRepresentations = [asset
         nodesForXPath:@"./*[local-name()='media-rep' and @kind='original-media' and @src]"
                 error:&parseError];
     if (originalRepresentations == nil) {
         return GFResolverFailure(
-            [NSString stringWithFormat:@"unable to query original media: %@",
-                                       parseError.localizedDescription ?: @"unknown query error"],
+            [NSString stringWithFormat:GFLocalized(
+                                       @"effect.error.fcpxml_query_media",
+                                       @"Unable to query original media: %@"),
+                                       parseError.localizedDescription
+                                           ?: GFLocalized(@"effect.error.unknown",
+                                                          @"unknown error")],
             error
         );
     }
     if (originalRepresentations.count != 1) {
         return GFResolverFailure(
-            @"FCPXML asset must contain exactly one original-media representation",
+            GFLocalized(
+                @"effect.error.fcpxml_media_count",
+                @"FCPXML asset must contain exactly one original-media representation"),
             error
         );
     }
@@ -125,7 +159,9 @@ NSDictionary<NSString *, id> * _Nullable GFResolveFCPXMLData(
     ].stringValue;
     NSURL *mediaURL = source.length > 0 ? [NSURL URLWithString:source] : nil;
     if (mediaURL == nil || !mediaURL.isFileURL) {
-        return GFResolverFailure(@"original-media src must be a local file URL", error);
+        return GFResolverFailure(GFLocalized(
+            @"effect.error.fcpxml_media_local",
+            @"Original-media src must be a local file URL"), error);
     }
     return GFResolution(@"fcpxml", mediaURL, error);
 }

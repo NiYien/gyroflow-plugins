@@ -41,15 +41,17 @@ def production_parameters(body: str) -> str:
         + project_control
         + '\n\t\t\t\t</parameter>'
     )
+    hidden_fov = (
+        '\n\t\t\t\t<parameter name="FOV" id="2001" flags="12884901904" default="1" value="1"/>'
+    )
     adjustment_group = (
         '\n\t\t\t\t<parameter name="Stabilization" id="2000" flags="8589938704">'
-        '\n\t\t\t\t\t<parameter name="FOV" id="2001" flags="12884901904" default="1" value="1"/>'
-        '\n\t\t\t\t\t<parameter name="Smoothness" id="2002" flags="12884901904" default="50" value="50"/>'
+        '\n\t\t\t\t\t<parameter name="Smoothness" id="2002" flags="12884901904" default="15" value="15"/>'
         '\n\t\t\t\t\t<parameter name="Lens Correction" id="2003" flags="12884901904" default="100" value="100"/>'
         '\n\t\t\t\t\t<parameter name="Horizon Lock" id="2004" flags="12884901904" default="0" value="0"/>'
         '\n\t\t\t\t\t<parameter name="Horizon Roll" id="2005" flags="12884901904" default="0" value="0"/>'
         '\n\t\t\t\t\t<parameter name="Zoom Mode" id="2006" flags="12884901904" default="1" value="1"/>'
-        '\n\t\t\t\t\t<parameter name="Overview" id="2007" flags="12884901904" default="0" value="0"/>'
+        '\n\t\t\t\t\t<parameter name="Stabilization Overview" id="2007" flags="12884901904" default="0" value="0"/>'
         '\n\t\t\t\t</parameter>'
     )
     bank_parameters = [
@@ -66,12 +68,20 @@ def production_parameters(body: str) -> str:
         '\n\t\t\t\t<parameter name="Instance Identity" id="1901" flags="12889161760"/>'
         '\n\t\t\t\t<parameter name="Project Payload" id="1902" flags="12889161760"/>'
         '\n\t\t\t\t<parameter name="Timing Payload" id="1903" flags="12889161760"/>'
+        '\n\t\t\t\t<parameter name="Project Display Name" id="1906" flags="12889161760"/>'
         + hidden_payload_parameters
         + '\n\t\t\t\t<parameter name="Mix" id="10001" flags="12884901888" default="1" value="1"/>'
         + '\n\t\t\t\t<parameter name="Flip" id="10002" flags="12889161760" default="0" value="0"/>'
         + '\n\t\t\t\t<parameter name="Input Points" id="10003" flags="12889161760" default="1" value="1"/>'
     )
-    return prefix + internal + project_group + adjustment_group + hidden_and_builtin
+    return (
+        prefix
+        + internal
+        + project_group
+        + hidden_fov
+        + adjustment_group
+        + hidden_and_builtin
+    )
 
 
 def render_template() -> str:

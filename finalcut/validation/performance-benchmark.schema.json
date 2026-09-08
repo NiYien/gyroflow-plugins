@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gyroflow.xyz/schemas/finalcut-performance-benchmark-v1.json",
+  "title": "Gyroflow Final Cut performance benchmark",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "capture_status", "environment", "matrix", "relative_gates"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "capture_status": { "enum": ["not_captured", "captured"] },
+    "captured_at": { "type": ["string", "null"], "format": "date-time" },
+    "environment": {
+      "type": "object",
+      "required": ["hardware", "macos", "final_cut", "plugin_build", "media_fixture", "warmup_runs", "measured_runs"],
+      "additionalProperties": false,
+      "properties": {
+        "hardware": { "type": ["string", "null"] },
+        "macos": { "type": "string" },
+        "final_cut": { "type": "string" },
+        "plugin_build": { "type": ["string", "null"] },
+        "media_fixture": { "type": ["string", "null"] },
+        "warmup_runs": { "type": "integer", "minimum": 0 },
+        "measured_runs": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "matrix": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "resolution", "proxy", "parameters", "instances", "surface", "measurements"],
+        "properties": {
+          "id": { "type": "string" },
+          "resolution": { "enum": ["4k", "8k"] },
+          "proxy": { "enum": ["none", "half", "quarter"] },
+          "parameters": { "enum": ["static", "keyframed", "passthrough"] },
+          "instances": { "type": "integer", "minimum": 1 },
+          "surface": { "enum": ["thumbnail", "preview", "export"] },
+          "measurements": {
+            "type": ["object", "null"],
+            "properties": {
+              "frame_p50_ms": { "type": "number" },
+              "frame_p95_ms": { "type": "number" },
+              "peak_memory_bytes": { "type": "integer" },
+              "device_enumerations": { "type": "integer" },
+              "command_queue_creations": { "type": "integer" },
+              "project_decodes": { "type": "integer" },
+              "plugin_state_calls": { "type": "integer" },
+              "plugin_state_bytes": { "type": "integer" },
+              "passthrough_logs_per_60_seconds": { "type": "integer" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "relative_gates": {
+      "type": "object",
+      "required": ["maximum_p95_regression_ratio", "maximum_peak_memory_regression_ratio"],
+      "properties": {
+        "maximum_p95_regression_ratio": { "const": 0.05 },
+        "maximum_peak_memory_regression_ratio": { "const": 0.1 }
+      },
+      "additionalProperties": false
+    },
+    "absolute_budgets": { "type": ["object", "null"] },
+    "release_blocked": { "type": "boolean" }
+  }
+}

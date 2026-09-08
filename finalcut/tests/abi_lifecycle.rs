@@ -8,9 +8,10 @@ use gyroflow_finalcut::{
     GFDimensionsU32, GFError, GFFrameGeometry, GFFrameGeometryMode, GFOwnedBytes,
     GFProjectGeometry, GFRectI32, GFRenderParameters, GFStatus, gf_finalcut_error_free,
     gf_finalcut_instance_create, gf_finalcut_instance_free,
-    gf_finalcut_instance_get_project_geometry, gf_finalcut_instance_has_project,
-    gf_finalcut_instance_load_project, gf_finalcut_instance_load_project_payload,
-    gf_finalcut_instance_set_render_parameters, gf_finalcut_owned_bytes_free,
+    gf_finalcut_instance_get_project_geometry, gf_finalcut_instance_get_project_render_parameters,
+    gf_finalcut_instance_has_project, gf_finalcut_instance_load_project,
+    gf_finalcut_instance_load_project_payload, gf_finalcut_instance_set_render_parameters,
+    gf_finalcut_owned_bytes_free, gf_finalcut_project_payload_decode,
     gf_finalcut_project_payload_encode, validate_frame_geometry,
 };
 use sha2::{Digest, Sha256};
@@ -478,6 +479,251 @@ fn legacy_v1_project_payload_remains_loadable() {
         },
         GFStatus::Ok
     );
+    unsafe { gf_finalcut_instance_free(instance) };
+}
+
+#[test]
+fn project_payload_decode_round_trips_v1_and_v2_payloads() {
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    let v2_payload = encoded_payload(project);
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(project).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let v1_payload = STANDARD
+        .encode(
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "codec": "zlib",
+                "uncompressed_len": project.len(),
+                "content_sha256": format!("{:x}", Sha256::digest(project)),
+                "project_base64": STANDARD.encode(compressed),
+            }))
+            .unwrap(),
+        )
+        .into_bytes();
+
+    for payload in [&v1_payload, &v2_payload] {
+        let mut decoded = GFOwnedBytes::default();
+        let mut error: *mut GFError = std::ptr::null_mut();
+        let status = unsafe {
+            gf_finalcut_project_payload_decode(
+                payload.as_ptr(),
+                payload.len(),
+                &mut decoded,
+                &mut error,
+            )
+        };
+
+        assert_eq!(status, GFStatus::Ok);
+        assert!(error.is_null());
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(decoded.data, decoded.len) },
+            project
+        );
+        unsafe { gf_finalcut_owned_bytes_free(&mut decoded) };
+    }
+}
+
+#[test]
+fn project_payload_decode_rejects_unknown_versions_and_hash_mismatches() {
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    let unknown = STANDARD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "version": 99,
+            "codec": "zlib",
+            "uncompressed_len": project.len(),
+            "content_sha256": format!("{:x}", Sha256::digest(project)),
+            "project_base64": STANDARD.encode(project),
+        }))
+        .unwrap(),
+    );
+    let mut v2 = STANDARD.decode(encoded_payload(project)).unwrap();
+    v2[15] ^= 0xff;
+    let hash_mismatch = STANDARD.encode(v2);
+
+    for (payload, expected_status) in [
+        (unknown.as_bytes(), GFStatus::UnknownPayloadVersion),
+        (hash_mismatch.as_bytes(), GFStatus::InvalidProject),
+    ] {
+        let mut decoded = GFOwnedBytes {
+            data: std::ptr::dangling_mut(),
+            len: 17,
+            capacity: 23,
+        };
+        let mut error: *mut GFError = std::ptr::null_mut();
+        let status = unsafe {
+            gf_finalcut_project_payload_decode(
+                payload.as_ptr(),
+                payload.len(),
+                &mut decoded,
+                &mut error,
+            )
+        };
+
+        assert_eq!(status, expected_status);
+        assert_eq!(decoded.data, std::ptr::null_mut());
+        assert_eq!(decoded.len, 0);
+        assert_eq!(decoded.capacity, 0);
+        unsafe { gf_finalcut_error_free(error) };
+    }
+}
+
+#[test]
+fn project_payload_decode_requires_input_and_output_pointers() {
+    let payload = encoded_payload(include_bytes!("fixtures/phase0-valid.gyroflow"));
+    let mut decoded = GFOwnedBytes::default();
+
+    assert_eq!(
+        unsafe {
+            gf_finalcut_project_payload_decode(
+                std::ptr::null(),
+                payload.len(),
+                &mut decoded,
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::NullPointer
+    );
+    assert_eq!(
+        unsafe {
+            gf_finalcut_project_payload_decode(
+                payload.as_ptr(),
+                payload.len(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::NullPointer
+    );
+}
+
+#[test]
+fn project_render_parameters_getter_requires_a_loaded_project_and_valid_pointers() {
+    let instance = unsafe { gf_finalcut_instance_create(std::ptr::null_mut()) };
+    let mut parameters = GFRenderParameters {
+        fov: -1.0,
+        smoothness: -1.0,
+        lens_correction: -1.0,
+        horizon_lock_amount: -1.0,
+        horizon_lock_roll: -1.0,
+        zoom_mode: -1,
+        overview: 2,
+        reserved: [9; 3],
+    };
+    let mut error: *mut GFError = std::ptr::null_mut();
+
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_get_project_render_parameters(
+                instance,
+                &mut parameters,
+                &mut error,
+            )
+        },
+        GFStatus::InvalidProject
+    );
+    assert_eq!(
+        parameters,
+        GFRenderParameters {
+            fov: 0.0,
+            smoothness: 0.0,
+            lens_correction: 0.0,
+            horizon_lock_amount: 0.0,
+            horizon_lock_roll: 0.0,
+            zoom_mode: 0,
+            overview: 0,
+            reserved: [0; 3],
+        }
+    );
+    unsafe { gf_finalcut_error_free(error) };
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_get_project_render_parameters(
+                std::ptr::null(),
+                &mut parameters,
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::NullPointer
+    );
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_get_project_render_parameters(
+                instance,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::NullPointer
+    );
+
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_load_project(
+                instance,
+                project.as_ptr(),
+                project.len(),
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::Ok
+    );
+    let expected = representative_parameters();
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_set_render_parameters(instance, &expected, std::ptr::null_mut())
+        },
+        GFStatus::Ok
+    );
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_get_project_render_parameters(
+                instance,
+                &mut parameters,
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::Ok
+    );
+    assert_eq!(parameters, expected);
+
+    unsafe { gf_finalcut_instance_free(instance) };
+}
+
+#[test]
+fn raw_project_cap_is_checked_before_reading_caller_memory() {
+    let instance = unsafe { gf_finalcut_instance_create(std::ptr::null_mut()) };
+    let unreadable = std::ptr::dangling::<u8>();
+    let oversized = 256 * 1024 * 1024 + 1;
+    let mut encoded = GFOwnedBytes {
+        data: std::ptr::dangling_mut(),
+        len: 17,
+        capacity: 23,
+    };
+
+    assert_eq!(
+        unsafe {
+            gf_finalcut_instance_load_project(instance, unreadable, oversized, std::ptr::null_mut())
+        },
+        GFStatus::InvalidProject
+    );
+    assert_eq!(
+        unsafe {
+            gf_finalcut_project_payload_encode(
+                unreadable,
+                oversized,
+                &mut encoded,
+                std::ptr::null_mut(),
+            )
+        },
+        GFStatus::InvalidProject
+    );
+    assert!(encoded.data.is_null());
+    assert_eq!(encoded.len, 0);
+    assert_eq!(encoded.capacity, 0);
+
     unsafe { gf_finalcut_instance_free(instance) };
 }
 

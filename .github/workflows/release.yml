@@ -6,8 +6,6 @@ on:
   push:
     tags:
       - 'v*'
-  schedule:
-    - cron: '23 3 * * *'
   pull_request:
   workflow_dispatch:
     inputs:
@@ -15,6 +13,13 @@ on:
         description: Optional label for a manual plugin build run
         required: false
         type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugins-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -138,64 +143,166 @@ jobs:
 
   github_release:
     name: Create GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [build, build_finalcut]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-
-      - run: find . -type f
-
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      - uses: actions/download-artifact@v4
         with:
-         files: ./**/*
+          path: release_artifacts
+          merge-multiple: true
+      - name: Verify required Final Cut deliverable
+        run: test -s release_artifacts/GyroflowNiyien-FinalCut-macos.zip
+      - name: Reject an existing tag release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.repos.getReleaseByTag({
+                ...context.repo, tag: context.ref.replace('refs/tags/', '')
+              });
+              core.setFailed('Refusing to overwrite an existing release');
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+      - name: Publish exact deliverables
+        uses: softprops/action-gh-release@v2
+        with:
+          make_latest: false
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: |
+            release_artifacts/GyroflowNiyien-OpenFX-windows.zip
+            release_artifacts/GyroflowNiyien-OpenFX-linux.zip
+            release_artifacts/GyroflowNiyien-OpenFX-macos.dmg
+            release_artifacts/GyroflowNiyien-OpenFX-macos.zip
+            release_artifacts/GyroflowNiyien-Adobe-windows.aex
+            release_artifacts/GyroflowNiyien-Adobe-macos.dmg
+            release_artifacts/GyroflowNiyien-Adobe-macos.zip
+            release_artifacts/libgyroflow_niyien_frei0r.so
+            release_artifacts/libgyroflow_niyien_frei0r.dylib
+            release_artifacts/libgyroflow_niyien_frei0r.dll
+            release_artifacts/GyroflowNiyien-FinalCut-macos.zip
+            release_artifacts/GyroflowNiyien-FinalCut-macos.dmg
 
-  build_finalcut:
-    name: Gyroflow NiYien Final Cut signed package
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: [self-hosted, macOS, fxplug-sdk]
+  check_finalcut:
+    name: Final Cut distribution contracts
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      PYTHONPATH: scripts
     steps:
       - uses: actions/checkout@v4
+      - name: Check branding, SDK, signing and delivery contracts
+        run: python3 -m unittest discover -s tests -p test_finalcut_distribution_contract.py
+      - name: Check localization generation
+        run: python3 scripts/generate_finalcut_localizations.py --check
 
-      - name: Install Rust targets
-        uses: dtolnay/rust-toolchain@stable
+  build_finalcut:
+    name: NiYien FCP signed universal package
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    needs: check_finalcut
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      NIYIEN_LENS_DATA_TAG: data-v20260830.1
+      PYTHONPATH: scripts
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate pinned source and release acceptance
+        run: python3 scripts/finalcut_release.py prepare
+      - name: Install pinned Rust targets
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Rust cache
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: finalcut-macos-26-rust-1.95.0
+      - name: Verify the selected toolchain
+        run: python3 scripts/finalcut_release.py check-toolchain
+      - name: Cache the pinned SDK download
         uses: actions/cache@v4
         with:
-          path: |
-            ${{ github.workspace }}/target
-            ~/.cargo
-          key: finalcut-gyroflow-plugins-0
-
+          path: ext/fxplug
+          key: fxplug-macos-26-${{ hashFiles('finalcut/config/sdk.json') }}
+      - name: Download, verify and install FxPlug SDK
+        env:
+          FINALCUT_SDK_URL: ${{ vars.FINALCUT_SDK_URL }}
+          SDK_BASE: ${{ vars.SDK_BASE || 'https://www.niyien.com/api/sdk' }}
+        run: python3 scripts/prepare_finalcut_sdk.py --install
+      - name: Validate signing configuration
+        env:
+          MACOS_CERTIFICATES: ${{ secrets.MACOS_CERTIFICATES }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_CERTIFICATE_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
+          MACOS_ACCOUNT_USER: ${{ secrets.MACOS_ACCOUNT_USER }}
+          MACOS_TEAM: ${{ secrets.MACOS_TEAM }}
+          MACOS_ACCOUNT_PASS: ${{ secrets.MACOS_ACCOUNT_PASS }}
+        run: |
+          python3 - <<'PYCONFIG'
+          import os
+          names = ('MACOS_CERTIFICATES', 'MACOS_CERTIFICATE_PWD', 'MACOS_CERTIFICATE_FINGERPRINT',
+                   'MACOS_ACCOUNT_USER', 'MACOS_TEAM', 'MACOS_ACCOUNT_PASS')
+          missing = [name for name in names if not os.environ.get(name)]
+          if missing:
+              raise SystemExit('Missing signing configuration: ' + ', '.join(missing))
+          PYCONFIG
       - name: Install Developer ID certificate
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.MACOS_CERTIFICATES }}
           p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
-
       - name: Build and sign Final Cut package
         env:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
-        run: python3 scripts/build_finalcut_package.py --output-dir release-finalcut
-
-      - name: Notarize, staple, and verify Final Cut package
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
+        run: |
+          python3 scripts/finalcut_release.py check-signing
+          python3 scripts/build_finalcut_package.py --output-dir release-finalcut
+      - name: Notarize, staple and verify final ZIP
         env:
           NOTARY_APPLE_ID: ${{ secrets.MACOS_ACCOUNT_USER }}
           NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
           NOTARY_PASSWORD: ${{ secrets.MACOS_ACCOUNT_PASS }}
         run: >-
           python3 scripts/notarize_finalcut_package.py
-          --app "release-finalcut/GyroflowNiYien Final Cut.app"
+          --app "release-finalcut/NiYien FCP.app"
           --zip release-finalcut/GyroflowNiyien-FinalCut-macos.zip
-
-      - name: Upload directly consumable Final Cut zip
+          --result release-finalcut/notary-result.json
+      - name: Record final input and artifact hashes
+        run: python3 scripts/finalcut_release.py summary --directory release-finalcut
+      - name: Build and notarize drag-to-Applications installer
+        env:
+          SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_ACCOUNT_USER }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_ACCOUNT_PASS }}
+        run: >-
+          python3 scripts/build_finalcut_dmg.py
+          --app "release-finalcut/NiYien FCP.app"
+          --output release-finalcut/GyroflowNiyien-FinalCut-macos.dmg
+          --notarize
+      - name: Upload drag-to-Applications installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: GyroflowNiyien-FinalCut-macos-dmg
+          path: release-finalcut/GyroflowNiyien-FinalCut-macos.dmg
+          if-no-files-found: error
+      - name: Upload directly consumable Final Cut ZIP
         uses: actions/upload-artifact@v4
         with:
           name: GyroflowNiyien-FinalCut-macos
           path: release-finalcut/GyroflowNiyien-FinalCut-macos.zip
+          if-no-files-found: error
+      - name: Upload release evidence separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: finalcut-release-evidence
+          path: |
+            release-finalcut/notary-result.json
+            release-finalcut/finalcut-release-summary.json
+            release-finalcut/GyroflowNiyien-FinalCut-macos.json
           if-no-files-found: error

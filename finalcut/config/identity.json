@@ -1,11 +1,14 @@
 {
   "app_bundle_id": "com.niyien.gyroflow.finalcut",
-  "app_name": "GyroflowNiYien Final Cut",
+  "app_name": "NiYien FCP",
   "build_version": "2",
   "effect_bundle_id": "com.niyien.gyroflow.finalcut.effect",
   "effect_name": "Gyroflow NiYien",
   "effect_uuid": "ABAD71F5-23F5-46F6-AB08-C11603168AA4",
   "group_uuid": "6E6AD8F0-BF38-4225-A087-9E58C3DAD88E",
   "marketing_version": "2.1.2",
-  "team_id": "H59FJRN2AM"
+  "team_id": "H59FJRN2AM",
+  "app_executable": "GyroflowNiYien Final Cut",
+  "app_icon": "Icon.icns",
+  "app_icon_sha256": "3eaf98a9f7bdbc70d37d1d0cd41c30ca7ed76a6fc9c0ce20a60049fc09b22926"
 }

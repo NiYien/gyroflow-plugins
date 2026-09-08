@@ -4,11 +4,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface RouteDProcessor : NSObject
 
-+ (nullable NSDictionary<NSString *, NSData *> *)processFCPXML:(NSData *)input
-                                                 processedName:(NSString *)processedName
-                                                         error:(NSError **)error;
 + (nullable NSDictionary<NSString *, NSData *> *)processBatchFCPXML:(NSData *)input
-                                                      processedName:(NSString *)processedName
+                                                        documentURL:(NSURL *)documentURL
                                                               error:(NSError **)error;
 
 @end

@@ -1,5 +1,6 @@
 #import "GFProjectStore.h"
 
+#import "GFLocalization.h"
 #import "GyroflowFinalCut.h"
 
 NSString *const GFProjectStoreErrorDomain =
@@ -13,22 +14,117 @@ static NSString *GFProjectBridgeError(const GFError *error, NSString *fallback) 
     return message ?: fallback;
 }
 
-static BOOL GFBuildProjectPayload(
+static NSString *GFStoredProjectName(NSString *displayName) {
+    NSString *filename = displayName.lastPathComponent;
+    if (filename.length == 0) {
+        return GFLocalized(@"effect.project.embedded_name", @"Embedded project");
+    }
+    return filename;
+}
+
+static NSString *GFStoredProjectFilename(NSString *displayName) {
+    NSString *filename = displayName.lastPathComponent;
+    return filename.length > 0 ? filename : @"embedded-project";
+}
+
+static const NSUInteger GFMaximumRawProjectBytes = 256 * 1024 * 1024;
+static const NSUInteger GFProjectReadChunkBytes = 1024 * 1024;
+static const NSTimeInterval GFHostReadbackTimeoutSeconds = 5.0;
+
+static NSData *GFReadBoundedProjectData(NSURL *url, NSError **error) {
+    NSNumber *fileSize = nil;
+    if (![url getResourceValue:&fileSize forKey:NSURLFileSizeKey error:error]) {
+        return nil;
+    }
+    if (fileSize.unsignedLongLongValue > GFMaximumRawProjectBytes) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                         code:GFProjectStoreErrorReadFailed
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey : GFLocalized(
+                                             @"effect.error.project_too_large",
+                                             @"Project exceeds the 256 MiB size limit")
+                                     }];
+        }
+        return nil;
+    }
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:url error:error];
+    if (handle == nil) {
+        return nil;
+    }
+    NSMutableData *data = [NSMutableData dataWithCapacity:fileSize.unsignedIntegerValue];
+    while (data.length <= GFMaximumRawProjectBytes) {
+        NSUInteger remaining = GFMaximumRawProjectBytes + 1 - data.length;
+        NSData *chunk = [handle readDataUpToLength:MIN(remaining, GFProjectReadChunkBytes)
+                                            error:error];
+        if (chunk == nil) {
+            [handle closeAndReturnError:NULL];
+            return nil;
+        }
+        if (chunk.length == 0) {
+            break;
+        }
+        [data appendData:chunk];
+    }
+    [handle closeAndReturnError:NULL];
+    if (data.length > GFMaximumRawProjectBytes) {
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                         code:GFProjectStoreErrorReadFailed
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey : GFLocalized(
+                                             @"effect.error.project_too_large",
+                                             @"Project exceeds the 256 MiB size limit")
+                                     }];
+        }
+        return nil;
+    }
+    return data;
+}
+
+@interface GFProjectImportCandidate ()
+@property(nonatomic, readwrite) NSData *projectData;
+@property(nonatomic, readwrite) NSString *projectPayload;
+@property(nonatomic, readwrite) NSString *projectDisplayName;
+@property(nonatomic, readwrite) GFRenderParameters parameters;
+@end
+
+@implementation GFProjectImportCandidate
+
+- (instancetype)initWithProjectData:(NSData *)projectData
+                     projectPayload:(NSString *)projectPayload
+                  projectDisplayName:(NSString *)projectDisplayName
+                          parameters:(GFRenderParameters)parameters {
+    self = [super init];
+    if (self != nil) {
+        self.projectData = [projectData copy];
+        self.projectPayload = [projectPayload copy];
+        self.projectDisplayName = [projectDisplayName copy];
+        self.parameters = parameters;
+    }
+    return self;
+}
+
+@end
+
+static GFProjectImportCandidate *GFBuildProjectImportCandidate(
     NSData *projectData,
-    NSString * _Nullable *payload,
+    NSString *projectDisplayName,
     NSError **error
 ) {
     GFError *bridgeError = NULL;
     GFFinalCutInstance *instance = gf_finalcut_instance_create(&bridgeError);
     if (instance == NULL) {
-        NSString *message = GFProjectBridgeError(bridgeError, @"unable to create project validator");
+        NSString *message = GFProjectBridgeError(
+            bridgeError,
+            GFLocalized(@"effect.error.validation_failed", @"Project validation failed"));
         if (error != NULL) {
             *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
                                          code:GFProjectStoreErrorInvalidProject
                                      userInfo:@{NSLocalizedDescriptionKey : message}];
         }
         gf_finalcut_error_free(bridgeError);
-        return NO;
+        return nil;
     }
     GFStatus status = gf_finalcut_instance_load_project(
         instance,
@@ -37,7 +133,9 @@ static BOOL GFBuildProjectPayload(
         &bridgeError
     );
     if (status != GF_STATUS_OK) {
-        NSString *message = GFProjectBridgeError(bridgeError, @"invalid Gyroflow project");
+        NSString *message = GFProjectBridgeError(
+            bridgeError,
+            GFLocalized(@"effect.error.validation_failed", @"Project validation failed"));
         if (error != NULL) {
             *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
                                          code:GFProjectStoreErrorInvalidProject
@@ -45,7 +143,30 @@ static BOOL GFBuildProjectPayload(
         }
         gf_finalcut_error_free(bridgeError);
         gf_finalcut_instance_free(instance);
-        return NO;
+        return nil;
+    }
+    gf_finalcut_error_free(bridgeError);
+    bridgeError = NULL;
+
+    GFRenderParameters parameters = {0};
+    status = gf_finalcut_instance_get_project_render_parameters(
+        instance,
+        &parameters,
+        &bridgeError
+    );
+    if (status != GF_STATUS_OK) {
+        NSString *message = GFProjectBridgeError(
+            bridgeError,
+            GFLocalized(@"effect.error.validation_failed", @"Project validation failed")
+        );
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                         code:GFProjectStoreErrorInvalidProject
+                                     userInfo:@{NSLocalizedDescriptionKey : message}];
+        }
+        gf_finalcut_error_free(bridgeError);
+        gf_finalcut_instance_free(instance);
+        return nil;
     }
     gf_finalcut_error_free(bridgeError);
     bridgeError = NULL;
@@ -66,66 +187,92 @@ static BOOL GFBuildProjectPayload(
     gf_finalcut_owned_bytes_free(&encoded);
     gf_finalcut_instance_free(instance);
     if (status != GF_STATUS_OK || encodedPayload.length == 0) {
-        NSString *message = GFProjectBridgeError(bridgeError, @"unable to encode project payload");
+        NSString *message = GFProjectBridgeError(
+            bridgeError,
+            GFLocalized(@"effect.error.validation_failed", @"Project validation failed"));
         if (error != NULL) {
             *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
                                          code:GFProjectStoreErrorInvalidPayload
                                      userInfo:@{NSLocalizedDescriptionKey : message}];
         }
         gf_finalcut_error_free(bridgeError);
-        return NO;
+        return nil;
     }
     gf_finalcut_error_free(bridgeError);
-    if (payload != NULL) {
-        *payload = encodedPayload;
-    }
-    return YES;
+    return [[GFProjectImportCandidate alloc]
+        initWithProjectData:projectData
+             projectPayload:encodedPayload
+          projectDisplayName:projectDisplayName
+                  parameters:parameters];
 }
 
 @interface GFProjectStore ()
-@property(nonatomic, copy) GFProjectPayloadBuilder payloadBuilder;
+@property(nonatomic, copy) GFProjectImportCandidateBuilder importCandidateBuilder;
 @property(nonatomic, readwrite, nullable) NSData *currentProjectData;
 @property(nonatomic, readwrite, nullable) NSString *currentProjectPayload;
+@property(nonatomic, readwrite, nullable) GFProjectImportCandidate *currentProjectCandidate;
+@property(nonatomic, readwrite) NSString *currentProjectName;
+@property(nonatomic, readwrite) NSString *currentProjectFilename;
 @property(nonatomic, readwrite) NSString *status;
+@property(nonatomic, readwrite) GFProjectModeStatus modeStatus;
+@property(nonatomic, readwrite) NSUInteger currentProjectGeneration;
+@property(nonatomic) NSUInteger nextProjectGeneration;
+@property(nonatomic) BOOL pendingCommitInFlight;
 @property(nonatomic, nullable) NSData *pendingPreviousProjectData;
 @property(nonatomic, nullable) NSString *pendingPreviousProjectPayload;
+@property(nonatomic, nullable) GFProjectImportCandidate *pendingPreviousProjectCandidate;
+@property(nonatomic, nullable) NSString *pendingPreviousProjectName;
+@property(nonatomic, nullable) NSString *pendingPreviousProjectFilename;
 @property(nonatomic, nullable) NSString *pendingPreviousStatus;
+@property(nonatomic) GFProjectModeStatus pendingPreviousModeStatus;
 @property(nonatomic, nullable) NSString *pendingExpectedProjectPayload;
+@property(nonatomic, nullable) GFProjectImportCandidate *pendingProjectCandidate;
 @property(nonatomic, nullable) NSString *pendingProjectName;
+@property(nonatomic) NSUInteger pendingPreviousProjectGeneration;
+@property(nonatomic) NSUInteger pendingProjectGeneration;
 @end
 
 @implementation GFProjectStore
 
 - (instancetype)init {
-    return [self initWithPayloadBuilder:^BOOL(
+    return [self initWithImportCandidateBuilder:^GFProjectImportCandidate *(
         NSData *projectData,
-        NSString * _Nullable *payload,
+        NSString *projectDisplayName,
         NSError **error
     ) {
-        return GFBuildProjectPayload(projectData, payload, error);
+        return GFBuildProjectImportCandidate(projectData, projectDisplayName, error);
     }];
 }
 
-- (instancetype)initWithPayloadBuilder:(GFProjectPayloadBuilder)payloadBuilder {
+- (instancetype)initWithImportCandidateBuilder:
+        (GFProjectImportCandidateBuilder)importCandidateBuilder {
     self = [super init];
     if (self != nil) {
-        self.payloadBuilder = payloadBuilder;
-        self.status = @"Import a .gyroflow project";
+        self.importCandidateBuilder = importCandidateBuilder;
+        self.currentProjectName = @"";
+        self.currentProjectFilename = @"embedded-project";
+        self.status = GFLocalized(@"effect.status.load_project",
+                                  @"Load a .gyroflow project");
+        self.modeStatus = GFProjectModeStatusNone;
+        self.nextProjectGeneration = 1;
     }
     return self;
 }
 
 - (BOOL)failWithCode:(GFProjectStoreErrorCode)code
                   url:(NSURL *)url
-              message:(NSString *)message
+                message:(NSString *)message
                 error:(NSError **)error {
-    NSString *preservation = self.currentProjectPayload != nil
-        ? @"kept previous project"
-        : @"no project loaded";
-    self.status = [NSString stringWithFormat:@"Rejected %@: %@; %@",
-                   url.lastPathComponent,
-                   message,
-                   preservation];
+    @synchronized(self) {
+        NSString *preservation = self.currentProjectPayload != nil
+            ? GFLocalized(@"effect.status.kept_previous", @"kept previous project")
+            : GFLocalized(@"effect.status.none_loaded", @"no project loaded");
+        self.status = [NSString stringWithFormat:GFLocalized(
+                           @"effect.status.rejected", @"Rejected %@: %@; %@"),
+                       url.lastPathComponent,
+                       message,
+                       preservation];
+    }
     if (error != NULL) {
         *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
                                      code:code
@@ -135,102 +282,322 @@ static BOOL GFBuildProjectPayload(
 }
 
 - (BOOL)importProjectURL:(NSURL *)url error:(NSError **)error {
-    return [self importProjectURL:url commitPayload:nil error:error];
+    return [self importProjectURL:url commitCandidate:nil error:error];
 }
 
-- (BOOL)importProjectURL:(NSURL *)url
-           commitPayload:(BOOL (^)(NSString *projectPayload))commitPayload
-                   error:(NSError **)error {
+- (nullable GFProjectImportCandidate *)prepareImportProjectURL:(NSURL *)url
+                                                          error:(NSError **)error {
     if (!url.isFileURL ||
         ![[url.pathExtension lowercaseString] isEqualToString:@"gyroflow"]) {
-        return [self failWithCode:GFProjectStoreErrorWrongExtension
-                              url:url
-                          message:@"only .gyroflow project files are allowed"
-                            error:error];
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                         code:GFProjectStoreErrorWrongExtension
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey : GFLocalized(
+                                             @"effect.error.only_gyroflow",
+                                             @"Only .gyroflow project files are allowed")
+                                     }];
+        }
+        return nil;
     }
     BOOL accessedSecurityScope = [url startAccessingSecurityScopedResource];
     NSError *readError = nil;
-    NSData *data = [NSData dataWithContentsOfURL:url
-                                        options:NSDataReadingMappedIfSafe
-                                          error:&readError];
+    NSData *data = GFReadBoundedProjectData(url, &readError);
     if (accessedSecurityScope) {
         [url stopAccessingSecurityScopedResource];
     }
     if (data == nil) {
-        return [self failWithCode:GFProjectStoreErrorReadFailed
-                              url:url
-                          message:[NSString stringWithFormat:@"project is not readable (%@)",
-                                                             readError.localizedDescription
-                                                                 ?: @"unknown error"]
-                            error:error];
+        if (error != NULL) {
+            NSString *message = [NSString stringWithFormat:GFLocalized(
+                                     @"effect.error.project_unreadable",
+                                     @"Project is not readable (%@)"),
+                                 readError.localizedDescription
+                                     ?: GFLocalized(@"effect.error.unknown",
+                                                    @"unknown error")];
+            *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                         code:GFProjectStoreErrorReadFailed
+                                     userInfo:@{NSLocalizedDescriptionKey : message}];
+        }
+        return nil;
     }
 
+    NSString *projectDisplayName = url.lastPathComponent;
     NSError *validationError = nil;
-    NSString *payload = nil;
-    if (!self.payloadBuilder(data, &payload, &validationError) || payload.length == 0) {
-        return [self failWithCode:GFProjectStoreErrorInvalidProject
-                              url:url
-                          message:validationError.localizedDescription
-                              ?: @"project validation failed"
-                            error:error];
+    GFProjectImportCandidate *builtCandidate =
+        self.importCandidateBuilder(data, projectDisplayName, &validationError);
+    if (builtCandidate == nil || builtCandidate.projectPayload.length == 0) {
+        if (error != NULL) {
+            NSString *message = validationError.localizedDescription
+                ?: GFLocalized(@"effect.error.validation_failed",
+                               @"Project validation failed");
+            *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                         code:GFProjectStoreErrorInvalidProject
+                                     userInfo:@{NSLocalizedDescriptionKey : message}];
+        }
+        return nil;
     }
-    NSData *previousData = self.currentProjectData;
-    NSString *previousPayload = self.currentProjectPayload;
-    NSString *previousStatus = self.status;
-    self.currentProjectData = [data copy];
-    self.currentProjectPayload = [payload copy];
-    self.status = [NSString stringWithFormat:@"Loaded %@ (%lu bytes)",
-                   url.lastPathComponent,
-                   (unsigned long)data.length];
-    if (commitPayload != nil) {
-        if (!commitPayload(payload)) {
-            self.currentProjectData = previousData;
-            self.currentProjectPayload = previousPayload;
-            self.status = previousStatus;
+    return [[GFProjectImportCandidate alloc]
+        initWithProjectData:data
+             projectPayload:builtCandidate.projectPayload
+          projectDisplayName:projectDisplayName
+                  parameters:builtCandidate.parameters];
+}
+
+- (void)recordImportFailureForURL:(NSURL *)url error:(NSError *)error {
+    GFProjectStoreErrorCode code = [error.domain isEqualToString:GFProjectStoreErrorDomain]
+        ? (GFProjectStoreErrorCode)error.code
+        : GFProjectStoreErrorInvalidProject;
+    [self failWithCode:code
+                   url:url
+               message:error.localizedDescription
+                   ?: GFLocalized(@"effect.error.validation_failed",
+                                  @"Project validation failed")
+                 error:NULL];
+}
+
+- (BOOL)commitPreparedImportCandidate:(GFProjectImportCandidate *)candidate
+                            sourceURL:(NSURL *)sourceURL
+                       commitCandidate:(BOOL (^)(GFProjectImportCandidate *candidate))commitCandidate
+                                 error:(NSError **)error {
+    __block NSData *previousData = nil;
+    __block NSString *previousPayload = nil;
+    __block GFProjectImportCandidate *previousCandidate = nil;
+    __block NSString *previousProjectName = nil;
+    __block NSString *previousProjectFilename = nil;
+    __block NSString *previousStatus = nil;
+    __block GFProjectModeStatus previousModeStatus = GFProjectModeStatusNone;
+    __block NSUInteger previousGeneration = 0;
+    __block NSUInteger pendingGeneration = 0;
+    if (commitCandidate != nil) {
+        __block BOOL reserved = NO;
+        @synchronized(self) {
+            if (!self.pendingCommitInFlight && self.pendingExpectedProjectPayload == nil) {
+                self.pendingCommitInFlight = YES;
+                previousData = self.currentProjectData;
+                previousPayload = self.currentProjectPayload;
+                previousCandidate = self.currentProjectCandidate;
+                previousProjectName = self.currentProjectName;
+                previousProjectFilename = self.currentProjectFilename;
+                previousStatus = self.status;
+                previousModeStatus = self.modeStatus;
+                previousGeneration = self.currentProjectGeneration;
+                reserved = YES;
+            }
+        }
+        if (!reserved) {
+            return [self failWithCode:GFProjectStoreErrorCommitPending
+                                  url:sourceURL
+                              message:GFLocalized(
+                                  @"effect.error.commit_pending",
+                                  @"Wait for Final Cut to confirm the previous project load")
+                                error:error];
+        }
+        // Commit the new candidate without publishing it as the current project first.
+        BOOL committed = commitCandidate(candidate);
+        @synchronized(self) {
+            self.pendingCommitInFlight = NO;
+        }
+        if (!committed) {
             return [self failWithCode:GFProjectStoreErrorCommitFailed
-                                  url:url
-                              message:@"Final Cut did not persist the project payload"
+                                  url:sourceURL
+                              message:GFLocalized(@"effect.error.persist_failed",
+                                                  @"Final Cut did not persist the project payload")
                                 error:error];
         }
         @synchronized(self) {
+            pendingGeneration = self.nextProjectGeneration++;
             self.pendingPreviousProjectData = previousData;
             self.pendingPreviousProjectPayload = previousPayload;
+            self.pendingPreviousProjectCandidate = previousCandidate;
+            self.pendingPreviousProjectName = previousProjectName;
+            self.pendingPreviousProjectFilename = previousProjectFilename;
             self.pendingPreviousStatus = previousStatus;
-            self.pendingExpectedProjectPayload = payload;
-            self.pendingProjectName = url.lastPathComponent;
+            self.pendingPreviousModeStatus = previousModeStatus;
+            self.pendingExpectedProjectPayload = candidate.projectPayload;
+            self.pendingProjectCandidate = candidate;
+            self.pendingProjectName = candidate.projectDisplayName;
+            self.pendingPreviousProjectGeneration = previousGeneration;
+            self.pendingProjectGeneration = pendingGeneration;
+            self.status = [NSString stringWithFormat:GFLocalized(
+                               @"effect.status.awaiting_confirmation",
+                               @"Waiting for Final Cut to confirm %@"),
+                           candidate.projectDisplayName];
+            self.modeStatus = GFProjectModeStatusPending;
+        }
+        dispatch_after(dispatch_time(
+                           DISPATCH_TIME_NOW,
+                           (int64_t)(GFHostReadbackTimeoutSeconds * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [self expirePendingHostReadbackGeneration:pendingGeneration];
+        });
+    } else {
+        @synchronized(self) {
+            self.currentProjectData = candidate.projectData;
+            self.currentProjectPayload = candidate.projectPayload;
+            self.currentProjectCandidate = candidate;
+            self.currentProjectName = candidate.projectDisplayName;
+            self.currentProjectFilename = candidate.projectDisplayName;
+            self.currentProjectGeneration = self.nextProjectGeneration++;
+            self.status = [NSString stringWithFormat:GFLocalized(
+                               @"effect.status.loaded", @"Loaded %@ (%lu bytes)"),
+                           self.currentProjectName,
+                           (unsigned long)candidate.projectData.length];
+            self.modeStatus = GFProjectModeStatusDirect;
         }
     }
     return YES;
 }
 
-- (BOOL)reconcileHostPersistedProjectPayload:(NSString *)projectPayload {
+- (BOOL)importProjectURL:(NSURL *)url
+         commitCandidate:(BOOL (^)(GFProjectImportCandidate *candidate))commitCandidate
+                   error:(NSError **)error {
+    NSError *preparationError = nil;
+    GFProjectImportCandidate *candidate = [self prepareImportProjectURL:url
+                                                                   error:&preparationError];
+    if (candidate == nil) {
+        NSError *resolvedError = preparationError
+            ?: [NSError errorWithDomain:GFProjectStoreErrorDomain
+                                    code:GFProjectStoreErrorInvalidProject
+                                userInfo:@{
+                                    NSLocalizedDescriptionKey : GFLocalized(
+                                        @"effect.error.validation_failed",
+                                        @"Project validation failed")
+                                }];
+        [self recordImportFailureForURL:url error:resolvedError];
+        if (error != NULL) {
+            *error = resolvedError;
+        }
+        return NO;
+    }
+    return [self commitPreparedImportCandidate:candidate
+                                     sourceURL:url
+                                commitCandidate:commitCandidate
+                                          error:error];
+}
+
+- (NSUInteger)beginHostProjectReadback {
     @synchronized(self) {
-        if (self.pendingExpectedProjectPayload == nil) {
+        return self.pendingExpectedProjectPayload != nil
+            ? self.pendingProjectGeneration
+            : self.currentProjectGeneration;
+    }
+}
+
+- (BOOL)reconcileHostPersistedProjectPayload:(NSString *)projectPayload {
+    return [self reconcileHostPersistedProjectPayload:projectPayload
+                                   readbackGeneration:[self beginHostProjectReadback]];
+}
+
+- (BOOL)reconcileHostPersistedProjectPayload:(NSString *)projectPayload
+                          readbackGeneration:(NSUInteger)readbackGeneration {
+    @synchronized(self) {
+        if (self.pendingExpectedProjectPayload == nil ||
+            readbackGeneration != self.pendingProjectGeneration) {
             return NO;
         }
         if (![projectPayload isEqualToString:self.pendingExpectedProjectPayload]) {
-            self.currentProjectData = self.pendingPreviousProjectData;
-            self.currentProjectPayload = self.pendingPreviousProjectPayload;
             NSString *preservation = self.currentProjectPayload != nil
-                ? @"kept previous project"
-                : @"no project loaded";
-            self.status = [NSString stringWithFormat:
-                @"Rejected %@: Final Cut did not persist the project payload; %@",
-                self.pendingProjectName ?: @"project",
+                ? GFLocalized(@"effect.status.kept_previous", @"kept previous project")
+                : GFLocalized(@"effect.status.none_loaded", @"no project loaded");
+            NSString *failure = GFLocalized(@"effect.error.persist_failed",
+                @"Final Cut did not persist the project payload");
+            self.status = [NSString stringWithFormat:GFLocalized(
+                @"effect.status.rejected", @"Rejected %@: %@; %@"),
+                self.pendingProjectName
+                    ?: GFLocalized(@"effect.project.unnamed", @"project"),
+                failure,
                 preservation];
+            self.modeStatus = self.pendingPreviousModeStatus;
+        } else {
+            GFProjectImportCandidate *candidate = self.pendingProjectCandidate;
+            self.currentProjectData = candidate.projectData;
+            self.currentProjectPayload = candidate.projectPayload;
+            self.currentProjectCandidate = candidate;
+            self.currentProjectName = candidate.projectDisplayName;
+            self.currentProjectFilename = candidate.projectDisplayName;
+            self.currentProjectGeneration = self.pendingProjectGeneration;
+            self.status = [NSString stringWithFormat:GFLocalized(
+                               @"effect.status.loaded", @"Loaded %@ (%lu bytes)"),
+                           self.currentProjectName,
+                           (unsigned long)candidate.projectData.length];
+            self.modeStatus = GFProjectModeStatusDirect;
         }
         self.pendingPreviousProjectData = nil;
         self.pendingPreviousProjectPayload = nil;
+        self.pendingPreviousProjectCandidate = nil;
+        self.pendingPreviousProjectName = nil;
+        self.pendingPreviousProjectFilename = nil;
         self.pendingPreviousStatus = nil;
+        self.pendingPreviousModeStatus = GFProjectModeStatusNone;
         self.pendingExpectedProjectPayload = nil;
+        self.pendingProjectCandidate = nil;
         self.pendingProjectName = nil;
+        self.pendingPreviousProjectGeneration = 0;
+        self.pendingProjectGeneration = 0;
         return YES;
     }
 }
 
+- (BOOL)failPendingHostReadbackLockedWithMessage:(NSString *)message {
+    if (self.pendingExpectedProjectPayload == nil) {
+        return NO;
+    }
+    NSString *preservation = self.currentProjectPayload != nil
+        ? GFLocalized(@"effect.status.kept_previous", @"kept previous project")
+        : GFLocalized(@"effect.status.none_loaded", @"no project loaded");
+    self.status = [NSString stringWithFormat:GFLocalized(
+                       @"effect.status.rejected", @"Rejected %@: %@; %@"),
+                   self.pendingProjectName
+                       ?: GFLocalized(@"effect.project.unnamed", @"project"),
+                   message,
+                   preservation];
+    self.modeStatus = self.pendingPreviousModeStatus;
+    self.pendingPreviousProjectData = nil;
+    self.pendingPreviousProjectPayload = nil;
+    self.pendingPreviousProjectCandidate = nil;
+    self.pendingPreviousProjectName = nil;
+    self.pendingPreviousProjectFilename = nil;
+    self.pendingPreviousStatus = nil;
+    self.pendingPreviousModeStatus = GFProjectModeStatusNone;
+    self.pendingExpectedProjectPayload = nil;
+    self.pendingProjectCandidate = nil;
+    self.pendingProjectName = nil;
+    self.pendingPreviousProjectGeneration = 0;
+    self.pendingProjectGeneration = 0;
+    return YES;
+}
+
+- (BOOL)failPendingHostReadbackWithMessage:(NSString *)message {
+    @synchronized(self) {
+        return [self failPendingHostReadbackLockedWithMessage:message];
+    }
+}
+
+- (BOOL)expirePendingHostReadbackGeneration:(NSUInteger)generation {
+    @synchronized(self) {
+        if (self.pendingExpectedProjectPayload == nil ||
+            generation != self.pendingProjectGeneration) {
+            return NO;
+        }
+        return [self failPendingHostReadbackLockedWithMessage:GFLocalized(
+            @"effect.error.persist_timeout",
+            @"Final Cut did not confirm the project payload in time")];
+    }
+}
+
 - (BOOL)restoreProjectPayload:(NSString *)payload error:(NSError **)error {
+    return [self restoreProjectPayload:payload displayName:@"" error:error];
+}
+
+- (BOOL)restoreProjectPayload:(NSString *)payload
+                  displayName:(NSString *)displayName
+                        error:(NSError **)error {
     if (payload.length == 0) {
-        self.status = @"Import a .gyroflow project";
+        @synchronized(self) {
+            self.status = GFLocalized(@"effect.status.load_project",
+                                      @"Load a .gyroflow project");
+            self.modeStatus = GFProjectModeStatusNone;
+        }
         return NO;
     }
     NSData *payloadData = [payload dataUsingEncoding:NSASCIIStringEncoding];
@@ -246,8 +613,15 @@ static BOOL GFBuildProjectPayload(
           );
     gf_finalcut_instance_free(instance);
     if (status != GF_STATUS_OK) {
-        NSString *message = GFProjectBridgeError(bridgeError, @"invalid embedded project payload");
-        self.status = [NSString stringWithFormat:@"Embedded project unavailable: %@", message];
+        NSString *message = GFProjectBridgeError(
+            bridgeError,
+            GFLocalized(@"effect.error.validation_failed", @"Project validation failed"));
+        @synchronized(self) {
+            self.status = [NSString stringWithFormat:GFLocalized(
+                               @"effect.status.embedded_unavailable",
+                               @"Embedded project unavailable: %@"),
+                           message];
+        }
         if (error != NULL) {
             *error = [NSError errorWithDomain:GFProjectStoreErrorDomain
                                          code:GFProjectStoreErrorInvalidPayload
@@ -257,25 +631,40 @@ static BOOL GFBuildProjectPayload(
         return NO;
     }
     gf_finalcut_error_free(bridgeError);
-    self.currentProjectPayload = [payload copy];
-    self.currentProjectData = nil;
-    self.status = @"Embedded .gyroflow project ready";
+    @synchronized(self) {
+        self.currentProjectPayload = [payload copy];
+        self.currentProjectData = nil;
+        self.currentProjectCandidate = nil;
+        self.currentProjectName = GFStoredProjectName(displayName);
+        self.currentProjectFilename = GFStoredProjectFilename(displayName);
+        self.currentProjectGeneration = self.nextProjectGeneration++;
+        self.status = [NSString stringWithFormat:GFLocalized(
+                           @"effect.status.ready", @"%@ ready"),
+                       self.currentProjectName];
+        self.modeStatus = GFProjectModeStatusDirect;
+    }
     return YES;
 }
 
 - (BOOL)restorePersistedProjectPayload:(NSString *)projectPayload
+                           displayName:(NSString *)displayName
                          timingPayload:(NSString *)timingPayload
                                  error:(NSError **)error {
-    if (![self restoreProjectPayload:projectPayload error:error]) {
+    if (![self restoreProjectPayload:projectPayload
+                         displayName:displayName
+                               error:error]) {
         return NO;
     }
     if (timingPayload.length == 0) {
         [self recordDirectModeReady];
+    } else {
+        [self recordRouteDModeReady];
     }
     return YES;
 }
 
 - (BOOL)restoreValidatedRenderProjectPayloadIfEmpty:(NSString *)projectPayload
+                                        displayName:(NSString *)displayName
                                       timingPayload:(NSString *)timingPayload {
     if (projectPayload.length == 0) {
         return NO;
@@ -286,28 +675,71 @@ static BOOL GFBuildProjectPayload(
         }
         self.currentProjectPayload = [projectPayload copy];
         self.currentProjectData = nil;
+        self.currentProjectCandidate = nil;
+        self.currentProjectName = GFStoredProjectName(displayName);
+        self.currentProjectFilename = GFStoredProjectFilename(displayName);
+        self.currentProjectGeneration = self.nextProjectGeneration++;
         self.status = timingPayload.length == 0
-            ? @"Direct mode ready (untrimmed forward 1×). Complex edits: use Process Current Final Cut Project."
-            : @"Embedded .gyroflow project ready";
+            ? [NSString stringWithFormat:GFLocalized(
+                  @"effect.status.ready_direct", @"%@ ready (direct mode)"),
+                  self.currentProjectName]
+            : [NSString stringWithFormat:GFLocalized(
+                  @"effect.status.ready", @"%@ ready"), self.currentProjectName];
+        self.modeStatus = timingPayload.length == 0
+            ? GFProjectModeStatusDirect
+            : GFProjectModeStatusRouteD;
         return YES;
     }
 }
 
 - (void)recordAuthorizationCancellation {
-    NSString *preservation = self.currentProjectPayload != nil
-        ? @"kept previous project"
-        : @"no project loaded";
-    self.status = [NSString stringWithFormat:@"Authorization cancelled; %@", preservation];
+    @synchronized(self) {
+        NSString *preservation = self.currentProjectPayload != nil
+            ? GFLocalized(@"effect.status.kept_previous", @"kept previous project")
+            : GFLocalized(@"effect.status.none_loaded", @"no project loaded");
+        self.status = [NSString stringWithFormat:GFLocalized(
+                           @"effect.status.authorization_cancelled",
+                           @"Authorization cancelled; %@"),
+                       preservation];
+    }
 }
 
 - (void)recordDirectModeReady {
-    self.status = @"Direct mode ready (untrimmed forward 1×). Complex edits: use Process Current Final Cut Project.";
+    @synchronized(self) {
+        NSString *name = self.currentProjectName.length > 0
+            ? self.currentProjectName
+            : GFLocalized(@"effect.project.embedded_name", @"Embedded project");
+        self.status = [NSString stringWithFormat:GFLocalized(
+                           @"effect.status.ready_direct", @"%@ ready (direct mode)"),
+                       name];
+        self.modeStatus = GFProjectModeStatusDirect;
+    }
+}
+
+- (void)recordRouteDModeReady {
+    @synchronized(self) {
+        NSString *name = self.currentProjectName.length > 0
+            ? self.currentProjectName
+            : GFLocalized(@"effect.project.embedded_name", @"Embedded project");
+        self.status = [NSString stringWithFormat:GFLocalized(
+                           @"effect.status.ready_route_d", @"%@ ready (Route D)"),
+                       name];
+        self.modeStatus = GFProjectModeStatusRouteD;
+    }
 }
 
 - (void)recordReprocessRequired {
-    self.status = self.currentProjectPayload != nil
-        ? @"Project loaded; Reprocess Project Required for current timing"
-        : @"Import a .gyroflow project";
+    @synchronized(self) {
+        self.status = self.currentProjectPayload != nil
+            ? [NSString stringWithFormat:GFLocalized(
+                  @"effect.status.reprocess_required",
+                  @"%@; Reprocess Project Required for current timing"),
+                  self.currentProjectName]
+            : GFLocalized(@"effect.status.load_project", @"Load a .gyroflow project");
+        self.modeStatus = self.currentProjectPayload != nil
+            ? GFProjectModeStatusReprocessRequired
+            : GFProjectModeStatusNone;
+    }
 }
 
 @end

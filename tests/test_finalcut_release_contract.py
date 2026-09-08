@@ -28,6 +28,12 @@ class FinalCutPackageBuildContractTests(unittest.TestCase):
         module = load_script("build_finalcut_package_capacity_gate", BUILDER)
         module.require_capacity_gate(False)
 
+    def test_production_build_rejects_unverified_geometry_manifest(self):
+        module = load_script("build_finalcut_package_geometry_gate", BUILDER)
+        with self.assertRaisesRegex(RuntimeError, "pixel-verified"):
+            module.require_geometry_gate(False)
+        module.require_geometry_gate(True)
+
     def test_signing_order_is_frameworks_then_xpc_then_app(self):
         module = load_script("build_finalcut_package", BUILDER)
         with tempfile.TemporaryDirectory() as directory:
@@ -62,11 +68,32 @@ class FinalCutPackageBuildContractTests(unittest.TestCase):
         self.assertIn('ZIP_NAME = "GyroflowNiyien-FinalCut-macos.zip"', builder)
         self.assertIn("FxPlug.framework", builder)
         self.assertIn("PluginManager.framework", builder)
+        self.assertIn('"-archivePath"', builder)
+        self.assertIn('"archive"', builder)
+        self.assertIn('"Products" / "Applications"', builder)
+        self.assertNotIn('"build"', builder)
+        self.assertIn('"SWIFT_STRICT_CONCURRENCY=complete"', builder)
+        self.assertIn('"SWIFT_TREAT_WARNINGS_AS_ERRORS=YES"', builder)
+        self.assertIn('"GCC_TREAT_WARNINGS_AS_ERRORS=YES"', builder)
+        self.assertIn("require_geometry_gate", builder)
+        self.assertIn("geometry-support.json", builder)
         self.assertNotIn("WorkflowExtensionSDK", builder)
         self.assertIn('rglob("*.appex")', verifier)
         self.assertIn('"--deep", "--strict"', verifier)
         self.assertIn('"spctl"', verifier)
         self.assertIn('"stapler", "validate"', verifier)
+
+    def test_development_registration_is_explicit_symmetric_and_non_destructive(self):
+        manager = (SCRIPTS / "manage_finalcut_registration.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('choices=("status", "register", "unregister")', manager)
+        self.assertIn('operation = "-a" if', manager)
+        self.assertIn('else "-r"', manager)
+        self.assertIn("CFBundleIdentifier", manager)
+        self.assertNotIn("rmtree", manager)
+        self.assertNotIn("unlink(", manager)
 
     def test_wrapper_and_xpc_signed_entitlement_policy_is_fail_closed(self):
         with mock.patch.object(sys, "path", [str(SCRIPTS), *sys.path]):
@@ -76,29 +103,44 @@ class FinalCutPackageBuildContractTests(unittest.TestCase):
             "com.apple.security.files.bookmarks.app-scope": True,
             "com.apple.security.files.user-selected.read-only": True,
         }
+        app = {}
 
-        module.verify_entitlement_policy({}, effect)
+        self.assertEqual(module.APP_ENTITLEMENTS, app)
+        module.verify_entitlement_policy(app, effect)
 
         forbidden = (
             "com.apple.security.app-sandbox",
+            "com.apple.security.files.bookmarks.document-scope",
+            "com.apple.security.files.user-selected.read-write",
+            "com.apple.security.assets.movies.read-write",
             "com.apple.security.application-groups",
             "com.apple.security.cs.disable-library-validation",
             "com.apple.security.get-task-allow",
             "com.apple.security.network.client",
             "com.apple.security.network.server",
-            "com.apple.security.files.user-selected.read-write",
-            "com.apple.security.assets.movies.read-write",
+            "com.apple.security.automation.apple-events",
+            "com.apple.security.temporary-exception.apple-events",
+            "com.apple.security.temporary-exception.files.absolute-path.read-write",
+            "com.apple.private.tcc.allow",
         )
         for entitlement in forbidden:
             with self.subTest(entitlement=entitlement):
                 with self.assertRaises(ValueError):
-                    module.verify_entitlement_policy({entitlement: True}, effect)
+                    module.verify_entitlement_policy(
+                        {**app, entitlement: True},
+                        effect,
+                    )
 
         with self.assertRaises(ValueError):
-            module.verify_entitlement_policy({}, {})
+            module.verify_entitlement_policy(
+                {"com.apple.security.app-sandbox": True},
+                effect,
+            )
+        with self.assertRaises(ValueError):
+            module.verify_entitlement_policy(app, {})
         with self.assertRaises(ValueError):
             module.verify_entitlement_policy(
-                {},
+                app,
                 {**effect, "com.apple.security.network.client": True},
             )
 
@@ -115,12 +157,13 @@ class FinalCutNotaryAndWorkflowContractTests(unittest.TestCase):
         self.assertLess(staple, repackage)
         self.assertLess(repackage, notarized_verify)
 
-    def test_nightly_and_tag_use_signed_fxplug_runner_and_fixed_artifact(self):
+    def test_manual_and_tag_use_hosted_fxplug_runner_and_fixed_artifact(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("tags:", workflow)
-        self.assertIn("schedule:", workflow)
-        self.assertIn("runs-on: [self-hosted, macOS, fxplug-sdk]", workflow)
+        self.assertNotIn("schedule:", workflow)
+        self.assertIn("runs-on: macos-26", workflow)
+        self.assertNotIn("self-hosted", workflow)
         self.assertIn("scripts/build_finalcut_package.py", workflow)
         self.assertIn("scripts/notarize_finalcut_package.py", workflow)
         self.assertIn("--output-dir release-finalcut", workflow)

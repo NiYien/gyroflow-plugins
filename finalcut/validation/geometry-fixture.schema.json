@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gyroflow.xyz/schemas/finalcut-geometry-fixture-v1.json",
+  "title": "Gyroflow Final Cut geometry fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "host",
+    "locale",
+    "fcpxml",
+    "geometry",
+    "expected_transform",
+    "reference_frame",
+    "tolerance",
+    "support_result"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["macos", "final_cut", "bundle_identifier"],
+      "properties": {
+        "macos": { "type": "string", "minLength": 1 },
+        "final_cut": { "type": "string", "minLength": 1 },
+        "bundle_identifier": { "const": "com.apple.FinalCutApp" }
+      }
+    },
+    "locale": {
+      "enum": ["en", "zh-CN", "zh-TW", "ja", "ko", "ru"]
+    },
+    "fcpxml": {
+      "type": ["string", "null"]
+    },
+    "geometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "storage_orientation",
+        "display_rotation_degrees",
+        "aspect_ratio",
+        "pixel_aspect_ratio",
+        "spatial_conform",
+        "transform",
+        "crop",
+        "media_representation",
+        "render_surface",
+        "effect_mode",
+        "effect_instances"
+      ],
+      "properties": {
+        "storage_orientation": { "enum": ["landscape", "portrait"] },
+        "display_rotation_degrees": { "enum": [0, 90, 180, 270] },
+        "aspect_ratio": { "enum": ["16:9", "9:16", "1:1", "other"] },
+        "pixel_aspect_ratio": { "type": "string", "minLength": 1 },
+        "spatial_conform": { "enum": ["fit", "fill", "none"] },
+        "transform": { "enum": ["identity", "static", "keyframed"] },
+        "crop": { "enum": ["none", "crop", "trim", "ken_burns"] },
+        "media_representation": {
+          "enum": ["original", "proxy_half", "proxy_quarter", "better_performance"]
+        },
+        "render_surface": { "enum": ["preview", "thumbnail", "export"] },
+        "effect_mode": { "enum": ["direct", "route_d"] },
+        "effect_instances": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "expected_transform": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": { "type": "number" }
+    },
+    "reference_frame": {
+      "type": ["object", "null"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": ["path", "sha256"],
+      "additionalProperties": false
+    },
+    "tolerance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum_channel_error", "different_pixel_ratio"],
+      "properties": {
+        "maximum_channel_error": { "type": "number", "minimum": 0 },
+        "different_pixel_ratio": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "support_result": {
+      "enum": ["supported", "unsupported", "unverified"]
+    },
+    "reason": { "type": "string" }
+  }
+}

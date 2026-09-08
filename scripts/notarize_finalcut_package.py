@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -10,13 +12,17 @@ ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts" / "verify_finalcut_package.py"
 
 
-def run(command: list[str]) -> None:
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+def run(command: list[str], secrets: tuple[str, ...] = ()) -> str:
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=1800)
     if result.returncode != 0:
+        details = f"{result.stdout}{result.stderr}"
+        for value in secrets:
+            if value:
+                details = details.replace(value, "<redacted>")
         raise RuntimeError(
-            f"command failed ({result.returncode}): {' '.join(command)}\n"
-            f"{result.stdout}{result.stderr}"
+            f"{Path(command[0]).name} failed ({result.returncode})\n{details}"
         )
+    return result.stdout
 
 
 def main() -> None:
@@ -27,6 +33,7 @@ def main() -> None:
     parser.add_argument("--team-id", default=os.environ.get("NOTARY_TEAM_ID"))
     parser.add_argument("--password", default=os.environ.get("NOTARY_PASSWORD"))
     parser.add_argument("--keychain-profile")
+    parser.add_argument("--result", type=Path)
     arguments = parser.parse_args()
     try:
         run(
@@ -52,16 +59,22 @@ def main() -> None:
             ]
         else:
             raise RuntimeError("notary credentials or --keychain-profile are required")
-        run(
+        notary_output = run(
             [
                 "xcrun",
                 "notarytool",
                 "submit",
                 "--wait",
+                "--output-format",
+                "json",
                 *credentials,
                 str(arguments.zip_path),
-            ]
+            ],
+            secrets=tuple(value for value in (arguments.password, arguments.apple_id) if value),
         )
+        result = json.loads(notary_output)
+        if result.get("status") != "Accepted" or not result.get("id"):
+            raise RuntimeError("Apple notarization did not return Accepted")
         run(["xcrun", "stapler", "staple", "--verbose", str(arguments.app)])
         temporary = arguments.zip_path.with_name(f".{arguments.zip_path.name}.notarized")
         try:
@@ -75,20 +88,17 @@ def main() -> None:
                     str(temporary),
                 ]
             )
+            run([sys.executable, str(VERIFIER), "--zip", str(temporary),
+                 "--expect-signed", "--expect-notarized"])
             temporary.replace(arguments.zip_path)
         finally:
             temporary.unlink(missing_ok=True)
-        run(
-            [
-                sys.executable,
-                str(VERIFIER),
-                "--zip",
-                str(arguments.zip_path),
-                "--expect-signed",
-                "--expect-notarized",
-            ]
-        )
-    except (OSError, RuntimeError) as error:
+        if arguments.result:
+            arguments.result.write_text(json.dumps({"id": result["id"], "status": "Accepted"}) + "\n")
+    except subprocess.TimeoutExpired:
+        print("Final Cut notarization timed out; no deliverable was published", file=sys.stderr)
+        raise SystemExit(2) from None
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"Final Cut notarization failed: {error}", file=sys.stderr)
         raise SystemExit(2) from error
 

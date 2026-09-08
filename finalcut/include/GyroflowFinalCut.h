@@ -20,6 +20,9 @@ typedef enum GFStatus {
     GF_STATUS_STALE_TIMING = 6,
     GF_STATUS_UNSUPPORTED_PIXEL_FORMAT = 7,
     GF_STATUS_RENDER_FAILED = 8,
+    GF_STATUS_ROUTE_D_INVALID_INPUT = 9,
+    GF_STATUS_ROUTE_D_UNSAFE_STRUCTURE = 10,
+    GF_STATUS_ROUTE_D_NO_UPDATEABLE_TARGETS = 11,
     GF_STATUS_PANIC = 255
 } GFStatus;
 
@@ -38,6 +41,21 @@ typedef struct GFRouteDPatchResult {
     GFOwnedBytes fcpxml;
     GFOwnedBytes report;
 } GFRouteDPatchResult;
+
+typedef uint32_t GFRouteDProjectInputStatus;
+#define GF_ROUTE_D_PROJECT_INPUT_AVAILABLE ((GFRouteDProjectInputStatus)0)
+#define GF_ROUTE_D_PROJECT_INPUT_MISSING ((GFRouteDProjectInputStatus)1)
+#define GF_ROUTE_D_PROJECT_INPUT_PERMISSION_DENIED ((GFRouteDProjectInputStatus)2)
+#define GF_ROUTE_D_PROJECT_INPUT_TOO_LARGE ((GFRouteDProjectInputStatus)3)
+
+typedef struct GFRouteDProjectInput {
+    const uint8_t *path_bytes;
+    size_t path_len;
+    const uint8_t *project_bytes;
+    size_t project_len;
+    GFRouteDProjectInputStatus status;
+    uint32_t reserved;
+} GFRouteDProjectInput;
 
 typedef struct GFTime {
     int64_t numerator;
@@ -186,6 +204,12 @@ GFStatus gf_finalcut_project_payload_encode(
     GFOwnedBytes *out_payload,
     GFError **out_error
 );
+GFStatus gf_finalcut_project_payload_decode(
+    const uint8_t *payload_bytes,
+    size_t payload_len,
+    GFOwnedBytes *out_project,
+    GFError **out_error
+);
 GFStatus gf_finalcut_instance_load_project_payload(
     GFFinalCutInstance *instance,
     const uint8_t *payload_bytes,
@@ -195,6 +219,11 @@ GFStatus gf_finalcut_instance_load_project_payload(
 GFStatus gf_finalcut_instance_set_render_parameters(
     GFFinalCutInstance *instance,
     const GFRenderParameters *parameters,
+    GFError **out_error
+);
+GFStatus gf_finalcut_instance_get_project_render_parameters(
+    const GFFinalCutInstance *instance,
+    GFRenderParameters *out_parameters,
     GFError **out_error
 );
 GFStatus gf_finalcut_route_d_patch(
@@ -208,8 +237,22 @@ GFStatus gf_finalcut_route_d_patch(
 GFStatus gf_finalcut_route_d_batch_patch(
     const uint8_t *input_bytes,
     size_t input_len,
-    const uint8_t *processed_name_bytes,
-    size_t processed_name_len,
+    GFRouteDPatchResult *out_result,
+    GFError **out_error
+);
+GFStatus gf_finalcut_route_d_batch_patch_with_media_roots(
+    const uint8_t *input_bytes,
+    size_t input_len,
+    const uint8_t *media_roots_json_bytes,
+    size_t media_roots_json_len,
+    GFRouteDPatchResult *out_result,
+    GFError **out_error
+);
+GFStatus gf_finalcut_route_d_batch_patch_with_project_inputs(
+    const uint8_t *input_bytes,
+    size_t input_len,
+    const GFRouteDProjectInput *project_inputs,
+    size_t project_inputs_len,
     GFRouteDPatchResult *out_result,
     GFError **out_error
 );

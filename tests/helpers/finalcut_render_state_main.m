@@ -96,10 +96,13 @@ int main(void) {
         };
         GFRenderState *state =
             [[GFRenderState alloc] initWithProjectPayload:@"project-payload"
-                                           timingPayload:@"timing-payload"
-                                              parameters:parameters
-                                            effectBounds:effectBounds
-                                             inputBounds:inputBounds];
+                                      projectDisplayName:@"A001.gyroflow"
+                                      projectContentHash:@"fixture-hash"
+                                          timingPayload:@"timing-payload"
+                                                   mode:GFRenderModeRouteD
+                                             parameters:parameters
+                                           effectBounds:effectBounds
+                                            inputBounds:inputBounds];
         NSError *error = nil;
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:state
                                             requiringSecureCoding:YES
@@ -114,11 +117,106 @@ int main(void) {
         if (roundTrip == nil) {
             return 3;
         }
-        GFRenderCache *cache = [[GFRenderCache alloc] init];
+        GFRenderDiagnostics *diagnostics = [[GFRenderDiagnostics alloc] init];
+        GFRenderCache *cache = [[GFRenderCache alloc] initWithDiagnostics:diagnostics];
         GFRenderSnapshot *first = [cache snapshotForPluginStateData:data error:&error];
         GFRenderSnapshot *second = [cache snapshotForPluginStateData:data error:&error];
         BOOL sameSnapshot = first == second;
+        GFRenderState *hashConflictState = [[GFRenderState alloc]
+            initWithProjectPayload:@"different-project-payload"
+               projectDisplayName:@"Conflict.gyroflow"
+               projectContentHash:@"fixture-hash"
+                   timingPayload:@"timing-payload"
+                            mode:GFRenderModeRouteD
+                      parameters:parameters
+                    effectBounds:effectBounds
+                     inputBounds:inputBounds];
+        NSData *hashConflictData = [NSKeyedArchiver
+            archivedDataWithRootObject:hashConflictState
+                 requiringSecureCoding:YES
+                                 error:&error];
+        GFRenderSnapshot *hashConflictSnapshot =
+            [cache snapshotForPluginStateData:hashConflictData error:&error];
+        BOOL hashConflictRejected = hashConflictSnapshot != nil &&
+            hashConflictSnapshot.preparationStatus == GF_STATUS_INVALID_PROJECT &&
+            hashConflictSnapshot.instance == NULL;
+        BOOL keyframesReusePreparedProject = YES;
+        for (NSUInteger frame = 0; frame < 300; ++frame) {
+            GFRenderParameters frameParameters = parameters;
+            frameParameters.fov = 1.0 + (double)frame / 1000.0;
+            GFRenderState *frameState = [[GFRenderState alloc]
+                initWithProjectPayload:@"project-payload"
+                   projectDisplayName:@"A001.gyroflow"
+                   projectContentHash:@"fixture-hash"
+                       timingPayload:@"timing-payload"
+                                mode:GFRenderModeRouteD
+                          parameters:frameParameters
+                        effectBounds:effectBounds
+                         inputBounds:inputBounds];
+            NSData *frameData = [NSKeyedArchiver archivedDataWithRootObject:frameState
+                                                      requiringSecureCoding:YES
+                                                                      error:&error];
+            GFRenderSnapshot *frameSnapshot =
+                [cache snapshotForPluginStateData:frameData error:&error];
+            keyframesReusePreparedProject = keyframesReusePreparedProject &&
+                frameSnapshot.instance == first.instance &&
+                frameSnapshot.renderLock == first.renderLock;
+        }
+        NSDictionary *keyframeMetrics = [diagnostics snapshot];
         [cache discardAllSnapshots];
+        GFRenderSnapshot *rebuiltAfterPurge =
+            [cache snapshotForPluginStateData:data error:&error];
+        BOOL evictionReconstructed = rebuiltAfterPurge != nil &&
+            rebuiltAfterPurge.preparationStatus == GF_STATUS_OK &&
+            rebuiltAfterPurge.instance != first.instance;
+
+        GFRenderCache *restartedCache = [[GFRenderCache alloc]
+            initWithDiagnostics:[[GFRenderDiagnostics alloc] init]];
+        GFRenderSnapshot *restartSnapshot =
+            [restartedCache snapshotForPluginStateData:data error:&error];
+        BOOL xpcRestartReconstructed = restartSnapshot != nil &&
+            restartSnapshot.preparationStatus == GF_STATUS_OK &&
+            restartSnapshot.instance != first.instance;
+
+        GFRenderState *secondInstanceState = [[GFRenderState alloc]
+            initWithProjectPayload:@"second-project-payload"
+               projectDisplayName:@"B002.gyroflow"
+               projectContentHash:@"second-fixture-hash"
+                   timingPayload:@"timing-payload"
+                            mode:GFRenderModeRouteD
+                      parameters:parameters
+                    effectBounds:effectBounds
+                     inputBounds:inputBounds];
+        NSData *secondInstanceData = [NSKeyedArchiver
+            archivedDataWithRootObject:secondInstanceState
+                 requiringSecureCoding:YES
+                                 error:&error];
+        GFRenderSnapshot *secondInstanceSnapshot =
+            [cache snapshotForPluginStateData:secondInstanceData error:&error];
+        BOOL multipleInstancesIndependent = secondInstanceSnapshot != nil &&
+            secondInstanceSnapshot.preparationStatus == GF_STATUS_OK &&
+            secondInstanceSnapshot.instance != rebuiltAfterPurge.instance &&
+            secondInstanceSnapshot.renderLock != rebuiltAfterPurge.renderLock;
+
+        NSString *largePayload = [@"large-project-" stringByPaddingToLength:1024 * 1024
+                                                                 withString:@"abcdef"
+                                                            startingAtIndex:0];
+        GFRenderState *largeState = [[GFRenderState alloc]
+            initWithProjectPayload:largePayload
+               projectDisplayName:@"large.gyroflow"
+               projectContentHash:@"large-fixture-hash"
+                   timingPayload:@"timing-payload"
+                            mode:GFRenderModeRouteD
+                      parameters:parameters
+                    effectBounds:effectBounds
+                     inputBounds:inputBounds];
+        NSData *largeData = [NSKeyedArchiver archivedDataWithRootObject:largeState
+                                                  requiringSecureCoding:YES
+                                                                  error:&error];
+        GFRenderSnapshot *largeSnapshot =
+            [cache snapshotForPluginStateData:largeData error:&error];
+        BOOL largeProjectReady = largeSnapshot != nil &&
+            largeSnapshot.preparationStatus == GF_STATUS_OK;
 
         GFRenderState *directState =
             [[GFRenderState alloc] initWithProjectPayload:@"project-payload"
@@ -168,11 +266,22 @@ int main(void) {
                                        error:&error];
         NSDictionary *result = @{
             @"secureRoundTrip" : @(
+                roundTrip.schemaVersion == 2 &&
                 [roundTrip.projectPayload isEqualToString:@"project-payload"] &&
+                [roundTrip.projectDisplayName isEqualToString:@"A001.gyroflow"] &&
+                [roundTrip.projectContentHash isEqualToString:@"fixture-hash"] &&
+                roundTrip.mode == GFRenderModeRouteD &&
                 roundTrip.parameters.zoom_mode == 2 &&
                 roundTrip.effectBounds.start.denominator == 24
             ),
             @"sameSnapshot" : @(sameSnapshot),
+            @"hashConflictRejected" : @(hashConflictRejected),
+            @"keyframesReusePreparedProject" : @(keyframesReusePreparedProject),
+            @"keyframeProjectDecodes" : keyframeMetrics[@"project_decodes"],
+            @"evictionReconstructed" : @(evictionReconstructed),
+            @"xpcRestartReconstructed" : @(xpcRestartReconstructed),
+            @"multipleInstancesIndependent" : @(multipleInstancesIndependent),
+            @"largeProjectReady" : @(largeProjectReady),
             @"directSnapshotReady" : @(
                 directSnapshot != nil &&
                 directSnapshot.preparationStatus == GF_STATUS_OK

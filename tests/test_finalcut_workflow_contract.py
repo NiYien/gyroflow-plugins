@@ -1,50 +1,81 @@
-import json
-import subprocess
-import tempfile
+import plistlib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_SOURCE = ROOT / "finalcut" / "Xcode" / "App"
-HELPER = ROOT / "tests" / "helpers" / "finalcut_workflow_main.swift"
+APP = ROOT / "finalcut" / "Xcode" / "App"
 
 
 class FinalCutWorkflowContractTests(unittest.TestCase):
-    def test_one_click_manual_preview_and_confirmation_contract(self):
-        with tempfile.TemporaryDirectory(prefix="finalcut-workflow-contract-") as directory:
-            root = Path(directory)
-            executable = root / "finalcut-workflow-contract"
-            build = subprocess.run(
-                [
-                    "xcrun",
-                    "swiftc",
-                    str(APP_SOURCE / "FinalCutAXModel.swift"),
-                    str(APP_SOURCE / "FinalCutAXLocator.swift"),
-                    str(APP_SOURCE / "FCPXMLDocumentInput.swift"),
-                    str(APP_SOURCE / "ProcessedProjectStore.swift"),
-                    str(APP_SOURCE / "OneClickRouteDWorkflow.swift"),
-                    str(HELPER),
-                    "-o",
-                    str(executable),
-                ],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(build.returncode, 0, msg=build.stdout + build.stderr)
-            fixture_root = root / "fixture"
-            fixture_root.mkdir()
-            run = subprocess.run(
-                [str(executable), str(fixture_root)],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(run.returncode, 0, msg=run.stdout + run.stderr)
-            results = json.loads(run.stdout)
-            self.assertTrue(results)
-            self.assertTrue(all(results.values()), msg=results)
+    def test_one_selection_automatically_processes_saves_and_opens(self):
+        model = (APP / "FinalCutAppModel.swift").read_text(encoding="utf-8")
+        workflow = (APP / "SandboxedRouteDWorkflow.swift").read_text(encoding="utf-8")
+
+        self.assertIn('UTType(filenameExtension: "fcpxml")', model)
+        self.assertIn('importedAs: "com.apple.finalcutpro.xmld"', model)
+        self.assertIn("conformingTo: .package", model)
+        self.assertIn("allowsMultipleSelection = false", model)
+        self.assertIn("canChooseDirectories = true", model)
+        self.assertIn("treatsFilePackagesAsDirectories = false", model)
+        self.assertIn("documentURL: source.xmlURL", model)
+        self.assertNotIn("documentURL: source.selectionURL", model)
+        self.assertIn("self.process()", model)
+        self.assertIn("automaticDestination", model)
+        self.assertIn("acceptSave", model)
+        self.assertIn("let warning = open(destination)", workflow)
+        for removed in (
+            "mediaRoots",
+            "setMediaRoots",
+            "chooseMediaRoots",
+            "NSSavePanel",
+        ):
+            self.assertNotIn(removed, model + workflow)
+
+    def test_non_sandboxed_bridge_reads_only_exact_sibling_project_snapshots(self):
+        processor = (APP / "RouteDProcessor.m").read_text(encoding="utf-8")
+        header = (ROOT / "finalcut" / "include" / "GyroflowFinalCut.h").read_text(
+            encoding="utf-8"
+        )
+        info = plistlib.loads((APP / "Info.plist").read_bytes())
+        entitlements = plistlib.loads((APP / "App.entitlements").read_bytes())
+
+        self.assertNotIn("URLByResolvingBookmarkData", processor)
+        self.assertNotIn("NSFileCoordinator", processor)
+        self.assertNotIn("primaryPresentedItemURL", processor)
+        self.assertIn("GFReadProject(projectURL, expectedPath)", processor)
+        self.assertIn("GF_ROUTE_D_PROJECT_INPUT_MISSING", processor)
+        self.assertIn("gf_finalcut_route_d_batch_patch_with_project_inputs", processor)
+        self.assertIn("GFRouteDProjectInput", header)
+        self.assertEqual(entitlements, {})
+        self.assertNotIn("CFBundleDocumentTypes", info)
+        self.assertNotIn("UTImportedTypeDeclarations", info)
+        for key in (
+            "NSDesktopFolderUsageDescription",
+            "NSDocumentsFolderUsageDescription",
+            "NSDownloadsFolderUsageDescription",
+            "NSNetworkVolumesUsageDescription",
+            "NSRemovableVolumesUsageDescription",
+        ):
+            self.assertTrue(info[key])
+        for forbidden in ("AVAsset", "Data(contentsOf: mediaURL", "contentsOfDirectory"):
+            self.assertNotIn(forbidden, processor)
+
+    def test_manual_flow_has_no_accessibility_automation(self):
+        sources = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in APP.iterdir()
+            if path.suffix in {".swift", ".h", ".m"}
+        )
+        for symbol in (
+            "AXUIElement",
+            "AXIsProcessTrusted",
+            "CGEvent",
+            "ApplicationServices",
+            "exportCurrentProject",
+            "OneClickRouteD",
+        ):
+            self.assertNotIn(symbol, sources)
 
 
 if __name__ == "__main__":

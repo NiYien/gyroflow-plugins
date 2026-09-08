@@ -1,13 +1,14 @@
 #import <Cocoa/Cocoa.h>
 
 @class GFProjectStore;
+@class GFProjectImportCandidate;
 
-typedef BOOL (^GFProjectPayloadCommitHandler)(NSString *projectPayload, NSView *sender);
+typedef BOOL (^GFProjectImportCommitHandler)(GFProjectImportCandidate *candidate, NSView *sender);
 
 @interface GFProjectDropView : NSView
 
 - (instancetype)initWithProjectStore:(GFProjectStore *)projectStore
-                       commitHandler:(GFProjectPayloadCommitHandler)commitHandler;
+                       commitHandler:(GFProjectImportCommitHandler)commitHandler;
 - (void)refreshStatus;
 
 @end

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "capture_status": "not_captured",
+  "captured_at": null,
+  "environment": {
+    "hardware": null,
+    "macos": "26.6.2",
+    "final_cut": "Creator Studio 12.3",
+    "plugin_build": null,
+    "media_fixture": null,
+    "warmup_runs": 2,
+    "measured_runs": 5
+  },
+  "matrix": [
+    { "id": "4k-static-original-single-preview", "resolution": "4k", "proxy": "none", "parameters": "static", "instances": 1, "surface": "preview", "measurements": null },
+    { "id": "4k-keyframed-half-multiple-preview", "resolution": "4k", "proxy": "half", "parameters": "keyframed", "instances": 2, "surface": "preview", "measurements": null },
+    { "id": "4k-passthrough-quarter-thumbnail", "resolution": "4k", "proxy": "quarter", "parameters": "passthrough", "instances": 1, "surface": "thumbnail", "measurements": null },
+    { "id": "4k-keyframed-original-single-export", "resolution": "4k", "proxy": "none", "parameters": "keyframed", "instances": 1, "surface": "export", "measurements": null },
+    { "id": "8k-static-original-single-preview", "resolution": "8k", "proxy": "none", "parameters": "static", "instances": 1, "surface": "preview", "measurements": null },
+    { "id": "8k-keyframed-half-multiple-preview", "resolution": "8k", "proxy": "half", "parameters": "keyframed", "instances": 2, "surface": "preview", "measurements": null },
+    { "id": "8k-passthrough-quarter-thumbnail", "resolution": "8k", "proxy": "quarter", "parameters": "passthrough", "instances": 1, "surface": "thumbnail", "measurements": null },
+    { "id": "8k-keyframed-original-single-export", "resolution": "8k", "proxy": "none", "parameters": "keyframed", "instances": 1, "surface": "export", "measurements": null }
+  ],
+  "relative_gates": {
+    "maximum_p95_regression_ratio": 0.05,
+    "maximum_peak_memory_regression_ratio": 0.1
+  },
+  "absolute_budgets": null,
+  "release_blocked": true
+}

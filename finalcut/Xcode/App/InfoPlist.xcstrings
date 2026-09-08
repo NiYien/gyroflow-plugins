@@ -1,0 +1,211 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "NSDesktopFolderUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択した Final Cut XML が参照するメディアの隣にある一致する .gyroflow プロジェクトを読み込むには、この場所へのアクセスが必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 Final Cut XML에서 참조하는 미디어 옆의 일치하는 .gyroflow 프로젝트를 읽으려면 이 위치에 대한 접근 권한이 필요합니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Доступ необходим для чтения соответствующих проектов .gyroflow рядом с медиафайлами, на которые ссылается выбранный Final Cut XML."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问此位置，以读取所选 Final Cut XML 引用的媒体旁边匹配的 .gyroflow 项目。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要取用此位置，以讀取所選 Final Cut XML 參照之媒體旁相符的 .gyroflow 專案。"
+          }
+        }
+      }
+    },
+    "NSDocumentsFolderUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択した Final Cut XML が参照するメディアの隣にある一致する .gyroflow プロジェクトを読み込むには、この場所へのアクセスが必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 Final Cut XML에서 참조하는 미디어 옆의 일치하는 .gyroflow 프로젝트를 읽으려면 이 위치에 대한 접근 권한이 필요합니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Доступ необходим для чтения соответствующих проектов .gyroflow рядом с медиафайлами, на которые ссылается выбранный Final Cut XML."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问此位置，以读取所选 Final Cut XML 引用的媒体旁边匹配的 .gyroflow 项目。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要取用此位置，以讀取所選 Final Cut XML 參照之媒體旁相符的 .gyroflow 專案。"
+          }
+        }
+      }
+    },
+    "NSDownloadsFolderUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択した Final Cut XML が参照するメディアの隣にある一致する .gyroflow プロジェクトを読み込むには、この場所へのアクセスが必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 Final Cut XML에서 참조하는 미디어 옆의 일치하는 .gyroflow 프로젝트를 읽으려면 이 위치에 대한 접근 권한이 필요합니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Доступ необходим для чтения соответствующих проектов .gyroflow рядом с медиафайлами, на которые ссылается выбранный Final Cut XML."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问此位置，以读取所选 Final Cut XML 引用的媒体旁边匹配的 .gyroflow 项目。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要取用此位置，以讀取所選 Final Cut XML 參照之媒體旁相符的 .gyroflow 專案。"
+          }
+        }
+      }
+    },
+    "NSNetworkVolumesUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択した Final Cut XML が参照するメディアの隣にある一致する .gyroflow プロジェクトを読み込むには、この場所へのアクセスが必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 Final Cut XML에서 참조하는 미디어 옆의 일치하는 .gyroflow 프로젝트를 읽으려면 이 위치에 대한 접근 권한이 필요합니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Доступ необходим для чтения соответствующих проектов .gyroflow рядом с медиафайлами, на которые ссылается выбранный Final Cut XML."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问此位置，以读取所选 Final Cut XML 引用的媒体旁边匹配的 .gyroflow 项目。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要取用此位置，以讀取所選 Final Cut XML 參照之媒體旁相符的 .gyroflow 專案。"
+          }
+        }
+      }
+    },
+    "NSRemovableVolumesUsageDescription": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択した Final Cut XML が参照するメディアの隣にある一致する .gyroflow プロジェクトを読み込むには、この場所へのアクセスが必要です。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 Final Cut XML에서 참조하는 미디어 옆의 일치하는 .gyroflow 프로젝트를 읽으려면 이 위치에 대한 접근 권한이 필요합니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Доступ необходим для чтения соответствующих проектов .gyroflow рядом с медиафайлами, на которые ссылается выбранный Final Cut XML."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要访问此位置，以读取所选 Final Cut XML 引用的媒体旁边匹配的 .gyroflow 项目。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要取用此位置，以讀取所選 Final Cut XML 參照之媒體旁相符的 .gyroflow 專案。"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

@@ -12,25 +12,34 @@ enum FCPXMLDocumentInputError: LocalizedError {
     case symbolicLink
     case invalidFile
     case tooLarge
-    case outputMissingOrAmbiguous
-    case outputDidNotStabilize
 
     var errorDescription: String? {
         switch self {
         case .unsupportedSelection:
-            return "Choose one .fcpxml file or .fcpxmld package."
+            return FinalCutStrings.text(
+                "app.error.fcpxml.unsupported",
+                fallback: "Choose one .fcpxml file or .fcpxmld package."
+            )
         case .missingOrAmbiguousPackageInfo:
-            return "The .fcpxmld package must contain exactly one root Info.fcpxml."
+            return FinalCutStrings.text(
+                "app.error.fcpxml.ambiguous_package",
+                fallback: "The .fcpxmld package must contain exactly one root Info.fcpxml."
+            )
         case .symbolicLink:
-            return "Symbolic-link FCPXML inputs are not accepted."
+            return FinalCutStrings.text(
+                "app.error.fcpxml.symbolic_link",
+                fallback: "Symbolic-link FCPXML inputs are not accepted."
+            )
         case .invalidFile:
-            return "The selected FCPXML is not a regular readable file."
+            return FinalCutStrings.text(
+                "app.error.fcpxml.invalid_file",
+                fallback: "The selected FCPXML is not a regular readable file."
+            )
         case .tooLarge:
-            return "The selected FCPXML exceeds the supported size limit."
-        case .outputMissingOrAmbiguous:
-            return "Final Cut did not create exactly one FCPXML output in the export directory."
-        case .outputDidNotStabilize:
-            return "Final Cut export did not finish writing before the timeout."
+            return FinalCutStrings.text(
+                "app.error.fcpxml.too_large",
+                fallback: "The selected FCPXML exceeds the supported size limit."
+            )
         }
     }
 }
@@ -100,82 +109,5 @@ enum FCPXMLDocumentInput {
             xmlURL: xmlURL,
             data: data
         )
-    }
-}
-
-final class UniqueExportWorkspace {
-    let directoryURL: URL
-
-    private let fileManager: FileManager
-    private let monotonicTime: () -> TimeInterval
-    private let wait: (TimeInterval) -> Void
-
-    init(
-        directoryURL: URL,
-        fileManager: FileManager = .default,
-        monotonicTime: @escaping () -> TimeInterval = {
-            ProcessInfo.processInfo.systemUptime
-        },
-        wait: @escaping (TimeInterval) -> Void = {
-            Thread.sleep(forTimeInterval: $0)
-        }
-    ) {
-        self.directoryURL = directoryURL.standardizedFileURL
-        self.fileManager = fileManager
-        self.monotonicTime = monotonicTime
-        self.wait = wait
-    }
-
-    static func create(
-        baseDirectory: URL = FileManager.default.temporaryDirectory,
-        fileManager: FileManager = .default
-    ) throws -> UniqueExportWorkspace {
-        let directory = baseDirectory.standardizedFileURL.appendingPathComponent(
-            "com.niyien.gyroflow.finalcut-route-d-\(UUID().uuidString)",
-            isDirectory: true
-        )
-        try fileManager.createDirectory(
-            at: directory,
-            withIntermediateDirectories: false
-        )
-        return UniqueExportWorkspace(directoryURL: directory, fileManager: fileManager)
-    }
-
-    func waitForStableInput(
-        timeout: TimeInterval,
-        pollInterval: TimeInterval = 0.1
-    ) throws -> ResolvedFCPXMLInput {
-        let deadline = monotonicTime() + timeout
-        var previous: ResolvedFCPXMLInput?
-        var sawUniqueCandidate = false
-        while monotonicTime() <= deadline {
-            let entries = try fileManager.contentsOfDirectory(
-                at: directoryURL,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )
-            let candidates = entries.filter {
-                ["fcpxml", "fcpxmld"].contains($0.pathExtension.lowercased())
-            }
-            if candidates.count == 1,
-               let current = try? FCPXMLDocumentInput.resolve(
-                   candidates[0],
-                   fileManager: fileManager
-               )
-            {
-                sawUniqueCandidate = true
-                if previous == current {
-                    return current
-                }
-                previous = current
-            } else {
-                previous = nil
-            }
-            wait(pollInterval)
-        }
-        if sawUniqueCandidate {
-            throw FCPXMLDocumentInputError.outputDidNotStabilize
-        }
-        throw FCPXMLDocumentInputError.outputMissingOrAmbiguous
     }
 }

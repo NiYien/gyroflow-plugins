@@ -1,10 +1,26 @@
 #import "GFRenderState.h"
+#import <CommonCrypto/CommonDigest.h>
 
-static const NSInteger kGFRenderStateSchema = 1;
+static const NSInteger kGFRenderStateSchema = 2;
+
+static NSString *GFRenderStatePayloadHash(NSString *payload) {
+    NSData *data = [payload dataUsingEncoding:NSASCIIStringEncoding] ?: [NSData data];
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *result = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger index = 0; index < CC_SHA256_DIGEST_LENGTH; ++index) {
+        [result appendFormat:@"%02x", digest[index]];
+    }
+    return result;
+}
 
 @interface GFRenderState ()
+@property(nonatomic, readwrite) NSInteger schemaVersion;
 @property(nonatomic, readwrite) NSString *projectPayload;
+@property(nonatomic, readwrite) NSString *projectDisplayName;
+@property(nonatomic, readwrite) NSString *projectContentHash;
 @property(nonatomic, readwrite) NSString *timingPayload;
+@property(nonatomic, readwrite) GFRenderMode mode;
 @property(nonatomic, readwrite) GFRenderParameters parameters;
 @property(nonatomic, readwrite) GFTimeRange effectBounds;
 @property(nonatomic, readwrite) GFTimeRange inputBounds;
@@ -21,10 +37,37 @@ static const NSInteger kGFRenderStateSchema = 1;
                             parameters:(GFRenderParameters)parameters
                           effectBounds:(GFTimeRange)effectBounds
                            inputBounds:(GFTimeRange)inputBounds {
+    GFRenderMode mode = projectPayload.length == 0
+        ? GFRenderModeEmpty
+        : (timingPayload.length == 0 ? GFRenderModeDirect : GFRenderModeRouteD);
+    return [self initWithProjectPayload:projectPayload
+                    projectDisplayName:@""
+                    projectContentHash:GFRenderStatePayloadHash(projectPayload)
+                        timingPayload:timingPayload
+                                 mode:mode
+                           parameters:parameters
+                         effectBounds:effectBounds
+                          inputBounds:inputBounds];
+}
+
+- (instancetype)initWithProjectPayload:(NSString *)projectPayload
+                     projectDisplayName:(NSString *)projectDisplayName
+                     projectContentHash:(NSString *)projectContentHash
+                         timingPayload:(NSString *)timingPayload
+                                  mode:(GFRenderMode)mode
+                            parameters:(GFRenderParameters)parameters
+                          effectBounds:(GFTimeRange)effectBounds
+                           inputBounds:(GFTimeRange)inputBounds {
     self = [super init];
     if (self != nil) {
+        self.schemaVersion = kGFRenderStateSchema;
         self.projectPayload = [projectPayload copy];
+        self.projectDisplayName = [projectDisplayName copy];
+        self.projectContentHash = projectContentHash.length > 0
+            ? [projectContentHash copy]
+            : GFRenderStatePayloadHash(projectPayload);
         self.timingPayload = [timingPayload copy];
+        self.mode = mode;
         self.parameters = parameters;
         self.effectBounds = effectBounds;
         self.inputBounds = inputBounds;
@@ -38,9 +81,24 @@ static const NSInteger kGFRenderStateSchema = 1;
                                                    forKey:@"projectPayload"];
     NSString *timingPayload = [coder decodeObjectOfClass:[NSString class]
                                                   forKey:@"timingPayload"];
-    if (schema != kGFRenderStateSchema ||
+    if ((schema != 1 && schema != kGFRenderStateSchema) ||
         projectPayload == nil ||
         timingPayload == nil) {
+        return nil;
+    }
+    NSString *projectDisplayName = schema >= 2
+        ? [coder decodeObjectOfClass:[NSString class] forKey:@"projectDisplayName"]
+        : @"";
+    NSString *projectContentHash = schema >= 2
+        ? [coder decodeObjectOfClass:[NSString class] forKey:@"projectContentHash"]
+        : GFRenderStatePayloadHash(projectPayload);
+    GFRenderMode mode = schema >= 2
+        ? (GFRenderMode)[coder decodeIntegerForKey:@"mode"]
+        : (projectPayload.length == 0
+            ? GFRenderModeEmpty
+            : (timingPayload.length == 0 ? GFRenderModeDirect : GFRenderModeRouteD));
+    if (projectDisplayName == nil || projectContentHash.length == 0 ||
+        mode < GFRenderModeEmpty || mode > GFRenderModeReprocessRequired) {
         return nil;
     }
     GFRenderParameters parameters = {
@@ -73,17 +131,25 @@ static const NSInteger kGFRenderStateSchema = 1;
             .denominator = [coder decodeInt64ForKey:@"inputDurationDenominator"],
         },
     };
-    return [self initWithProjectPayload:projectPayload
-                         timingPayload:timingPayload
-                            parameters:parameters
-                          effectBounds:effectBounds
-                           inputBounds:inputBounds];
+    GFRenderState *state = [self initWithProjectPayload:projectPayload
+                                    projectDisplayName:projectDisplayName
+                                    projectContentHash:projectContentHash
+                                        timingPayload:timingPayload
+                                                 mode:mode
+                                           parameters:parameters
+                                         effectBounds:effectBounds
+                                          inputBounds:inputBounds];
+    state.schemaVersion = schema;
+    return state;
 }
 
 - (void)encodeWithCoder:(NSCoder *)coder {
     [coder encodeInteger:kGFRenderStateSchema forKey:@"schema"];
     [coder encodeObject:self.projectPayload forKey:@"projectPayload"];
+    [coder encodeObject:self.projectDisplayName forKey:@"projectDisplayName"];
+    [coder encodeObject:self.projectContentHash forKey:@"projectContentHash"];
     [coder encodeObject:self.timingPayload forKey:@"timingPayload"];
+    [coder encodeInteger:self.mode forKey:@"mode"];
     [coder encodeDouble:self.parameters.fov forKey:@"fov"];
     [coder encodeDouble:self.parameters.smoothness forKey:@"smoothness"];
     [coder encodeDouble:self.parameters.lens_correction forKey:@"lensCorrection"];

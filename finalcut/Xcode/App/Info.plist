@@ -5,7 +5,9 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>Gyroflow NiYien Final Cut</string>
+    <string>NiYien FCP</string>
+    <key>CFBundleIconFile</key>
+    <string>Icon.icns</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -24,7 +26,17 @@
     <string>public.app-category.video</string>
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Access is needed to read matching .gyroflow projects next to media referenced by the selected Final Cut XML.</string>
 </dict>
 </plist>

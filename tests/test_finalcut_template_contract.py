@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 import hashlib
 import json
 import plistlib
@@ -60,7 +61,7 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
             )
             self.assertEqual(effect.attrib["pluginUUID"], identity["effect_uuid"])
             self.assertEqual(effect.attrib["pluginVersion"], identity["marketing_version"])
-            attribution = (ROOT / "finalcut" / "template" / "UPSTREAM.md").read_text(
+            attribution = (ROOT / "finalcut" / "template" / "UPSTREAM.txt").read_text(
                 encoding="utf-8"
             )
             self.assertIn("MIT License", attribution)
@@ -107,15 +108,17 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
                     1903,
                     1904,
                     1905,
+                    1906,
                     *range(1910, 1920),
                     *range(1930, 1940),
                     2000,
+                    2001,
                     10001,
                     10002,
                     10003,
                 },
             )
-            self.assertEqual(len(direct_parameters), 31)
+            self.assertEqual(len(direct_parameters), 33)
             self.assertEqual(
                 next(
                     parameter
@@ -137,6 +140,13 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
             self.assertEqual(
                 bank_parameters[1905].attrib["name"], "Project Payload Manifest B"
             )
+            display_name = next(
+                parameter
+                for parameter in direct_parameters
+                if parameter.attrib["id"] == "1906"
+            )
+            self.assertEqual(display_name.attrib["name"], "Project Display Name")
+            self.assertEqual(display_name.attrib["flags"], "12889161760")
             self.assertEqual(bank_parameters[1910].attrib["name"], "Project Payload A 01")
             self.assertEqual(bank_parameters[1919].attrib["name"], "Project Payload A 10")
             self.assertEqual(bank_parameters[1930].attrib["name"], "Project Payload B 01")
@@ -144,6 +154,37 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
             self.assertNotIn("Project Path", text)
             self.assertNotIn("Bookmark", text)
             self.assertNotIn("Workflow", text)
+
+    def test_project_parameter_defaults_and_english_labels_match_manual_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = self.generate(Path(directory))
+            root = ET.parse(output)
+            stabilization = next(
+                parameter
+                for parameter in root.findall(".//filter/parameter")
+                if parameter.attrib["id"] == "2000"
+            )
+            parameters = {
+                int(parameter.attrib["id"]): parameter
+                for parameter in stabilization.findall("./parameter")
+            }
+            fov = next(
+                parameter
+                for parameter in root.findall(".//filter/parameter")
+                if parameter.attrib["id"] == "2001"
+            )
+
+            self.assertEqual(set(parameters), set(range(2002, 2008)))
+            self.assertEqual(fov.attrib["default"], "1")
+            self.assertEqual(fov.attrib["value"], "1")
+            self.assertEqual(parameters[2002].attrib["default"], "15")
+            self.assertEqual(parameters[2002].attrib["value"], "15")
+            self.assertEqual(parameters[2003].attrib["default"], "100")
+            self.assertEqual(parameters[2004].attrib["default"], "0")
+            self.assertEqual(parameters[2005].attrib["default"], "0")
+            self.assertEqual(parameters[2006].attrib["default"], "1")
+            self.assertEqual(parameters[2007].attrib["default"], "0")
+            self.assertEqual(parameters[2007].attrib["name"], "Stabilization Overview")
 
     def test_opaque_or_version_drift_blocks_template(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,14 +239,17 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
             self.assertTrue((output / "small.png").is_file())
             self.assertIn(
                 "MIT License",
-                (output / "UPSTREAM.md").read_text(encoding="utf-8"),
+                (output / "UPSTREAM.txt").read_text(encoding="utf-8"),
             )
             self.assertEqual(self.verify(output / "Gyroflow NiYien.moef").returncode, 0)
 
 
 class FinalCutTemplateInstallerTests(unittest.TestCase):
     def test_install_repair_rollback_remove_and_scope_boundaries(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(
+            prefix=".finalcut-template-installer-",
+            dir=ROOT,
+        ) as directory:
             root = Path(directory)
             executable = root / "template-installer"
             build = subprocess.run(
@@ -215,6 +259,7 @@ class FinalCutTemplateInstallerTests(unittest.TestCase):
                     "-parse-as-library",
                     "-module-cache-path",
                     str(root / "module-cache"),
+                    str(ROOT / "finalcut" / "xcode" / "App" / "FinalCutStrings.swift"),
                     str(ROOT / "finalcut" / "xcode" / "App" / "TemplateInstaller.swift"),
                     str(
                         ROOT
@@ -231,19 +276,27 @@ class FinalCutTemplateInstallerTests(unittest.TestCase):
             )
             self.assertEqual(build.returncode, 0, msg=build.stdout + build.stderr)
 
+            fixture = root / "fixture"
+            fixture.mkdir()
             run = subprocess.run(
-                [str(executable), str(root / "fixture")],
+                [str(executable), str(fixture.resolve())],
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(run.returncode, 0, msg=run.stdout + run.stderr)
             result = json.loads(run.stdout)
+            self.assertTrue(result["preflightPassedWithoutMutation"])
+            self.assertTrue(result["automaticPreparationIsIdempotent"])
+            self.assertTrue(result["automaticForeignRejected"])
             self.assertEqual(result["before"], "notInstalled")
             self.assertEqual(result["installed"], "installed")
+            self.assertEqual(result["bundledDrift"], "repairRequired")
+            self.assertEqual(result["bundledDriftRepaired"], "installed")
             self.assertEqual(result["damaged"], "repairRequired")
             self.assertEqual(result["repaired"], "installed")
             self.assertEqual(result["previewDamaged"], "repairRequired")
+            self.assertTrue(result["transactionSnapshotContained"])
             self.assertTrue(result["rollbackFailed"])
             self.assertTrue(result["rollbackPreserved"])
             self.assertTrue(result["afterCommitRollbackFailed"])
@@ -251,48 +304,40 @@ class FinalCutTemplateInstallerTests(unittest.TestCase):
             self.assertTrue(result["removed"])
             self.assertTrue(result["foreignRejected"])
             self.assertTrue(result["foreignPreserved"])
+            self.assertTrue(result["escapedInstallationsRejected"])
+            self.assertTrue(result["escapedInstallsCreatedNothing"])
+            self.assertTrue(result["escapedRepairsRejected"])
+            self.assertTrue(result["escapedRemovalsRejected"])
+            self.assertTrue(result["escapedTargetsPreserved"])
+            self.assertTrue(result["exactDestinationSymlinkRejectedByGuard"])
+            self.assertTrue(result["ancestorSymlinkRejectedByGuard"])
+            self.assertTrue(result["mutationTargetsCanonicalAndContained"])
+            self.assertTrue(result["allMutationKindsObserved"])
 
-    def test_wrapper_ui_exposes_versions_route_d_behavior_and_stable_command_mode(self):
-        app = (ROOT / "finalcut" / "xcode" / "App" / "AppMain.swift").read_text(
-            encoding="utf-8"
-        )
+    def test_wrapper_prepares_template_without_a_maintenance_footer(self):
+        app_main = (
+            ROOT / "finalcut" / "xcode" / "App" / "AppMain.swift"
+        ).read_text(encoding="utf-8")
+        batch_view_path = ROOT / "finalcut" / "xcode" / "App" / "BatchProcessView.swift"
+        self.assertTrue(batch_view_path.is_file())
+        batch_view = batch_view_path.read_text(encoding="utf-8")
         installer = (
             ROOT / "finalcut" / "xcode" / "App" / "TemplateInstaller.swift"
         ).read_text(encoding="utf-8")
 
-        for label in ("App", "FxPlug XPC", "Template", "Status"):
-            self.assertIn(f'Text("{label}")', app)
-        self.assertIn("Install / Repair", app)
-        self.assertIn("Remove Template", app)
-        self.assertIn("original project is preserved", app)
-        self.assertIn("assigns the imported project a new UID", app)
-        self.assertIn("--install-template-and-quit", app)
+        self.assertNotIn("installationArea", batch_view)
+        self.assertNotIn('FinalCutStrings.text("app.title")', batch_view)
+        self.assertNotIn('FinalCutStrings.text("app.subtitle")', batch_view)
+        self.assertNotIn("LabeledContent", batch_view)
+        self.assertIn("model.prepareTemplateIfNeeded()", batch_view)
+        self.assertIn("model.errorMessage ?? model.templatePreparationError", batch_view)
+        self.assertIn("--install-template-and-quit", app_main)
+        self.assertIn("--preflight-template-and-quit", app_main)
+        self.assertIn("--remove-template-and-quit", app_main)
         self.assertIn("static let success: Int32 = 0", installer)
         self.assertIn("static let installFailed: Int32 = 20", installer)
         self.assertIn("static let verificationFailed: Int32 = 21", installer)
-        self.assertNotIn("Workflow Extension", app)
-
-    def test_wrapper_ui_exposes_one_click_preview_and_permanent_manual_fallback(self):
-        app = (ROOT / "finalcut" / "xcode" / "App" / "AppMain.swift").read_text(
-            encoding="utf-8"
-        )
-        for text in (
-            "Process Current Final Cut Project",
-            "Choose FCPXML or FCPXMLD",
-            "Batch Preview",
-            "Inserted",
-            "Updated",
-            "Skipped",
-            "Failed",
-            "Confirm Import as New Project",
-            "The original Final Cut project remains unchanged",
-        ):
-            self.assertIn(text, app)
-        self.assertIn('UTType(filenameExtension: "fcpxmld")', app)
-        self.assertIn("ProgressView", app)
-        self.assertIn("accessibilityHint", app)
-        self.assertIn("minHeight: 44", app)
-        self.assertNotIn("processAndImportFCPXML", app)
+        self.assertNotIn("Workflow Extension", app_main + batch_view)
 
 
 if __name__ == "__main__":

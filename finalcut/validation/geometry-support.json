@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "release_blocked": true,
+  "advertised_fxplug_pixel_transform": "ScaleTranslate",
+  "verified_supported_entry_ids": [],
+  "host": {
+    "macos": "26.6.2",
+    "final_cut": "Creator Studio 12.3",
+    "bundle_identifier": "com.apple.FinalCutApp"
+  },
+  "parser_display_name_fallbacks": {
+    "en": ["Position", "Anchor", "Scale", "Rotation", "Left", "Top", "Right", "Bottom"],
+    "zh-CN": ["位置", "锚点", "缩放", "旋转", "左", "上", "右", "下"],
+    "zh-TW": ["位置", "錨點", "縮放", "旋轉", "左", "上", "右", "下"],
+    "ja": ["位置", "アンカー", "調整", "回転", "左", "上", "右", "下"],
+    "ko": ["위치", "앵커", "크기", "회전", "왼쪽", "위", "오른쪽", "아래"],
+    "ru": ["Положение", "Привязка", "Масштаб", "Поворот", "Слева", "Сверху", "Справа", "Снизу"]
+  },
+  "entries": [
+    {
+      "id": "identity-en",
+      "host": { "macos": "26.6.2", "final_cut": "Creator Studio 12.3", "bundle_identifier": "com.apple.FinalCutApp" },
+      "locale": "en",
+      "fcpxml": null,
+      "geometry": { "storage_orientation": "landscape", "display_rotation_degrees": 0, "aspect_ratio": "16:9", "pixel_aspect_ratio": "1:1", "spatial_conform": "fit", "transform": "identity", "crop": "none", "media_representation": "original", "render_surface": "preview", "effect_mode": "route_d", "effect_instances": 1 },
+      "expected_transform": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      "reference_frame": null,
+      "tolerance": { "maximum_channel_error": 0, "different_pixel_ratio": 0 },
+      "support_result": "unverified",
+      "reason": "Synthetic parser coverage exists; a real Final Cut export and pixel oracle are still required."
+    },
+    {
+      "id": "identity-zh-CN",
+      "host": { "macos": "26.6.2", "final_cut": "Creator Studio 12.3", "bundle_identifier": "com.apple.FinalCutApp" },
+      "locale": "zh-CN",
+      "fcpxml": null,
+      "geometry": { "storage_orientation": "landscape", "display_rotation_degrees": 0, "aspect_ratio": "16:9", "pixel_aspect_ratio": "1:1", "spatial_conform": "fit", "transform": "identity", "crop": "none", "media_representation": "original", "render_surface": "preview", "effect_mode": "route_d", "effect_instances": 1 },
+      "expected_transform": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      "reference_frame": null,
+      "tolerance": { "maximum_channel_error": 0, "different_pixel_ratio": 0 },
+      "support_result": "unverified",
+      "reason": "Synthetic parser coverage exists; a real Final Cut export and pixel oracle are still required."
+    },
+    {
+      "id": "identity-zh-TW",
+      "host": { "macos": "26.6.2", "final_cut": "Creator Studio 12.3", "bundle_identifier": "com.apple.FinalCutApp" },
+      "locale": "zh-TW",
+      "fcpxml": null,
+      "geometry": { "storage_orientation": "landscape", "display_rotation_degrees": 0, "aspect_ratio": "16:9", "pixel_aspect_ratio": "1:1", "spatial_conform": "fit", "transform": "identity", "crop": "none", "media_representation": "original", "render_surface": "preview", "effect_mode": "route_d", "effect_instances": 1 },
+      "expected_transform": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      "reference_frame": null,
+      "tolerance": { "maximum_channel_error": 0, "different_pixel_ratio": 0 },
+      "support_result": "unverified",
+      "reason": "Synthetic parser coverage exists; a real Final Cut export and pixel oracle are still required."
+    },
+    {
+      "id": "identity-ja",
+      "host": { "macos": "26.6.2", "final_cut": "Creator Studio 12.3", "bundle_identifier": "com.apple.FinalCutApp" },
+      "locale": "ja",
+      "fcpxml": null,
+      "geometry": { "storage_orientation": "landscape", "display_rotation_degrees": 0, "aspect_ratio": "16:9", "pixel_aspect_ratio": "1:1", "spatial_conform": "fit", "transform": "identity", "crop": "none", "media_representation": "original", "render_surface": "preview", "effect_mode": "route_d", "effect_instances": 1 },
+      "expected_transform": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      "reference_frame": null,
+      "tolerance": { "maximum_channel_error": 0, "different_pixel_ratio": 0 },
+      "support_result": "unverified",
+      "reason": "Synthetic parser coverage exists; a real Final Cut export and pixel oracle are still required."
+    },
+    {
+      "id": "identity-ko",
+      "host": { "macos": "26.6.2", "final_cut": "Creator Studio 12.3", "bundle_identifier": "com.apple.FinalCutApp" },
+      "locale": "ko",
+      "fcpxml": null,
+      "geometry": { "storage_orientation": "landscape", "display_rotation_degrees": 0, "aspect_ratio": "16:9", "pixel_aspect_ratio": "1:1", "spatial_conform": "fit", "transform": "identity", "crop": "none", "media_representation": "original", "render_surface": "preview", "effect_mode": "route_d", "effect_instances": 1 },
+      "expected_transform": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      "reference_frame": null,
+      "tolerance": { "maximum_channel_error": 0, "different_pixel_ratio": 0 },
+      "support_result": "unverified",
+      "reason": "Synthetic parser coverage exists; a real Final Cut export and pixel oracle are still required."
+    },
+    {
+      "id": "identity-ru",
+      "host": { "macos": "26.6.2", "final_cut": "Creator Studio 12.3", "bundle_identifier": "com.apple.FinalCutApp" },
+      "locale": "ru",
+      "fcpxml": null,
+      "geometry": { "storage_orientation": "landscape", "display_rotation_degrees": 0, "aspect_ratio": "16:9", "pixel_aspect_ratio": "1:1", "spatial_conform": "fit", "transform": "identity", "crop": "none", "media_representation": "original", "render_surface": "preview", "effect_mode": "route_d", "effect_instances": 1 },
+      "expected_transform": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+      "reference_frame": null,
+      "tolerance": { "maximum_channel_error": 0, "different_pixel_ratio": 0 },
+      "support_result": "unverified",
+      "reason": "Synthetic parser coverage exists; a real Final Cut export and pixel oracle are still required."
+    }
+  ]
+}

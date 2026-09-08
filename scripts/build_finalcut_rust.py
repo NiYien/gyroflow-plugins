@@ -56,6 +56,7 @@ def build(
             [
                 cargo,
                 "build",
+                "--locked",
                 "-p",
                 "gyroflow-finalcut",
                 "--release",

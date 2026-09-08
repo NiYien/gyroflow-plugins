@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "runner": "macos-26",
+  "xcode_version": "26.6",
+  "xcode_path": "/Applications/Xcode_26.6.app/Contents/Developer",
+  "rust_toolchain": "1.95.0",
+  "lens_data_tag": "data-v20260830.1",
+  "core_revision": "c38c6456b0f8d67221ba1e71bbeb05cdca2a8f4e"
+}

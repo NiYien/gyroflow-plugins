@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "filename": "FxPlug_SDK_4.3.5.dmg",
+  "sha256": "539936414f9b63908b4a2e10b091b6404fe6b44241d9cd404ac4926cc9cac42e",
+  "size": 875951,
+  "package_filename": "FxPlugSDK.pkg",
+  "receipt_id": "com.apple.pkg.FxPlugSDK",
+  "package_version": "4.3.5.1.1781735395",
+  "source_url": "https://download.developer.apple.com/Developer_Tools/FxPlug_SDK_4.3.5/FxPlug_SDK_4.3.5.dmg",
+  "runtime_versions": {
+    "FxPlug": {"directory": "A", "version": "4.3.5", "build": "18567.3"},
+    "PluginManager": {"directory": "B", "version": "1.7.4", "build": "18567.3"}
+  }
+}

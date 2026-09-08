@@ -12,6 +12,7 @@ crate-type = ["staticlib", "rlib"]
 base64 = "0.22"
 flate2 = "1"
 gyroflow-plugin-base = { path = "../common", default-features = false, features = ["metal"] }
+libc = "0.2"
 num-bigint = "0.4"
 num-rational = "0.4"
 num-traits = "0.2"

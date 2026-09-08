@@ -99,7 +99,11 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
             "kFxPropertyKey_DesiredProcessingColorInfo : @(kFxImageColorInfo_RGB_LINEAR)",
             source,
         )
-        self.assertIn(".command_queue = NULL", source)
+        self.assertIn(
+            ".command_queue = (__bridge void *)metalResources.commandQueue", source
+        )
+        self.assertIn("self.metalResources.countLimit = 4", source)
+        self.assertIn("recordCommandQueueCreation", source)
         self.assertIn(".effect_local_time", source)
         self.assertNotIn("sourceImage.mediaTime", source)
 
@@ -209,9 +213,12 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
 
         self.assertIn(
-            "snapshot.preparationStatus != GF_STATUS_OK",
+            "GFStatus preparationStatus = snapshot.preparationStatus",
             source,
         )
+        self.assertIn("snapshot.preparationStatus != GF_STATUS_OK", source)
+        self.assertIn("snapshot.preparationStatus != GF_STATUS_MISSING_TIMING", source)
+        self.assertIn("preparationStatus == GF_STATUS_MISSING_TIMING", source)
         self.assertIn(
             "restoreValidatedRenderProjectPayloadIfEmpty:projectPayload",
             source,
@@ -230,6 +237,18 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
         self.assertIn("kGFProjectPayloadChunksB[10]", parameter_ids)
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
         self.assertIn('addStringParameterWithName:@"Instance Identity"', source)
+
+    def test_project_inspector_is_compact_unfilled_and_has_one_action(self):
+        source = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
+
+        self.assertIn("NSMakeRect(0, 0, 280, 116)", source)
+        self.assertNotIn("layer.backgroundColor", source)
+        self.assertIn("self.layer.borderWidth = 0.5", source)
+        self.assertIn('GFLocalized(@"effect.action.load_project"', source)
+        self.assertIn('GFLocalized(@"effect.drop.hint"', source)
+        self.assertIn("registerForDraggedTypes", source)
+        self.assertNotIn("openButton", source)
+        self.assertNotIn("openProject:", source)
 
 
 

@@ -1,15 +1,19 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod fcpxml;
+mod project_parameters;
 
 pub use fcpxml::{
-    BatchRouteDPatchResult, BatchTargetAction, BatchTargetReport, RouteDError, RouteDPatchResult,
-    patch_fcpxml_project, patch_fcpxml_project_batch,
+    BatchRouteDPatchResult, BatchSkipReason, BatchTargetAction, BatchTargetReport, RouteDError,
+    RouteDErrorCategory, RouteDPatchResult, patch_fcpxml_project, patch_fcpxml_project_batch,
+    patch_fcpxml_project_batch_with_media_roots, patch_fcpxml_project_batch_with_project_reader,
+    patch_fcpxml_project_batch_with_project_reader_report_all_skipped,
 };
 
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::raw::{c_char, c_void};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock, atomic::AtomicBool};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -20,6 +24,8 @@ use gyroflow_plugin_base::{
 use num_rational::Ratio;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use project_parameters::{snapshot_project_parameters, validate_render_parameters};
 
 pub const FINALCUT_RUST_BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT_PAYLOAD_VERSION: u32 = 1;
@@ -40,7 +46,79 @@ pub enum GFStatus {
     StaleTiming = 6,
     UnsupportedPixelFormat = 7,
     RenderFailed = 8,
+    RouteDInvalidInput = 9,
+    RouteDUnsafeStructure = 10,
+    RouteDNoUpdateableTargets = 11,
     Panic = 255,
+}
+
+fn route_d_error_status(error: &RouteDError) -> GFStatus {
+    match error.category() {
+        RouteDErrorCategory::InvalidInput => GFStatus::RouteDInvalidInput,
+        RouteDErrorCategory::UnsafeStructure => GFStatus::RouteDUnsafeStructure,
+        RouteDErrorCategory::NoUpdateableTargets => GFStatus::RouteDNoUpdateableTargets,
+    }
+}
+
+unsafe fn store_batch_patch_result(
+    patched: BatchRouteDPatchResult,
+    out_result: *mut GFRouteDPatchResult,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    let report = serde_json::json!({
+        "original_project_name": patched.original_project_name,
+        "occurrence_count": patched.occurrence_count,
+        "updated_project_count": patched.updated_project_count,
+        "timing_only_count": patched.timing_only_count,
+        "skipped_count": patched.skipped_count,
+        "targets": patched.targets,
+        "behavior": "Preserves the internal project name and UID for Final Cut native Replace while updating existing production effects only"
+    });
+    let report = match serde_json::to_vec(&report) {
+        Ok(report) => report,
+        Err(error) => {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::Panic,
+                    &format!("batch Route D report encoding failed: {error}"),
+                )
+            };
+            return GFStatus::Panic;
+        }
+    };
+    unsafe {
+        *out_result = GFRouteDPatchResult {
+            xml: owned_bytes(patched.xml),
+            report: owned_bytes(report),
+        }
+    };
+    GFStatus::Ok
+}
+
+unsafe fn finish_batch_patch(
+    patched: std::thread::Result<Result<BatchRouteDPatchResult, RouteDError>>,
+    out_result: *mut GFRouteDPatchResult,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    match patched {
+        Ok(Ok(patched)) => unsafe { store_batch_patch_result(patched, out_result, out_error) },
+        Ok(Err(error)) => {
+            let status = route_d_error_status(&error);
+            unsafe { set_error(out_error, status, &error.to_string()) };
+            status
+        }
+        Err(_) => {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::Panic,
+                    "batch Route D FCPXML patching panicked",
+                )
+            };
+            GFStatus::Panic
+        }
+    }
 }
 
 #[repr(C)]
@@ -62,6 +140,30 @@ pub struct GFOwnedBytes {
 pub struct GFRouteDPatchResult {
     pub xml: GFOwnedBytes,
     pub report: GFOwnedBytes,
+}
+
+pub type GFRouteDProjectInputStatus = u32;
+pub const GF_ROUTE_D_PROJECT_INPUT_AVAILABLE: GFRouteDProjectInputStatus = 0;
+pub const GF_ROUTE_D_PROJECT_INPUT_MISSING: GFRouteDProjectInputStatus = 1;
+pub const GF_ROUTE_D_PROJECT_INPUT_PERMISSION_DENIED: GFRouteDProjectInputStatus = 2;
+pub const GF_ROUTE_D_PROJECT_INPUT_TOO_LARGE: GFRouteDProjectInputStatus = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GFRouteDProjectInput {
+    pub path_bytes: *const u8,
+    pub path_len: usize,
+    pub project_bytes: *const u8,
+    pub project_len: usize,
+    pub status: GFRouteDProjectInputStatus,
+    pub reserved: u32,
+}
+
+enum RouteDProjectInputValue {
+    Available(Vec<u8>),
+    Missing,
+    PermissionDenied,
+    TooLarge,
 }
 
 impl Default for GFOwnedBytes {
@@ -89,7 +191,7 @@ pub struct GFTimeRange {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GFRenderParameters {
     pub fov: f64,
     pub smoothness: f64,
@@ -386,6 +488,12 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
     if project_bytes.is_empty() {
         return Err("gyroflow project bytes are empty".to_string());
     }
+    if project_bytes.len() as u64 > MAX_PROJECT_BYTES {
+        return Err(format!(
+            "gyroflow project length {} exceeds the 256 MiB raw project limit",
+            project_bytes.len()
+        ));
+    }
     std::str::from_utf8(project_bytes)
         .map_err(|error| format!("gyroflow project is not valid UTF-8: {error}"))?;
     let project_json: serde_json::Value = serde_json::from_slice(project_bytes)
@@ -394,7 +502,7 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
     let manager = StabilizationManager::default();
     let mut is_preset = false;
     manager
-        .import_gyroflow_data(
+        .import_gyroflow_data_with_policy(
             project_bytes,
             true,
             None,
@@ -402,6 +510,7 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
             Arc::new(AtomicBool::new(false)),
             &mut is_preset,
             true,
+            gyroflow_plugin_base::gyroflow_core::ExternalIoPolicy::Deny,
         )
         .map_err(|error| format!("gyroflow project import failed: {error}"))?;
     let (has_sync_points, has_accurate_timestamps) = {
@@ -420,6 +529,12 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
 fn encode_project_payload(project_bytes: &[u8]) -> Result<Vec<u8>, String> {
     if project_bytes.is_empty() {
         return Err("gyroflow project bytes are empty".to_string());
+    }
+    if project_bytes.len() as u64 > MAX_PROJECT_BYTES {
+        return Err(format!(
+            "gyroflow project length {} exceeds the 256 MiB raw project limit",
+            project_bytes.len()
+        ));
     }
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder
@@ -554,37 +669,7 @@ fn apply_render_parameters(
     project: &LoadedProject,
     parameters: &GFRenderParameters,
 ) -> Result<(), String> {
-    let finite_values = [
-        parameters.fov,
-        parameters.smoothness,
-        parameters.lens_correction,
-        parameters.horizon_lock_amount,
-        parameters.horizon_lock_roll,
-    ];
-    if finite_values.iter().any(|value| !value.is_finite()) {
-        return Err("render parameters must be finite".to_string());
-    }
-    if !(0.1..=3.0).contains(&parameters.fov) {
-        return Err("FOV must be in [0.1, 3.0]".to_string());
-    }
-    if !(1.0..=300.0).contains(&parameters.smoothness) {
-        return Err("Smoothness must be in [1, 300]".to_string());
-    }
-    if !(0.0..=100.0).contains(&parameters.lens_correction) {
-        return Err("Lens Correction must be in [0, 100]".to_string());
-    }
-    if !(0.0..=100.0).contains(&parameters.horizon_lock_amount) {
-        return Err("Horizon Lock amount must be in [0, 100]".to_string());
-    }
-    if !(-100.0..=100.0).contains(&parameters.horizon_lock_roll) {
-        return Err("Horizon Lock roll must be in [-100, 100]".to_string());
-    }
-    if !(0..=2).contains(&parameters.zoom_mode) {
-        return Err("Zoom Mode must be 0, 1, or 2".to_string());
-    }
-    if parameters.overview > 1 || parameters.reserved != [0; 3] {
-        return Err("Overview or reserved parameter bytes are invalid".to_string());
-    }
+    validate_render_parameters(parameters)?;
 
     let manager = &project.manager;
     manager.params.write().framebuffer_inverted = true;
@@ -1479,6 +1564,16 @@ pub unsafe extern "C" fn gf_finalcut_instance_load_project(
         };
         return GFStatus::InvalidProject;
     }
+    if project_len as u64 > MAX_PROJECT_BYTES {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::InvalidProject,
+                "gyroflow project exceeds the 256 MiB raw project limit",
+            )
+        };
+        return GFStatus::InvalidProject;
+    }
     if project_bytes.is_null() {
         unsafe {
             set_error(
@@ -1642,8 +1737,6 @@ pub unsafe extern "C" fn gf_finalcut_route_d_patch(
 pub unsafe extern "C" fn gf_finalcut_route_d_batch_patch(
     input_bytes: *const u8,
     input_len: usize,
-    processed_name_bytes: *const u8,
-    processed_name_len: usize,
     out_result: *mut GFRouteDPatchResult,
     out_error: *mut *mut GFError,
 ) -> GFStatus {
@@ -1669,86 +1762,268 @@ pub unsafe extern "C" fn gf_finalcut_route_d_batch_patch(
         };
         return GFStatus::InvalidArgument;
     }
-    if input_bytes.is_null() || (processed_name_len > 0 && processed_name_bytes.is_null()) {
+    if input_bytes.is_null() {
         unsafe {
             set_error(
                 out_error,
                 GFStatus::NullPointer,
-                "batch Route D input or processed-name pointer is null",
+                "batch Route D input pointer is null",
             )
         };
         return GFStatus::NullPointer;
     }
     let input = unsafe { std::slice::from_raw_parts(input_bytes, input_len) };
-    let processed_name = if processed_name_len == 0 {
-        None
-    } else {
-        let bytes = unsafe { std::slice::from_raw_parts(processed_name_bytes, processed_name_len) };
-        match std::str::from_utf8(bytes) {
-            Ok(name) => Some(name),
-            Err(error) => {
-                unsafe {
-                    set_error(
-                        out_error,
-                        GFStatus::InvalidArgument,
-                        &format!("processed project name is not UTF-8: {error}"),
-                    )
-                };
-                return GFStatus::InvalidArgument;
-            }
+    let patched = std::panic::catch_unwind(|| patch_fcpxml_project_batch(input));
+    unsafe { finish_batch_patch(patched, out_result, out_error) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_finalcut_route_d_batch_patch_with_media_roots(
+    input_bytes: *const u8,
+    input_len: usize,
+    media_roots_json_bytes: *const u8,
+    media_roots_json_len: usize,
+    out_result: *mut GFRouteDPatchResult,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    unsafe { clear_error_slot(out_error) };
+    if out_result.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "batch Route D patch output pointer is null",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+    unsafe { *out_result = GFRouteDPatchResult::default() };
+    if input_len == 0 || media_roots_json_len == 0 {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::RouteDInvalidInput,
+                "batch Route D requires FCPXML bytes and a media-root JSON array",
+            )
+        };
+        return GFStatus::RouteDInvalidInput;
+    }
+    if input_bytes.is_null() || media_roots_json_bytes.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "batch Route D rooted input pointers are null",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+    if media_roots_json_len > 1024 * 1024 {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::RouteDInvalidInput,
+                "batch Route D media-root JSON exceeds 1 MiB",
+            )
+        };
+        return GFStatus::RouteDInvalidInput;
+    }
+    let input = unsafe { std::slice::from_raw_parts(input_bytes, input_len) };
+    let roots_json =
+        unsafe { std::slice::from_raw_parts(media_roots_json_bytes, media_roots_json_len) };
+    let roots: Vec<std::path::PathBuf> = match serde_json::from_slice::<Vec<String>>(roots_json) {
+        Ok(roots) if roots.iter().all(|root| !root.is_empty()) => {
+            roots.into_iter().map(std::path::PathBuf::from).collect()
         }
-    };
-    let patched = std::panic::catch_unwind(|| patch_fcpxml_project_batch(input, processed_name));
-    match patched {
-        Ok(Ok(patched)) => {
-            let report = serde_json::json!({
-                "original_project_name": patched.original_project_name,
-                "processed_project_name": patched.processed_project_name,
-                "import_token": patched.import_token,
-                "occurrence_count": patched.occurrence_count,
-                "inserted_count": patched.inserted_count,
-                "updated_count": patched.updated_count,
-                "skipped_count": patched.skipped_count,
-                "failed_count": 0,
-                "targets": patched.targets,
-                "behavior": "Creates a validated new processed project and preserves the original project"
-            });
-            let report = match serde_json::to_vec(&report) {
-                Ok(report) => report,
-                Err(error) => {
-                    unsafe {
-                        set_error(
-                            out_error,
-                            GFStatus::Panic,
-                            &format!("batch Route D report encoding failed: {error}"),
-                        )
-                    };
-                    return GFStatus::Panic;
-                }
-            };
-            unsafe {
-                *out_result = GFRouteDPatchResult {
-                    xml: owned_bytes(patched.xml),
-                    report: owned_bytes(report),
-                }
-            };
-            GFStatus::Ok
-        }
-        Ok(Err(error)) => {
-            unsafe { set_error(out_error, GFStatus::InvalidArgument, &error.to_string()) };
-            GFStatus::InvalidArgument
-        }
-        Err(_) => {
+        _ => {
             unsafe {
                 set_error(
                     out_error,
-                    GFStatus::Panic,
-                    "batch Route D FCPXML patching panicked",
+                    GFStatus::RouteDInvalidInput,
+                    "batch Route D media roots are not a string array",
                 )
             };
-            GFStatus::Panic
+            return GFStatus::RouteDInvalidInput;
         }
+    };
+    let patched =
+        std::panic::catch_unwind(|| patch_fcpxml_project_batch_with_media_roots(input, &roots));
+    unsafe { finish_batch_patch(patched, out_result, out_error) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_finalcut_route_d_batch_patch_with_project_inputs(
+    input_bytes: *const u8,
+    input_len: usize,
+    project_inputs: *const GFRouteDProjectInput,
+    project_inputs_len: usize,
+    out_result: *mut GFRouteDPatchResult,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    unsafe { clear_error_slot(out_error) };
+    if out_result.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "batch Route D patch output pointer is null",
+            )
+        };
+        return GFStatus::NullPointer;
     }
+    unsafe { *out_result = GFRouteDPatchResult::default() };
+    if input_len == 0 {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::RouteDInvalidInput,
+                "batch Route D requires FCPXML bytes",
+            )
+        };
+        return GFStatus::RouteDInvalidInput;
+    }
+    if input_bytes.is_null() || (project_inputs_len > 0 && project_inputs.is_null()) {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "batch Route D project-input pointer is null",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+    if project_inputs_len > 100_000 {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::RouteDInvalidInput,
+                "batch Route D project-input count is too large",
+            )
+        };
+        return GFStatus::RouteDInvalidInput;
+    }
+
+    let input = unsafe { std::slice::from_raw_parts(input_bytes, input_len) };
+    let raw_inputs = if project_inputs_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(project_inputs, project_inputs_len) }
+    };
+    let mut projects = std::collections::HashMap::with_capacity(raw_inputs.len());
+    for raw in raw_inputs {
+        if raw.reserved != 0 || raw.path_len == 0 || raw.path_len > 1024 * 1024 {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::RouteDInvalidInput,
+                    "batch Route D project input has invalid metadata",
+                )
+            };
+            return GFStatus::RouteDInvalidInput;
+        }
+        if raw.path_bytes.is_null() {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::NullPointer,
+                    "batch Route D project path pointer is null",
+                )
+            };
+            return GFStatus::NullPointer;
+        }
+        let path_bytes = unsafe { std::slice::from_raw_parts(raw.path_bytes, raw.path_len) };
+        let path = match std::str::from_utf8(path_bytes) {
+            Ok(path) if PathBuf::from(path).is_absolute() => PathBuf::from(path),
+            _ => {
+                unsafe {
+                    set_error(
+                        out_error,
+                        GFStatus::RouteDInvalidInput,
+                        "batch Route D project path must be absolute UTF-8",
+                    )
+                };
+                return GFStatus::RouteDInvalidInput;
+            }
+        };
+        if projects.contains_key(&path) {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::RouteDInvalidInput,
+                    "batch Route D project inputs contain a duplicate path",
+                )
+            };
+            return GFStatus::RouteDInvalidInput;
+        }
+        let value = match raw.status {
+            GF_ROUTE_D_PROJECT_INPUT_AVAILABLE => {
+                if raw.project_len > MAX_PROJECT_BYTES as usize
+                    || (raw.project_len > 0 && raw.project_bytes.is_null())
+                {
+                    unsafe {
+                        set_error(
+                            out_error,
+                            GFStatus::RouteDInvalidInput,
+                            "batch Route D available project bytes are invalid",
+                        )
+                    };
+                    return GFStatus::RouteDInvalidInput;
+                }
+                let bytes = if raw.project_len == 0 {
+                    Vec::new()
+                } else {
+                    unsafe {
+                        std::slice::from_raw_parts(raw.project_bytes, raw.project_len).to_vec()
+                    }
+                };
+                RouteDProjectInputValue::Available(bytes)
+            }
+            GF_ROUTE_D_PROJECT_INPUT_MISSING => RouteDProjectInputValue::Missing,
+            GF_ROUTE_D_PROJECT_INPUT_PERMISSION_DENIED => RouteDProjectInputValue::PermissionDenied,
+            GF_ROUTE_D_PROJECT_INPUT_TOO_LARGE => RouteDProjectInputValue::TooLarge,
+            _ => {
+                unsafe {
+                    set_error(
+                        out_error,
+                        GFStatus::RouteDInvalidInput,
+                        "batch Route D project input has an unknown status",
+                    )
+                };
+                return GFStatus::RouteDInvalidInput;
+            }
+        };
+        if !matches!(value, RouteDProjectInputValue::Available(_)) && raw.project_len != 0 {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::RouteDInvalidInput,
+                    "batch Route D unavailable project input contains bytes",
+                )
+            };
+            return GFStatus::RouteDInvalidInput;
+        }
+        projects.insert(path, value);
+    }
+
+    let patched = std::panic::catch_unwind(|| {
+        let reader = |path: &std::path::Path| match projects.get(path) {
+            Some(RouteDProjectInputValue::Available(bytes)) => Ok(bytes.clone()),
+            Some(RouteDProjectInputValue::Missing) => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "matching sibling .gyroflow project is missing",
+            )),
+            Some(RouteDProjectInputValue::PermissionDenied) | None => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "matching sibling .gyroflow project was not authorized by the FCPXML bookmark",
+            )),
+            Some(RouteDProjectInputValue::TooLarge) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "raw project exceeds the 256 MiB limit",
+            )),
+        };
+        patch_fcpxml_project_batch_with_project_reader_report_all_skipped(input, &reader)
+    });
+    unsafe { finish_batch_patch(patched, out_result, out_error) }
 }
 
 #[unsafe(no_mangle)]
@@ -1788,6 +2063,16 @@ pub unsafe extern "C" fn gf_finalcut_project_payload_encode(
                 out_error,
                 GFStatus::InvalidProject,
                 "gyroflow project bytes are empty",
+            )
+        };
+        return GFStatus::InvalidProject;
+    }
+    if project_len as u64 > MAX_PROJECT_BYTES {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::InvalidProject,
+                "gyroflow project exceeds the 256 MiB raw project limit",
             )
         };
         return GFStatus::InvalidProject;
@@ -1892,6 +2177,69 @@ pub unsafe extern "C" fn gf_finalcut_instance_load_project_payload(
                     GFStatus::Panic
                 }
             }
+        }
+        Ok(Err(error)) => {
+            unsafe { set_error(out_error, error.status, &error.message) };
+            error.status
+        }
+        Err(_) => {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::Panic,
+                    "project payload decoding panicked",
+                )
+            };
+            GFStatus::Panic
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_finalcut_project_payload_decode(
+    payload_bytes: *const u8,
+    payload_len: usize,
+    out_project: *mut GFOwnedBytes,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    unsafe { clear_error_slot(out_error) };
+    if out_project.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "project payload output pointer is null",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+    unsafe { *out_project = GFOwnedBytes::default() };
+    if payload_len == 0 {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::InvalidProject,
+                "project payload bytes are empty",
+            )
+        };
+        return GFStatus::InvalidProject;
+    }
+    if payload_bytes.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "project payload byte pointer is null",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+
+    let payload_bytes = unsafe { std::slice::from_raw_parts(payload_bytes, payload_len) };
+    match std::panic::catch_unwind(|| decode_project_payload(payload_bytes)) {
+        Ok(Ok(project)) => {
+            unsafe { *out_project = owned_bytes(project) };
+            GFStatus::Ok
         }
         Ok(Err(error)) => {
             unsafe { set_error(out_error, error.status, &error.message) };
@@ -2250,6 +2598,65 @@ pub unsafe extern "C" fn gf_finalcut_instance_set_render_parameters(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_finalcut_instance_get_project_render_parameters(
+    instance: *const GFFinalCutInstance,
+    out_parameters: *mut GFRenderParameters,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    unsafe { clear_error_slot(out_error) };
+    if instance.is_null() || out_parameters.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "project parameter lookup requires an instance and output parameters",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+
+    unsafe { *out_parameters = GFRenderParameters::default() };
+
+    let instance = unsafe { &*instance };
+    let snapshot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state = instance.state.read().map_err(|_| {
+            (
+                GFStatus::Panic,
+                "project state lock is poisoned".to_string(),
+            )
+        })?;
+        let project = state.project.as_ref().ok_or_else(|| {
+            (
+                GFStatus::InvalidProject,
+                "project parameter lookup requires a loaded gyroflow project".to_string(),
+            )
+        })?;
+        snapshot_project_parameters(&project.manager)
+            .map_err(|message| (GFStatus::InvalidArgument, message))
+    }));
+    match snapshot {
+        Ok(Ok(parameters)) => {
+            unsafe { *out_parameters = parameters };
+            GFStatus::Ok
+        }
+        Ok(Err((status, message))) => {
+            unsafe { set_error(out_error, status, &message) };
+            status
+        }
+        Err(_) => {
+            unsafe {
+                set_error(
+                    out_error,
+                    GFStatus::Panic,
+                    "project parameter lookup panicked",
+                )
+            };
+            GFStatus::Panic
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_finalcut_instance_has_project(
     instance: *const GFFinalCutInstance,
 ) -> u8 {
@@ -2345,6 +2752,37 @@ pub unsafe extern "C" fn gf_finalcut_owned_bytes_free(bytes: *mut GFOwnedBytes) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_cut_project_parser_denies_external_video_and_gyro_io() {
+        let temp = std::env::temp_dir().join(format!(
+            "gyroflow-finalcut-external-io-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).unwrap();
+        let video = temp.join("readable-video-sentinel.mp4");
+        let gyro = temp.join("readable-gyro-sentinel.gcsv");
+        std::fs::write(&video, b"video sentinel must not be read").unwrap();
+        std::fs::write(&gyro, b"gyro sentinel must not be read").unwrap();
+        let project = serde_json::json!({
+            "title": "Gyroflow data file",
+            "version": 4,
+            "videofile": video,
+            "gyro_source": {
+                "filepath": gyro
+            }
+        });
+
+        let parsed = parse_project(project.to_string().as_bytes()).unwrap();
+
+        assert!(parsed.manager.input_file.read().url.is_empty());
+        assert!(parsed.manager.gyro.read().file_url.is_empty());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
 
     #[test]
     fn owned_bytes_free_clears_the_caller_visible_buffer() {
@@ -2454,6 +2892,56 @@ mod tests {
                 .undistortion_invalidated
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
+    }
+
+    #[test]
+    fn project_parameter_snapshot_round_trips_final_cut_units() {
+        let project = parse_project(include_bytes!("../tests/fixtures/phase0-valid.gyroflow"))
+            .expect("fixture project");
+        let expected = GFRenderParameters {
+            fov: 1.25,
+            smoothness: 42.0,
+            lens_correction: 80.0,
+            horizon_lock_amount: 30.0,
+            horizon_lock_roll: 5.0,
+            zoom_mode: 2,
+            overview: 1,
+            reserved: [0; 3],
+        };
+
+        apply_render_parameters(&project, &expected).expect("apply values");
+
+        assert_eq!(
+            snapshot_project_parameters(&project.manager).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn project_parameter_snapshot_maps_all_zoom_sentinels() {
+        let project = parse_project(include_bytes!("../tests/fixtures/phase0-valid.gyroflow"))
+            .expect("fixture project");
+
+        for (zoom_mode, adaptive_zoom_window) in [(0, 0.0), (1, 4.0), (2, -1.0)] {
+            let parameters = GFRenderParameters {
+                fov: 1.25,
+                smoothness: 42.0,
+                lens_correction: 80.0,
+                horizon_lock_amount: 30.0,
+                horizon_lock_roll: 5.0,
+                zoom_mode,
+                overview: 1,
+                reserved: [0; 3],
+            };
+            apply_render_parameters(&project, &parameters).expect("apply values");
+
+            let snapshot = snapshot_project_parameters(&project.manager).unwrap();
+            assert_eq!(snapshot.zoom_mode, zoom_mode);
+            assert_eq!(
+                project.manager.params.read().adaptive_zoom_window,
+                adaptive_zoom_window
+            );
+        }
     }
 
     #[test]

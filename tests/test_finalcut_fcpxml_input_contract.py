@@ -11,7 +11,7 @@ HELPER = ROOT / "tests" / "helpers" / "finalcut_fcpxml_input_main.swift"
 
 
 class FinalCutFCPXMLInputContractTests(unittest.TestCase):
-    def test_file_package_workspace_and_atomic_output_contract(self):
+    def test_user_selected_file_and_package_input_contract(self):
         with tempfile.TemporaryDirectory(prefix="finalcut-fcpxml-contract-") as directory:
             root = Path(directory)
             executable = root / "finalcut-fcpxml-contract"
@@ -19,8 +19,8 @@ class FinalCutFCPXMLInputContractTests(unittest.TestCase):
                 [
                     "xcrun",
                     "swiftc",
+                    str(APP_SOURCE / "FinalCutStrings.swift"),
                     str(APP_SOURCE / "FCPXMLDocumentInput.swift"),
-                    str(APP_SOURCE / "ProcessedProjectStore.swift"),
                     str(HELPER),
                     "-o",
                     str(executable),

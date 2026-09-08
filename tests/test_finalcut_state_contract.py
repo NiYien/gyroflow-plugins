@@ -20,6 +20,7 @@ def compile_helper(
     *,
     fxplug: bool = False,
     blocks: bool = False,
+    appkit: bool = False,
 ) -> Path:
     executable = directory / name
     command = [
@@ -45,6 +46,14 @@ def compile_helper(
                 "PluginManager",
             ]
         )
+    if appkit:
+        command.extend(["-framework", "AppKit"])
+    localized_sources = {
+        EFFECT / "GFProjectStore.m",
+        EFFECT / "GFSourceResolver.m",
+    }
+    if localized_sources.intersection(sources):
+        sources = [*sources, EFFECT / "GFLocalization.m"]
     command.extend(
         [
             "-framework",
@@ -149,6 +158,229 @@ class FinalCutSourceResolverTests(unittest.TestCase):
 
 
 class FinalCutProjectStoreTests(unittest.TestCase):
+    def test_readback_failure_clears_pending_preserves_previous_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-readback-failure",
+                [EFFECT / "GFProjectStore.m", HELPERS / "finalcut_project_store_main.m"],
+                blocks=True,
+            )
+            first = root / "A.gyroflow"
+            second = root / "B.gyroflow"
+            first.write_text("project-A", encoding="utf-8")
+            second.write_text("project-B-is-different", encoding="utf-8")
+
+            result = subprocess.run(
+                [str(executable), "--readback-failure", str(first), str(second)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            state = json.loads(result.stdout)
+            self.assertTrue(state["readbackFailureClearedPending"])
+            self.assertTrue(state["readbackFailurePreservedPrevious"])
+            self.assertTrue(state["retryAfterReadbackFailureSucceeded"])
+            self.assertEqual(state["currentProjectName"], "B.gyroflow")
+
+    def test_pending_timeout_is_generation_scoped_and_allows_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-pending-timeout",
+                [EFFECT / "GFProjectStore.m", HELPERS / "finalcut_project_store_main.m"],
+                blocks=True,
+            )
+            first = root / "A.gyroflow"
+            second = root / "B.gyroflow"
+            first.write_text("project-A", encoding="utf-8")
+            second.write_text("project-B-is-different", encoding="utf-8")
+
+            result = subprocess.run(
+                [str(executable), "--pending-timeout", str(first), str(second)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            state = json.loads(result.stdout)
+            self.assertTrue(state["wrongGenerationTimeoutIgnored"])
+            self.assertTrue(state["matchingGenerationTimeoutApplied"])
+            self.assertTrue(state["readbackFailurePreservedPrevious"])
+            self.assertTrue(state["retryAfterReadbackFailureSucceeded"])
+
+    def test_late_old_host_readback_cannot_rollback_a_newer_pending_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-stale-host-readback",
+                [EFFECT / "GFProjectStore.m", HELPERS / "finalcut_project_store_main.m"],
+                blocks=True,
+            )
+            first = root / "A.gyroflow"
+            second = root / "B.gyroflow"
+            first.write_text("project-A", encoding="utf-8")
+            second.write_text("project-B-is-different", encoding="utf-8")
+
+            result = subprocess.run(
+                [str(executable), "--stale-host-readback", str(first), str(second)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            state = json.loads(result.stdout)
+            self.assertTrue(state["generationReadbackAPIAvailable"])
+            self.assertFalse(state["staleHostReadbackApplied"])
+            self.assertTrue(state["staleHostReadbackPreservedCurrentProject"])
+            self.assertTrue(state["freshHostReadbackReconciled"])
+            self.assertEqual(state["pendingHostCommitCalls"], 2)
+            effect = (EFFECT / "GyroflowFinalCutEffect.m").read_text()
+            plugin_state = effect.split("- (BOOL)pluginState:", 1)[1]
+            self.assertLess(
+                plugin_state.index("beginHostProjectReadback"),
+                plugin_state.index("persistedProjectPayloadWithHash"),
+            )
+            self.assertIn("readbackGeneration:projectReadbackGeneration", plugin_state)
+
+    def test_pending_load_blocks_a_second_commit_until_host_generation_reconciles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-pending-generation",
+                [EFFECT / "GFProjectStore.m", HELPERS / "finalcut_project_store_main.m"],
+                blocks=True,
+            )
+            first = root / "A.gyroflow"
+            second = root / "B.gyroflow"
+            first.write_text("project-A", encoding="utf-8")
+            second.write_text("project-B-is-different", encoding="utf-8")
+
+            result = subprocess.run(
+                [str(executable), "--pending-load", str(first), str(second)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            state = json.loads(result.stdout)
+            self.assertFalse(state["secondPendingLoadAccepted"])
+            self.assertEqual(state["pendingHostCommitCalls"], 1)
+            self.assertTrue(state["pendingGenerationReconciled"])
+            self.assertEqual(state["currentProjectName"], "A.gyroflow")
+
+    def test_manual_reader_rejects_sparse_project_over_raw_cap_before_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-raw-cap",
+                [
+                    EFFECT / "GFProjectStore.m",
+                    HELPERS / "finalcut_project_store_main.m",
+                ],
+                blocks=True,
+            )
+            oversized = root / "oversized.gyroflow"
+            with oversized.open("wb") as output:
+                output.truncate(256 * 1024 * 1024 + 1)
+
+            result = subprocess.run(
+                [str(executable), str(oversized)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            state = json.loads(result.stdout)
+            self.assertEqual(state["builderCalls"], 0)
+            self.assertEqual(state["currentPayload"], "")
+            self.assertEqual(len(state["errors"]), 1)
+
+    def test_import_candidate_keeps_only_filename_and_project_parameter_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-candidate",
+                [
+                    EFFECT / "GFProjectStore.m",
+                    HELPERS / "finalcut_project_store_main.m",
+                ],
+                blocks=True,
+            )
+            source = root / "private" / "camera-card" / "P1004783.gyroflow"
+            source.parent.mkdir(parents=True)
+            source.write_text("valid-project", encoding="utf-8")
+
+            result = subprocess.run(
+                [str(executable), str(source)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            state = json.loads(result.stdout)
+            self.assertEqual(state["currentProjectName"], "P1004783.gyroflow")
+            self.assertEqual(state["builderDisplayName"], "P1004783.gyroflow")
+            self.assertNotIn(str(source.parent), state["status"])
+            self.assertEqual(state["candidateFOV"], 1.25)
+            self.assertEqual(state["candidateSmoothness"], 42.0)
+            self.assertEqual(state["candidateLensCorrection"], 95.0)
+            self.assertEqual(state["candidateHorizonLock"], 33.0)
+            self.assertEqual(state["candidateHorizonRoll"], 4.0)
+            self.assertEqual(state["candidateZoomMode"], 0)
+            self.assertEqual(state["candidateOverview"], 1)
+
+
+    def test_restore_uses_persisted_filename_and_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "project-store-display-name",
+                [
+                    EFFECT / "GFProjectStore.m",
+                    HELPERS / "finalcut_project_store_main.m",
+                ],
+                blocks=True,
+            )
+
+            named = subprocess.run(
+                [str(executable), "--restore-no-timing"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            fallback = subprocess.run(
+                [str(executable), "--restore-no-name"],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(named.returncode, 0, msg=named.stdout + named.stderr)
+            self.assertEqual(fallback.returncode, 0, msg=fallback.stdout + fallback.stderr)
+            named_state = json.loads(named.stdout)
+            fallback_state = json.loads(fallback.stdout)
+            self.assertEqual(named_state["currentProjectName"], "P1004783.gyroflow")
+            self.assertEqual(named_state["currentProjectFilename"], "P1004783.gyroflow")
+            self.assertIn("P1004783.gyroflow", named_state["status"])
+            self.assertEqual(fallback_state["currentProjectName"], "Embedded project")
+            self.assertEqual(fallback_state["currentProjectFilename"], "embedded-project")
+            self.assertIn("Embedded project", fallback_state["status"])
+
     def test_validated_render_state_restores_an_empty_inspector_only_once(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -174,10 +406,8 @@ class FinalCutProjectStoreTests(unittest.TestCase):
             self.assertTrue(state["renderRestoreSucceeded"])
             self.assertFalse(state["renderRestoreReplaced"])
             self.assertEqual(state["currentPayload"], "persisted-payload")
-            self.assertEqual(
-                state["status"],
-                "Direct mode ready (untrimmed forward 1×). Complex edits: use Process Current Final Cut Project.",
-            )
+            self.assertEqual(state["currentProjectName"], "P1004783.gyroflow")
+            self.assertIn("P1004783.gyroflow", state["status"])
 
     def test_plugin_state_host_rejection_rolls_back_pending_import(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -234,10 +464,8 @@ class FinalCutProjectStoreTests(unittest.TestCase):
             state = json.loads(result.stdout)
             self.assertTrue(state["restoreSucceeded"])
             self.assertEqual(state["currentPayload"], "persisted-payload")
-            self.assertEqual(
-                state["status"],
-                "Direct mode ready (untrimmed forward 1×). Complex edits: use Process Current Final Cut Project.",
-            )
+            self.assertEqual(state["currentProjectName"], "P1004783.gyroflow")
+            self.assertIn("P1004783.gyroflow", state["status"])
 
     def test_invalid_import_and_cancel_preserve_the_previous_project(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -305,7 +533,7 @@ class FinalCutProjectStoreTests(unittest.TestCase):
 
 
 class FinalCutParameterCommitterTests(unittest.TestCase):
-    def test_payload_write_occurs_only_inside_one_custom_parameter_action(self):
+    def test_explicit_load_atomically_replaces_static_parameters_and_keyframes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = compile_helper(
@@ -337,17 +565,30 @@ class FinalCutParameterCommitterTests(unittest.TestCase):
                 state["payload"], "dmVyc2lvbmVkLWJhc2U2NC1lbnZlbG9wZQ=="
             )
             self.assertEqual(state["recoveredPayload"], state["payload"])
-            self.assertEqual(state["lastWriteID"], 1904)
-            self.assertEqual(state["writeCount"], 11)
+            self.assertEqual(state["lastWriteID"], 1905)
             self.assertEqual(state["legacyWriteCount"], 0)
-            self.assertEqual(state["nonEmptyChunksA"], 1)
-            self.assertEqual(state["manifestA"]["version"], 1)
-            self.assertEqual(state["manifestA"]["generation"], 1)
-            self.assertEqual(state["manifestA"]["chunk_count"], 1)
+            self.assertEqual(state["nonEmptyChunksB"], 1)
+            self.assertEqual(state["manifestWriteIDs"], [1905])
+            self.assertEqual(state["manifestB"]["version"], 1)
+            self.assertEqual(state["manifestB"]["generation"], 2)
+            self.assertEqual(state["manifestB"]["chunk_count"], 1)
             self.assertEqual(
-                state["manifestA"]["encoded_length"], len(state["payload"])
+                state["manifestB"]["encoded_length"], len(state["payload"])
             )
-            self.assertEqual(len(state["manifestA"]["payload_sha256"]), 64)
+            self.assertEqual(len(state["manifestB"]["payload_sha256"]), 64)
+            self.assertEqual(state["displayName"], "P1004783.gyroflow")
+            self.assertTrue(state["projectStaticWritesAtZero"])
+            self.assertEqual(state["totalKeyframes"], 0)
+            self.assertEqual(state["visibleState"]["2001"]["base"], 1.25)
+            self.assertEqual(state["visibleState"]["2002"]["base"], 42.0)
+            self.assertEqual(state["visibleState"]["2003"]["base"], 95.0)
+            self.assertEqual(state["visibleState"]["2004"]["base"], 33.0)
+            self.assertEqual(state["visibleState"]["2005"]["base"], 4.0)
+            self.assertEqual(state["visibleState"]["2006"]["base"], 0)
+            self.assertFalse(state["visibleState"]["2007"]["base"])
+            self.assertTrue(
+                all(not value["frames"] for value in state["visibleState"].values())
+            )
 
     def test_parameter_apis_are_requested_only_after_the_action_starts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -376,10 +617,11 @@ class FinalCutParameterCommitterTests(unittest.TestCase):
             self.assertTrue(state["committed"])
             self.assertEqual(state["startCount"], 1)
             self.assertEqual(state["endCount"], 1)
-            self.assertEqual(state["insideActionReads"], 13)
+            self.assertGreater(state["insideActionReads"], 13)
+            self.assertEqual(state["insideActionReads"], state["readCount"])
             self.assertEqual(state["outsideActionWrites"], 0)
 
-    def test_silent_host_rejection_fails_when_exact_readback_did_not_change(self):
+    def test_each_transaction_failure_restores_old_bank_values_and_keyframes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             executable = compile_helper(
@@ -393,23 +635,37 @@ class FinalCutParameterCommitterTests(unittest.TestCase):
             )
             environment = os.environ.copy()
             environment["DYLD_FRAMEWORK_PATH"] = "/Library/Developer/Frameworks"
-            result = subprocess.run(
-                [str(executable), "--discard-write"],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-            )
+            for mode in (
+                "--discard-visible-write",
+                "--discard-manifest-write",
+                "--fail-keyframe-removal",
+                "--discard-rollback-write",
+            ):
+                with self.subTest(mode=mode):
+                    result = subprocess.run(
+                        [str(executable), mode],
+                        cwd=ROOT,
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                    )
 
-            self.assertEqual(result.returncode, 1, msg=result.stdout + result.stderr)
-            state = json.loads(result.stdout)
-            self.assertFalse(state["committed"])
-            self.assertEqual(
-                state["payload"], "dmVyc2lvbmVkLWJhc2U2NC1lbnZlbG9wZQ=="
-            )
-            self.assertEqual(state["recoveredPayload"], "previous-payload")
-            self.assertGreaterEqual(state["readCount"], 11)
-            self.assertEqual(state["insideActionReads"], 13)
+                    self.assertEqual(
+                        result.returncode, 1, msg=result.stdout + result.stderr
+                    )
+                    state = json.loads(result.stdout)
+                    self.assertFalse(state["committed"])
+                    self.assertEqual(state["recoveredPayload"], "b2xkLXByb2plY3Q=")
+                    self.assertEqual(state["displayName"], "old.gyroflow")
+                    self.assertEqual(state["nonEmptyChunksB"], 0)
+                    self.assertEqual(state["totalKeyframes"], 14)
+                    self.assertTrue(state["rollbackRestored"])
+                    self.assertEqual(
+                        state["visibleState"], state["oldVisibleState"]
+                    )
+                    self.assertEqual(state["startCount"], 1)
+                    self.assertEqual(state["endCount"], 1)
+                    self.assertEqual(state["outsideActionWrites"], 0)
 
     def test_banks_rotate_and_corrupt_newest_falls_back_to_previous_generation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -501,6 +757,49 @@ class FinalCutParameterCommitterTests(unittest.TestCase):
 
 
 class FinalCutImmutableRenderStateTests(unittest.TestCase):
+    def test_render_diagnostics_rate_limit_and_counters_are_thread_safe_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = compile_helper(
+                root,
+                "render-diagnostics",
+                [
+                    EFFECT / "GFRenderDiagnostics.m",
+                    HELPERS / "finalcut_render_diagnostics_main.m",
+                ],
+                blocks=True,
+            )
+            result = subprocess.run(
+                [str(executable)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+            metrics = json.loads(result.stdout)
+            self.assertEqual(metrics["passthrough_logs"], 4)
+            self.assertEqual(metrics["captured_logs"], 4)
+            self.assertTrue(metrics["first_log_has_reason"])
+            self.assertTrue(metrics["last_log_has_new_reason"])
+            self.assertEqual(metrics["device_enumerations"], 1)
+            self.assertEqual(metrics["command_queue_creations"], 1)
+            self.assertEqual(metrics["pipeline_creations"], 1)
+            self.assertEqual(metrics["project_decodes"], 1)
+            self.assertEqual(metrics["project_cache_hits"], 1)
+            self.assertEqual(metrics["project_cache_misses"], 1)
+            self.assertEqual(metrics["plugin_state_calls"], 2)
+            self.assertEqual(metrics["plugin_state_bytes"], 300)
+            self.assertEqual(metrics["cache_resident_bytes"], 0)
+            self.assertEqual(metrics["cache_peak_bytes"], 6144)
+            self.assertEqual(metrics["cache_evictions"], 1)
+            self.assertEqual(metrics["cache_purges"], 1)
+            self.assertEqual(metrics["memory_pressure_purges"], 1)
+            self.assertEqual(metrics["gpu_time_samples"], 1)
+            self.assertEqual(metrics["gpu_ns"], 4_000_000)
+            self.assertEqual(metrics["processed_frames"], 1)
+            self.assertEqual(metrics["passthrough_frames"], 1)
+
     def test_live_geometry_is_render_local_and_never_archived_or_cached_as_output(self):
         effect = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
         state_header = (EFFECT / "GFRenderState.h").read_text(encoding="utf-8")
@@ -526,6 +825,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
                 "render-state",
                 [
                     EFFECT / "GFRenderState.m",
+                    EFFECT / "GFRenderDiagnostics.m",
                     EFFECT / "GFRenderCache.m",
                     HELPERS / "finalcut_render_state_main.m",
                 ],
@@ -541,6 +841,13 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
             state = json.loads(result.stdout)
             self.assertTrue(state["secureRoundTrip"])
             self.assertTrue(state["sameSnapshot"])
+            self.assertTrue(state["hashConflictRejected"])
+            self.assertTrue(state["keyframesReusePreparedProject"])
+            self.assertEqual(state["keyframeProjectDecodes"], 1)
+            self.assertTrue(state["evictionReconstructed"])
+            self.assertTrue(state["xpcRestartReconstructed"])
+            self.assertTrue(state["multipleInstancesIndependent"])
+            self.assertTrue(state["largeProjectReady"])
             self.assertTrue(state["directSnapshotReady"])
             self.assertTrue(state["directSkippedTimingLoader"])
             self.assertTrue(state["invalidTimingRejected"])
@@ -570,18 +877,36 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertNotIn("parameterRetrievalAPI", render)
         self.assertNotIn("apiForProtocol", render)
 
+    def test_render_state_persists_display_name_hash_and_mode_for_xpc_restore(self):
+        state_header = (EFFECT / "GFRenderState.h").read_text(encoding="utf-8")
+        state_source = (EFFECT / "GFRenderState.m").read_text(encoding="utf-8")
+        effect = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
+
+        self.assertIn("projectDisplayName", state_header)
+        self.assertIn("projectContentHash", state_header)
+        self.assertIn("schemaVersion", state_header)
+        self.assertIn("GFRenderMode", state_header)
+        self.assertIn("kGFRenderStateSchema = 2", state_source)
+        self.assertIn("schema != 1", state_source)
+        self.assertIn("snapshot.state.projectDisplayName", effect)
+        self.assertIn("state.schemaVersion", effect)
+        self.assertNotIn('restoreValidatedRenderProjectPayloadIfEmpty:projectPayload\n                                                displayName:@""', effect)
+
     def test_project_view_has_manual_import_and_single_item_drop_contract(self):
         view = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
 
-        self.assertIn('self.importButton.title = @"Import Gyroflow Project"', view)
+        self.assertIn('GFLocalized(@"effect.action.load_project"', view)
+        self.assertNotIn('effect.action.open_gyroflow', view)
         self.assertIn("panel.allowedContentTypes = @[gyroflowType]", view)
         self.assertIn("panel.allowsMultipleSelection = NO", view)
         self.assertIn("urls.count == 1", view)
         self.assertNotIn("AVAsset", view)
-        self.assertIn("NSMakeRect(0, 0, 280, 104)", view)
-        self.assertIn("NSMakeRect(8, 68, 264, 28)", view)
-        self.assertIn("NSMakeRect(8, 7, 264, 56)", view)
-        self.assertIn("maximumNumberOfLines = 3", view)
+        self.assertIn("NSMakeRect(0, 0, 280, 116)", view)
+        self.assertIn("self.statusLabel.maximumNumberOfLines = 2", view)
+        self.assertIn("self.statusLabel.selectable = YES", view)
+        self.assertNotIn("openButton", view)
+        self.assertIn("NSMakeRect(8, 17, 264, 26)", view)
+        self.assertNotIn("GFEmbeddedProjectOpener", view)
 
     def test_empty_timing_commit_enters_direct_mode(self):
         effect = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
@@ -589,8 +914,15 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
             "- (NSSet<Class> *)classesForCustomParameterID:", 1
         )[0]
 
-        self.assertIn("recordDirectModeReady", create_view)
+        self.assertNotIn("recordDirectModeReady", create_view)
         self.assertNotIn("recordReprocessRequired", create_view)
+        plugin_state = effect.split("- (BOOL)pluginState:", 1)[1].split(
+            "- (BOOL)destinationImageRect:", 1
+        )[0]
+        self.assertLess(
+            plugin_state.index("reconcileHostPersistedProjectPayload"),
+            plugin_state.index("recordDirectModeReady"),
+        )
 
     def test_project_view_manual_import_is_accessible_from_view_service(self):
         view = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
@@ -602,7 +934,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertIn("- (BOOL)accessibilityPerformPress", view)
         self.assertIn("- (BOOL)acceptsFirstMouse:", button)
         self.assertIn("[NSApp sendAction:self.action to:self.target from:self]", view)
-        self.assertIn("[[GFImportButton alloc] initWithFrame:NSZeroRect]", view)
+        self.assertIn("[[GFImportButton alloc] initWithFrame:NSMakeRect(8, 17, 264, 26)]", view)
         self.assertIn("NSApplicationActivationPolicy previousActivationPolicy", view)
         self.assertIn(
             "[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory]",

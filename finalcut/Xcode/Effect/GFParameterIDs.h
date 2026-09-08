@@ -7,6 +7,7 @@ static const UInt32 kGFProjectPayload = 1902;
 static const UInt32 kGFTimingPayload = 1903;
 static const UInt32 kGFProjectPayloadManifestA = 1904;
 static const UInt32 kGFProjectPayloadManifestB = 1905;
+static const UInt32 kGFProjectDisplayName = 1906;
 
 static const NSUInteger kGFProjectPayloadChunksPerBank = 10;
 static const NSUInteger kGFProjectPayloadChunkBytes = 416 * 1024;

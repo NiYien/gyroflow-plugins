@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "release_blocked": true,
+  "source_sha256": null,
+  "sdk_sha256": null,
+  "branding": null,
+  "localization": null,
+  "upgrade": null,
+  "file_access": null
+}

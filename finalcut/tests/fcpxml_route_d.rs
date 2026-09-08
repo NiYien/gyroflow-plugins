@@ -1,11 +1,15 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gyroflow_finalcut::{
-    GFError, GFRouteDPatchResult, GFStatus, GFTime, GFTimeRange, gf_finalcut_error_free,
-    gf_finalcut_instance_create, gf_finalcut_instance_free, gf_finalcut_instance_load_project,
-    gf_finalcut_instance_load_project_payload, gf_finalcut_instance_load_timing_payload,
-    gf_finalcut_instance_resolve_source_time, gf_finalcut_owned_bytes_free,
-    gf_finalcut_project_payload_encode, gf_finalcut_route_d_batch_patch, gf_finalcut_route_d_patch,
-    gf_finalcut_route_d_patch_result_free, patch_fcpxml_project, patch_fcpxml_project_batch,
+    GF_ROUTE_D_PROJECT_INPUT_AVAILABLE, GFError, GFRouteDPatchResult, GFRouteDProjectInput,
+    GFStatus, GFTime, GFTimeRange, gf_finalcut_error_free, gf_finalcut_instance_create,
+    gf_finalcut_instance_free, gf_finalcut_instance_load_project,
+    gf_finalcut_instance_load_timing_payload, gf_finalcut_instance_resolve_source_time,
+    gf_finalcut_owned_bytes_free, gf_finalcut_project_payload_encode,
+    gf_finalcut_route_d_batch_patch, gf_finalcut_route_d_batch_patch_with_project_inputs,
+    gf_finalcut_route_d_patch, gf_finalcut_route_d_patch_result_free, patch_fcpxml_project,
+    patch_fcpxml_project_batch, patch_fcpxml_project_batch_with_media_roots,
+    patch_fcpxml_project_batch_with_project_reader,
+    patch_fcpxml_project_batch_with_project_reader_report_all_skipped,
 };
 use sha2::{Digest, Sha256};
 
@@ -147,31 +151,32 @@ fn selected_banked_payloads(xml: &[u8], effect_ref: &str) -> Vec<String> {
         .filter(|node| {
             node.has_tag_name("filter-video") && node.attribute("ref") == Some(effect_ref)
         })
-        .map(|filter| {
+        .filter_map(|filter| {
             let manifest = filter
                 .children()
                 .find(|node| {
                     node.has_tag_name("param")
                         && node.attribute("name") == Some("Project Payload Manifest A")
                 })
-                .and_then(|node| node.attribute("value"))
-                .unwrap();
+                .and_then(|node| node.attribute("value"))?;
             let manifest: serde_json::Value =
                 serde_json::from_slice(&STANDARD.decode(manifest).unwrap()).unwrap();
             let chunk_count = manifest["chunk_count"].as_u64().unwrap() as usize;
-            (0..chunk_count)
-                .map(|index| {
-                    let name = format!("Project Payload A {:02}", index + 1);
-                    filter
-                        .children()
-                        .find(|node| {
-                            node.has_tag_name("param")
-                                && node.attribute("name") == Some(name.as_str())
-                        })
-                        .and_then(|node| node.attribute("value"))
-                        .unwrap()
-                })
-                .collect::<String>()
+            Some(
+                (0..chunk_count)
+                    .map(|index| {
+                        let name = format!("Project Payload A {:02}", index + 1);
+                        filter
+                            .children()
+                            .find(|node| {
+                                node.has_tag_name("param")
+                                    && node.attribute("name") == Some(name.as_str())
+                            })
+                            .and_then(|node| node.attribute("value"))
+                            .unwrap()
+                    })
+                    .collect::<String>(),
+            )
         })
         .collect()
 }
@@ -185,27 +190,73 @@ fn exact_sibling_batch_input(assets: &str, clips: &str) -> String {
     )
 }
 
+fn run_route_d_output_verifier(
+    original: &std::path::Path,
+    output: &std::path::Path,
+    project: &std::path::Path,
+    route: &str,
+    expected_parameters: Option<&str>,
+) -> std::process::Output {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("scripts/verify_finalcut_route_d_output.py");
+    let mut command = std::process::Command::new("python3");
+    command
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .arg(script)
+        .arg("--original-fcpxml")
+        .arg(original)
+        .arg("--fcpxml")
+        .arg(output)
+        .arg("--expect-occurrence")
+        .arg(format!("{route}={}", project.display()));
+    if let Some(parameters) = expected_parameters {
+        command
+            .arg("--expect-parameters")
+            .arg(format!("{route}={parameters}"));
+    }
+    command.output().unwrap()
+}
+
 fn geometry_batch_input(root: &std::path::Path, geometry: &str) -> String {
     std::fs::write(
         root.join("Geometry.gyroflow"),
         include_bytes!("fixtures/phase0-valid.gyroflow"),
     )
     .unwrap();
+    std::fs::write(
+        root.join("Control.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
     let media_url = format!("file://{}", root.join("Geometry.mov").display());
+    let control_url = format!("file://{}", root.join("Control.mov").display());
     format!(
         r#"<fcpxml version="1.14"><resources>
         <format id="source" frameDuration="1/30s" width="1920" height="1080" paspH="4" paspV="3"/>
+        <format id="control-format" frameDuration="1/30s" width="1920" height="1080"/>
         <format id="sequence" frameDuration="1/30s" width="1080" height="1920"/>
         <asset id="a" start="0s" duration="1s" format="source"><media-rep kind="original-media" src="{media_url}"/></asset>
+        <asset id="control" start="0s" duration="1s" format="control-format"><media-rep kind="original-media" src="{control_url}"/></asset>
         <effect id="fx" uid="{EFFECT_UUID}"/>
         </resources><project name="Geometry" uid="11111111-1111-4111-8111-111111111111"><sequence format="sequence" duration="1s"><spine>
-        <asset-clip name="Geometry" ref="a" offset="0s" start="0s" duration="1s">{geometry}</asset-clip>
+        <asset-clip name="Geometry" ref="a" offset="0s" start="0s" duration="1s">{geometry}<filter-video ref="fx"/></asset-clip>
+        <asset-clip name="Control" ref="control" lane="1" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>
         </spine></sequence></project></fcpxml>"#
     )
 }
 
 fn geometry_target_report(result: &gyroflow_finalcut::BatchRouteDPatchResult) -> serde_json::Value {
     serde_json::to_value(&result.targets[0]).unwrap()
+}
+
+fn geometry_skip_detail(input: &str) -> String {
+    patch_fcpxml_project_batch(input.as_bytes())
+        .unwrap()
+        .targets[0]
+        .detail
+        .clone()
 }
 
 #[test]
@@ -222,7 +273,7 @@ fn geometry_preflight_reports_runtime_live_and_does_not_bake_editorial_geometry(
     std::fs::create_dir(&root).unwrap();
     let geometry = r#"<adjust-conform type="fill"/><adjust-transform position="10 -20" scale="1.25 1.25" rotation="90" anchor="0 0"><param name="position" value="10 -20"><keyframeAnimation><keyframe time="0s" value="10 -20"/><keyframe time="1s" value="30 40"/></keyframeAnimation></param><param name="scale" value="1.25 1.25"><keyframeAnimation><keyframe time="0s" value="1.25 1.25"/><keyframe time="1s" value="1.5 1.5"/></keyframeAnimation></param><param name="rotation" value="90"><keyframeAnimation><keyframe time="0s" value="90"/><keyframe time="1s" value="270"/></keyframeAnimation></param></adjust-transform><adjust-crop mode="trim"><trim-rect left="1" top="2" right="3" bottom="4"><param name="left" value="1"><keyframeAnimation><keyframe time="0s" value="1" curve="linear"/><keyframe time="1s" value="2" curve="linear"/></keyframeAnimation></param></trim-rect></adjust-crop>"#;
     let first_input = geometry_batch_input(&root, geometry);
-    let first = patch_fcpxml_project_batch(first_input.as_bytes(), None).unwrap();
+    let first = patch_fcpxml_project_batch(first_input.as_bytes()).unwrap();
     let report = geometry_target_report(&first);
 
     assert_eq!(report["geometry_status"], "runtime_live");
@@ -256,7 +307,7 @@ fn geometry_preflight_reports_runtime_live_and_does_not_bake_editorial_geometry(
         .replace("scale=\"1.25 1.25\"", "scale=\"2 2\"")
         .replace("left=\"1\"", "left=\"11\"");
     let changed_input = geometry_batch_input(&root, &changed_geometry);
-    let changed = patch_fcpxml_project_batch(changed_input.as_bytes(), None).unwrap();
+    let changed = patch_fcpxml_project_batch(changed_input.as_bytes()).unwrap();
 
     assert_eq!(encoded_timing_payloads(&changed.xml), first_timing);
     assert_eq!(selected_banked_payloads(&changed.xml, "fx"), first_projects);
@@ -301,7 +352,7 @@ fn geometry_preflight_accepts_fit_fill_none_and_crop_trim_ken_burns_forms() {
             r#"<adjust-conform type="{conform}"/><adjust-transform position="0 0" scale="1 1" rotation="270" anchor="0 0"/>{crop}"#
         );
         let input = geometry_batch_input(&root, &geometry);
-        let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
+        let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
         let report = geometry_target_report(&patched);
         assert_eq!(report["geometry_status"], "runtime_live");
         let detail = report["geometry_detail"].as_str().unwrap();
@@ -325,7 +376,7 @@ fn geometry_preflight_uses_verified_simplified_chinese_names_with_opaque_keys() 
     std::fs::create_dir(&root).unwrap();
     let geometry = r#"<adjust-transform position="0 0" scale="1 1" rotation="0" anchor="0 0"><param name="位置" key="opaque/transform/1" value="0 0"><keyframeAnimation><keyframe time="0s" value="0 0" curve="linear"/><keyframe time="1s" value="10 20" curve="linear"/></keyframeAnimation></param><param name="缩放" key="opaque/transform/2" value="1 1"><keyframeAnimation><keyframe time="0s" value="1 1" curve="linear"/><keyframe time="1s" value="1.25 1.25" curve="linear"/></keyframeAnimation></param><param name="旋转" key="opaque/transform/3" value="0"><keyframeAnimation><keyframe time="0s" value="0" curve="linear"/><keyframe time="1s" value="90" curve="linear"/></keyframeAnimation></param><param name="锚点" key="opaque/transform/4" value="0 0"/></adjust-transform><adjust-crop mode="trim"><trim-rect left="1" top="2" right="3" bottom="4"><param name="左" key="opaque/crop/1" value="1"><keyframeAnimation><keyframe time="0s" value="1" curve="linear"/><keyframe time="1s" value="2" curve="linear"/></keyframeAnimation></param><param name="上" key="opaque/crop/2" value="2"/><param name="右" key="opaque/crop/3" value="3"/><param name="下" key="opaque/crop/4" value="4"/></trim-rect></adjust-crop>"#;
     let input = geometry_batch_input(&root, geometry);
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
     let report = geometry_target_report(&patched);
 
     assert_eq!(report["geometry_status"], "runtime_live");
@@ -350,6 +401,80 @@ fn geometry_preflight_uses_verified_simplified_chinese_names_with_opaque_keys() 
 }
 
 #[test]
+fn geometry_preflight_accepts_six_product_locale_parameter_names() {
+    let unique = format!(
+        "gyroflow-finalcut-geometry-six-locales-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir(&root).unwrap();
+    let cases = [
+        (
+            "English",
+            [
+                "Position", "Scale", "Rotation", "Anchor", "Left", "Top", "Right", "Bottom",
+            ],
+        ),
+        (
+            "简体中文",
+            ["位置", "缩放", "旋转", "锚点", "左", "上", "右", "下"],
+        ),
+        (
+            "繁體中文",
+            ["位置", "縮放", "旋轉", "錨點", "左", "上", "右", "下"],
+        ),
+        (
+            "日本語",
+            ["位置", "調整", "回転", "アンカー", "左", "上", "右", "下"],
+        ),
+        (
+            "한국어",
+            [
+                "위치",
+                "크기",
+                "회전",
+                "앵커",
+                "왼쪽",
+                "위",
+                "오른쪽",
+                "아래",
+            ],
+        ),
+        (
+            "Русский",
+            [
+                "Положение",
+                "Масштаб",
+                "Поворот",
+                "Привязка",
+                "Слева",
+                "Сверху",
+                "Справа",
+                "Снизу",
+            ],
+        ),
+    ];
+    for (locale, names) in cases {
+        let [position, scale, rotation, anchor, left, top, right, bottom] = names;
+        let geometry = format!(
+            r#"<adjust-transform><param name="{position}" key="opaque/{locale}/position" value="0 0"/><param name="{scale}" key="opaque/{locale}/scale" value="1 1"/><param name="{rotation}" key="opaque/{locale}/rotation" value="0"/><param name="{anchor}" key="opaque/{locale}/anchor" value="0 0"/></adjust-transform><adjust-crop mode="trim"><trim-rect left="1" top="2" right="3" bottom="4"><param name="{left}" key="opaque/{locale}/left" value="1"/><param name="{top}" key="opaque/{locale}/top" value="2"/><param name="{right}" key="opaque/{locale}/right" value="3"/><param name="{bottom}" key="opaque/{locale}/bottom" value="4"/></trim-rect></adjust-crop>"#
+        );
+        let input = geometry_batch_input(&root, &geometry);
+        let patched = patch_fcpxml_project_batch(input.as_bytes())
+            .unwrap_or_else(|error| panic!("{locale}: {error}"));
+        assert_eq!(
+            geometry_target_report(&patched)["geometry_status"],
+            "runtime_live"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn geometry_preflight_blocks_opaque_key_kind_conflicts_and_unknown_names() {
     let unique = format!(
         "gyroflow-finalcut-geometry-key-{}-{}",
@@ -363,19 +488,15 @@ fn geometry_preflight_blocks_opaque_key_kind_conflicts_and_unknown_names() {
     std::fs::create_dir(&root).unwrap();
     let conflict = r#"<adjust-transform><param name="position" key="opaque/shared" value="0 0"/><param name="scale" key="opaque/shared" value="1 1"/></adjust-transform>"#;
     let conflict_input = geometry_batch_input(&root, conflict);
-    let error = patch_fcpxml_project_batch(conflict_input.as_bytes(), None).unwrap_err();
-    assert!(error.to_string().contains("opaque geometry parameter key"));
-    assert!(error.to_string().contains("conflicting kinds"));
+    let detail = geometry_skip_detail(&conflict_input);
+    assert!(detail.contains("opaque geometry parameter key"));
+    assert!(detail.contains("conflicting kinds"));
 
     let unknown = r#"<adjust-transform><param name="未知位置" key="opaque/unknown" value="0 0"/></adjust-transform>"#;
     let unknown_input = geometry_batch_input(&root, unknown);
-    let error = patch_fcpxml_project_batch(unknown_input.as_bytes(), None).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unknown adjust-transform parameter")
-    );
-    assert!(error.to_string().contains("未知位置"));
+    let detail = geometry_skip_detail(&unknown_input);
+    assert!(detail.contains("unknown adjust-transform parameter"));
+    assert!(detail.contains("未知位置"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -403,7 +524,7 @@ fn geometry_preflight_ignores_inactive_and_disabled_crop_rect_semantics() {
     ];
     for (geometry, expected_detail) in cases {
         let input = geometry_batch_input(&root, geometry);
-        let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
+        let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
         let report = geometry_target_report(&patched);
         assert_eq!(report["geometry_status"], "runtime_live");
         assert!(
@@ -435,10 +556,9 @@ fn geometry_preflight_combines_active_linear_crop_edges_at_merged_keyframe_times
     std::fs::create_dir(&root).unwrap();
     let geometry = r#"<adjust-crop mode="trim"><trim-rect left="0" top="0" right="0" bottom="0"><param name="top" value="0"><keyframeAnimation><keyframe time="0s" value="0" curve="linear"/><keyframe time="1s" value="60" curve="linear"/></keyframeAnimation></param><param name="bottom" value="0"><keyframeAnimation><keyframe time="0s" value="0" curve="linear"/><keyframe time="1/2s" value="75" curve="linear"/><keyframe time="1s" value="0" curve="linear"/></keyframeAnimation></param></trim-rect></adjust-crop>"#;
     let input = geometry_batch_input(&root, geometry);
-    let error = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap_err();
-
-    assert!(error.to_string().contains("top and bottom"), "{error}");
-    assert!(error.to_string().contains("keyframe"), "{error}");
+    let detail = geometry_skip_detail(&input);
+    assert!(detail.contains("top and bottom"), "{detail}");
+    assert!(detail.contains("keyframe"), "{detail}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -456,26 +576,26 @@ fn geometry_preflight_blocks_unproved_smooth_crop_interpolation_and_full_static_
     std::fs::create_dir(&root).unwrap();
     let smooth = r#"<adjust-crop mode="crop"><crop-rect><param name="top" value="0"><keyframeAnimation><keyframe time="0s" value="0" curve="smooth"/><keyframe time="1s" value="10" curve="smooth"/></keyframeAnimation></param></crop-rect></adjust-crop>"#;
     let smooth_input = geometry_batch_input(&root, smooth);
-    let error = patch_fcpxml_project_batch(smooth_input.as_bytes(), None).unwrap_err();
-    assert!(error.to_string().contains("linear"), "{error}");
+    let detail = geometry_skip_detail(&smooth_input);
+    assert!(detail.contains("linear"), "{detail}");
 
     let static_full = r#"<adjust-crop mode="trim"><trim-rect left="100" top="0" right="100" bottom="0"/></adjust-crop>"#;
     let square_pixel_input = geometry_batch_input(&root, static_full)
         .replace("paspH=\"4\" paspV=\"3\"", "paspH=\"1\" paspV=\"1\"");
-    let error = patch_fcpxml_project_batch(square_pixel_input.as_bytes(), None).unwrap_err();
-    assert!(error.to_string().contains("left and right"), "{error}");
+    let detail = geometry_skip_detail(&square_pixel_input);
+    assert!(detail.contains("left and right"), "{detail}");
 
     let invalid_ken_burns_start =
         r#"<adjust-crop mode="pan"><pan-rect top="50" bottom="50"/><pan-rect/></adjust-crop>"#;
     let input = geometry_batch_input(&root, invalid_ken_burns_start);
-    let error = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap_err();
-    assert!(error.to_string().contains("Ken Burns start"), "{error}");
+    let detail = geometry_skip_detail(&input);
+    assert!(detail.contains("Ken Burns start"), "{detail}");
 
     let invalid_ken_burns_end =
         r#"<adjust-crop mode="pan"><pan-rect/><pan-rect top="50" bottom="50"/></adjust-crop>"#;
     let input = geometry_batch_input(&root, invalid_ken_burns_end);
-    let error = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap_err();
-    assert!(error.to_string().contains("Ken Burns end"), "{error}");
+    let detail = geometry_skip_detail(&input);
+    assert!(detail.contains("Ken Burns end"), "{detail}");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -513,10 +633,10 @@ fn geometry_preflight_blocks_unsupported_singular_nonfinite_conflicting_and_unkn
     ];
     for (geometry, expected) in cases {
         let input = geometry_batch_input(&root, geometry);
-        let error = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap_err();
+        let detail = geometry_skip_detail(&input);
         assert!(
-            error.to_string().contains(expected),
-            "geometry={geometry}, error={error}"
+            detail.contains(expected),
+            "geometry={geometry}, detail={detail}"
         );
     }
 
@@ -524,9 +644,9 @@ fn geometry_preflight_blocks_unsupported_singular_nonfinite_conflicting_and_unkn
         "width=\"1920\" height=\"1080\" paspH=\"4\" paspV=\"3\"",
         "width=\"1920\" paspH=\"4\"",
     );
-    let error = patch_fcpxml_project_batch(partial_format.as_bytes(), None).unwrap_err();
-    assert!(error.to_string().contains("format"), "{error}");
-    assert!(error.to_string().contains("height"), "{error}");
+    let detail = geometry_skip_detail(&partial_format);
+    assert!(detail.contains("format"), "{detail}");
+    assert!(detail.contains("height"), "{detail}");
 
     let unsupported = geometry_batch_input(
         &root,
@@ -539,20 +659,17 @@ fn geometry_preflight_blocks_unsupported_singular_nonfinite_conflicting_and_unkn
             gf_finalcut_route_d_batch_patch(
                 unsupported.as_ptr(),
                 unsupported.len(),
-                std::ptr::null(),
-                0,
                 &mut result,
                 &mut error,
             )
         },
-        GFStatus::InvalidArgument
+        GFStatus::Ok
     );
-    assert!(result.xml.data.is_null());
-    assert_eq!(result.xml.len, 0);
-    let message = unsafe { std::ffi::CStr::from_ptr((*error).message) }
-        .to_string_lossy()
-        .into_owned();
-    assert!(message.contains("corner"), "{message}");
+    assert!(error.is_null());
+    let report = unsafe { std::slice::from_raw_parts(result.report.data, result.report.len) };
+    let report: serde_json::Value = serde_json::from_slice(report).unwrap();
+    assert_eq!(report["skipped_count"], 1);
+    assert_eq!(report["targets"][0]["skip_reason"], "blocked_geometry");
     unsafe {
         gf_finalcut_error_free(error);
         gf_finalcut_route_d_patch_result_free(&mut result);
@@ -595,11 +712,11 @@ fn exact_sibling_binds_from_media_directory_when_project_media_path_differs() {
     );
     let input = exact_sibling_batch_input(
         &assets,
-        r#"<asset-clip name="P1004783" ref="a" offset="0s" start="0s" duration="1s"/>"#,
+        r#"<asset-clip name="P1004783" ref="a" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>"#,
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
-    assert_eq!(patched.inserted_count, 1);
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    assert_eq!(patched.updated_project_count, 1);
     assert_eq!(patched.skipped_count, 0);
     assert_eq!(
         selected_banked_payloads(&patched.xml, "fx"),
@@ -637,12 +754,12 @@ fn exact_sibling_path_uses_media_parent_plus_full_stem() {
     );
     let input = exact_sibling_batch_input(
         &assets,
-        r#"<asset-clip name="Present" ref="present" offset="0s" start="0s" duration="1s"/>
-        <asset-clip name="Missing" ref="missing" offset="1s" start="0s" duration="1s"/>"#,
+        r#"<asset-clip name="Present" ref="present" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>
+        <asset-clip name="Missing" ref="missing" offset="1s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>"#,
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
-    assert_eq!(patched.inserted_count, 1);
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    assert_eq!(patched.updated_project_count, 1);
     assert_eq!(patched.skipped_count, 1);
     let missing = patched
         .targets
@@ -655,6 +772,114 @@ fn exact_sibling_path_uses_media_parent_plus_full_stem() {
     );
     assert_eq!(selected_banked_payloads(&patched.xml, "fx").len(), 1);
 
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn media_roots_gate_every_exact_sibling_open_and_reject_symlink_escapes() {
+    use std::os::unix::fs::symlink;
+
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-authorized-roots-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let authorized = root.join("authorized");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&authorized).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    std::fs::write(authorized.join("Good.gyroflow"), project).unwrap();
+    std::fs::write(outside.join("Outside.gyroflow"), project).unwrap();
+    std::fs::write(outside.join("Ancestor.gyroflow"), project).unwrap();
+    symlink(&outside, authorized.join("escape")).unwrap();
+    symlink(
+        outside.join("Outside.gyroflow"),
+        authorized.join("Linked.gyroflow"),
+    )
+    .unwrap();
+    let assets = format!(
+        "<asset id=\"good\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"outside\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"ancestor\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"linked\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        authorized.join("Good.mov").display(),
+        outside.join("Outside.mov").display(),
+        authorized.join("escape/Ancestor.mov").display(),
+        authorized.join("Linked.mov").display(),
+    );
+    let clips = "<asset-clip name=\"Good\" ref=\"good\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Outside\" ref=\"outside\" offset=\"1s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"><param name=\"Keep\" key=\"custom/outside\" value=\"sentinel\"/></filter-video></asset-clip><asset-clip name=\"Ancestor\" ref=\"ancestor\" offset=\"2s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"><param name=\"Keep\" key=\"custom/ancestor\" value=\"sentinel\"/></filter-video></asset-clip><asset-clip name=\"Linked\" ref=\"linked\" offset=\"3s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"><param name=\"Keep\" key=\"custom/linked\" value=\"sentinel\"/></filter-video></asset-clip>";
+    let input = exact_sibling_batch_input(&assets, clips);
+
+    let patched = patch_fcpxml_project_batch_with_media_roots(
+        input.as_bytes(),
+        std::slice::from_ref(&authorized),
+    )
+    .unwrap();
+
+    assert_eq!(patched.updated_project_count, 1);
+    assert_eq!(patched.skipped_count, 3);
+    assert_eq!(
+        patched
+            .targets
+            .iter()
+            .skip(1)
+            .map(|target| target.skip_reason.clone().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            gyroflow_finalcut::BatchSkipReason::PermissionDenied,
+            gyroflow_finalcut::BatchSkipReason::PermissionDenied,
+            gyroflow_finalcut::BatchSkipReason::IncompatibleProject,
+        ]
+    );
+    let output = String::from_utf8(patched.xml).unwrap();
+    for key in ["custom/outside", "custom/ancestor", "custom/linked"] {
+        assert!(output.contains(key));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_reader_rejects_sparse_raw_project_over_256_mib_without_allocating_it() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-raw-cap-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("Good.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    let oversized = std::fs::File::create(root.join("Huge.gyroflow")).unwrap();
+    oversized.set_len(256 * 1024 * 1024 + 1).unwrap();
+    let assets = format!(
+        "<asset id=\"good\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"huge\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Good.mov").display(),
+        root.join("Huge.mov").display()
+    );
+    let clips = "<asset-clip name=\"Good\" ref=\"good\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Huge\" ref=\"huge\" offset=\"1s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"><param name=\"Keep\" key=\"custom/huge\" value=\"sentinel\"/></filter-video></asset-clip>";
+    let input = exact_sibling_batch_input(&assets, clips);
+
+    let patched =
+        patch_fcpxml_project_batch_with_media_roots(input.as_bytes(), std::slice::from_ref(&root))
+            .unwrap();
+
+    assert_eq!(patched.updated_project_count, 1);
+    assert_eq!(patched.skipped_count, 1);
+    assert_eq!(
+        patched.targets[1].skip_reason,
+        Some(gyroflow_finalcut::BatchSkipReason::PayloadTooLarge)
+    );
+    assert!(
+        String::from_utf8(patched.xml)
+            .unwrap()
+            .contains("custom/huge")
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -686,11 +911,11 @@ fn exact_sibling_missing_diagnostic_contains_expected_path() {
     );
     let input = exact_sibling_batch_input(
         &assets,
-        r#"<asset-clip name="Present" ref="present" offset="0s" start="0s" duration="1s"/>
-        <asset-clip name="Missing" ref="missing" offset="1s" start="0s" duration="1s"/>"#,
+        r#"<asset-clip name="Present" ref="present" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>
+        <asset-clip name="Missing" ref="missing" offset="1s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>"#,
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
     let missing = patched
         .targets
         .iter()
@@ -704,7 +929,7 @@ fn exact_sibling_missing_diagnostic_contains_expected_path() {
 }
 
 #[test]
-fn batch_binds_distinct_sibling_projects_and_inserts_supported_leaf() {
+fn batch_updates_existing_effects_only_and_preserves_project_identity() {
     let unique = format!(
         "gyroflow-finalcut-batch-{}-{}",
         std::process::id(),
@@ -716,127 +941,335 @@ fn batch_binds_distinct_sibling_projects_and_inserts_supported_leaf() {
     let root = std::env::temp_dir().join(unique);
     std::fs::create_dir(&root).unwrap();
     let project_a = include_str!("fixtures/phase0-valid.gyroflow")
-        .replace("managed-media candidate", "batch project A");
+        .replace("managed-media candidate", "project A");
     let project_b = include_str!("fixtures/phase0-valid.gyroflow")
-        .replace("managed-media candidate", "batch project B");
-    std::fs::write(root.join("A001.gyroflow"), project_a).unwrap();
-    std::fs::write(root.join("B002.gyroflow"), project_b).unwrap();
-    std::fs::write(root.join("A001.mov"), b"video bytes must not be read").unwrap();
-    std::fs::write(root.join("B002.mov"), b"video bytes must not be read").unwrap();
-    let media_a = format!("file://{}", root.join("A001.mov").display());
-    let media_b = format!("file://{}", root.join("B002.mov").display());
-    let input = format!(
-        r#"<fcpxml version="1.14"><resources>
-        <format id="r1" frameDuration="1/30s"/>
-        <asset id="a" start="0s" duration="10s" format="r1"><media-rep kind="original-media" src="{media_a}"/></asset>
-        <asset id="b" start="0s" duration="10s" format="r1"><media-rep kind="original-media" src="{media_b}"/></asset>
-        <effect id="fx" uid="{EFFECT_UUID}"/><effect id="other" uid="other"/>
-        </resources><project name="Batch" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" duration="20s"><spine>
-        <asset-clip name="Existing" ref="a" offset="0s" start="0s" duration="10s"><filter-video-mask><mask-isolation/><filter-video ref="fx" name="Gyroflow NiYien"/></filter-video-mask></asset-clip>
-        <asset-clip name="Inserted" ref="b" offset="10s" start="0s" duration="10s"><metadata key="before" value="yes"/><marker start="1s" value="before-filters"/><filter-video ref="other" name="Other"/></asset-clip>
-        </spine></sequence></project></fcpxml>"#
+        .replace("managed-media candidate", "project B");
+    std::fs::write(root.join("A.gyroflow"), project_a).unwrap();
+    std::fs::write(root.join("B.gyroflow"), project_b).unwrap();
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"b\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("A.mov").display(),
+        root.join("B.mov").display(),
     );
+    let clips = "<asset-clip name=\"A\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"B\" ref=\"b\" offset=\"1s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Untouched\" ref=\"b\" lane=\"1\" offset=\"0s\" start=\"0s\" duration=\"1s\"/>";
+    let input = exact_sibling_batch_input(&assets, clips);
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), Some("Batch Processed")).unwrap();
-    let project_payloads = selected_banked_payloads(&patched.xml, "fx");
-    assert_eq!(patched.inserted_count, 1);
-    assert_eq!(patched.updated_count, 1);
-    assert_eq!(patched.skipped_count, 0);
-    assert_eq!(project_payloads.len(), 2);
-    assert_ne!(project_payloads[0], project_payloads[1]);
-    for payload in project_payloads {
-        let instance = unsafe { gf_finalcut_instance_create(std::ptr::null_mut()) };
-        assert_eq!(
-            unsafe {
-                gf_finalcut_instance_load_project_payload(
-                    instance,
-                    payload.as_ptr(),
-                    payload.len(),
-                    std::ptr::null_mut(),
-                )
-            },
-            GFStatus::Ok
-        );
-        unsafe { gf_finalcut_instance_free(instance) };
-    }
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    assert_eq!(patched.updated_project_count, 2);
+    assert_eq!(patched.timing_only_count, 0);
+    assert_eq!(patched.targets.len(), 2);
     let output = std::str::from_utf8(&patched.xml).unwrap();
-    let marker = output
-        .find("<marker start=\"1s\" value=\"before-filters\"/>")
-        .unwrap();
-    let other = output
-        .find("<filter-video ref=\"other\" name=\"Other\"/>")
-        .unwrap();
-    let inserted = output[other..]
-        .find("<filter-video ref=\"fx\"")
-        .map(|offset| other + offset)
-        .unwrap();
-    assert!(marker < other && other < inserted);
-    assert_eq!(payloads(&patched.xml).len(), 2);
-    assert!(output.contains("<metadata key=\"before\" value=\"yes\"/>"));
-    assert!(output.contains(
-        "<filter-video ref=\"fx\" name=\"Gyroflow NiYien\"><param name=\"Instance Identity\""
-    ));
+    assert!(
+        output.contains(
+            "<project name=\"Exact Sibling\" uid=\"11111111-1111-4111-8111-111111111111\""
+        )
+    );
+    assert!(!output.contains("Gyroflow Processed"));
     assert_eq!(output.matches("<filter-video ref=\"fx\"").count(), 2);
-    let document = roxmltree::Document::parse_with_options(
-        output,
-        roxmltree::ParsingOptions {
-            allow_dtd: true,
-            ..roxmltree::ParsingOptions::default()
-        },
-    )
-    .unwrap();
-    let identities: Vec<_> = document
-        .descendants()
-        .filter(|node| node.has_tag_name("filter-video") && node.attribute("ref") == Some("fx"))
-        .map(|filter| {
-            let identity = filter
-                .children()
-                .find(|node| {
-                    node.has_tag_name("param")
-                        && node.attribute("name") == Some("Instance Identity")
-                })
-                .unwrap();
-            assert_eq!(
-                identity.attribute("key"),
-                Some("9999/10013/10016/3/10036/1901")
-            );
-            identity.attribute("value").unwrap()
-        })
-        .collect();
-    assert_eq!(identities.len(), 2);
-    assert!(identities.iter().all(|identity| identity.len() == 36));
-    assert_ne!(identities[0], identities[1]);
-
-    let name = b"Batch C ABI";
     let mut result = GFRouteDPatchResult::default();
     let mut error: *mut GFError = std::ptr::null_mut();
     assert_eq!(
         unsafe {
-            gf_finalcut_route_d_batch_patch(
-                input.as_ptr(),
-                input.len(),
-                name.as_ptr(),
-                name.len(),
-                &mut result,
-                &mut error,
-            )
+            gf_finalcut_route_d_batch_patch(input.as_ptr(), input.len(), &mut result, &mut error)
         },
         GFStatus::Ok
     );
     assert!(error.is_null());
     let report = unsafe { std::slice::from_raw_parts(result.report.data, result.report.len) };
     let report: serde_json::Value = serde_json::from_slice(report).unwrap();
-    assert_eq!(report["inserted_count"], 1);
-    assert_eq!(report["updated_count"], 1);
-    assert_eq!(report["failed_count"], 0);
-    assert_eq!(report["targets"].as_array().unwrap().len(), 2);
+    assert_eq!(report["original_project_name"], "Exact Sibling");
+    assert_eq!(report["updated_project_count"], 2);
+    assert_eq!(report["timing_only_count"], 0);
+    assert_eq!(report["skipped_count"], 0);
+    assert!(
+        report["behavior"]
+            .as_str()
+            .unwrap()
+            .contains("internal project name")
+    );
     unsafe { gf_finalcut_route_d_patch_result_free(&mut result) };
 
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn batch_inserts_unique_production_effect_resource_when_absent() {
+fn project_snapshot_abi_updates_without_opening_the_filesystem() {
+    let project_path = "/Media/A.gyroflow";
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    let assets = "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file:///Media/A.mov\"/></asset>";
+    let clips = "<asset-clip name=\"A\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>";
+    let input = exact_sibling_batch_input(assets, clips);
+    let project_input = GFRouteDProjectInput {
+        path_bytes: project_path.as_ptr(),
+        path_len: project_path.len(),
+        project_bytes: project.as_ptr(),
+        project_len: project.len(),
+        status: GF_ROUTE_D_PROJECT_INPUT_AVAILABLE,
+        reserved: 0,
+    };
+    let mut result = GFRouteDPatchResult::default();
+    let mut error: *mut GFError = std::ptr::null_mut();
+
+    let status = unsafe {
+        gf_finalcut_route_d_batch_patch_with_project_inputs(
+            input.as_ptr(),
+            input.len(),
+            &project_input,
+            1,
+            &mut result,
+            &mut error,
+        )
+    };
+
+    assert_eq!(status, GFStatus::Ok);
+    assert!(error.is_null());
+    let report = unsafe { std::slice::from_raw_parts(result.report.data, result.report.len) };
+    let report: serde_json::Value = serde_json::from_slice(report).unwrap();
+    assert_eq!(report["updated_project_count"], 1);
+    assert_eq!(report["skipped_count"], 0);
+    unsafe { gf_finalcut_route_d_patch_result_free(&mut result) };
+}
+
+#[test]
+fn batch_forces_exact_sibling_over_valid_copied_payload_and_writes_project_defaults() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-sibling-authority-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let sibling = include_str!("fixtures/phase0-valid.gyroflow")
+        .replace("managed-media candidate", "authoritative sibling");
+    let copied = include_str!("fixtures/phase0-valid.gyroflow")
+        .replace("managed-media candidate", "copied payload");
+    std::fs::write(root.join("Clip.gyroflow"), &sibling).unwrap();
+    let copied_payload = encoded_project_payload(copied.as_bytes());
+    let banks = format!(
+        "{}{}",
+        banked_project_parameters('A', &copied_payload, 8),
+        banked_project_parameters('B', &copied_payload, 7)
+    );
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Clip.mov").display()
+    );
+    let clips = format!(
+        "<asset-clip name=\"Clip\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\">{banks}<param name=\"FOV\" key=\"9999/10013/10016/3/10036/2001\" value=\"2.5\"><keyframeAnimation><keyframe time=\"0s\" value=\"2.5\"/></keyframeAnimation></param><param name=\"Smoothness\" key=\"9999/10013/10016/3/10036/2002\" value=\"250\"/><param name=\"Lens Correction\" key=\"9999/10013/10016/3/10036/2003\" value=\"0\"/><param name=\"Horizon Lock\" key=\"9999/10013/10016/3/10036/2004\" value=\"100\"/><param name=\"Horizon Roll\" key=\"9999/10013/10016/3/10036/2005\" value=\"-90\"/><param name=\"Zoom Mode\" key=\"9999/10013/10016/3/10036/2006\" value=\"0\"/><param name=\"Stabilization Overview\" key=\"9999/10013/10016/3/10036/2007\" value=\"1\"/></filter-video></asset-clip>"
+    );
+    let input = exact_sibling_batch_input(&assets, &clips);
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    let output = std::str::from_utf8(&patched.xml).unwrap();
+    assert_eq!(
+        selected_banked_payloads(&patched.xml, "fx"),
+        vec![encoded_project_payload(sibling.as_bytes())]
+    );
+    for id in 2001..=2007 {
+        assert!(output.contains(&format!("/{}\" value=\"", id)));
+    }
+    for (id, value) in [
+        (2001, "1"),
+        (2002, "15"),
+        (2003, "100"),
+        (2004, "0"),
+        (2005, "0"),
+        (2006, "1"),
+        (2007, "0"),
+    ] {
+        assert!(
+            output.contains(&format!("/{id}\" value=\"{value}\"/>")),
+            "missing /{id}={value}: {output}"
+        );
+    }
+    assert!(output.contains("name=\"Project Display Name\" key=\"9999/10013/10016/3/10036/1906\" value=\"Clip.gyroflow\""));
+    assert!(!output.contains("value=\"2.5\""));
+    assert!(!output.contains("<keyframeAnimation>"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_same_hash_updates_timing_and_preserves_host_parameter_subtrees() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-same-hash-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    std::fs::write(root.join("Clip.gyroflow"), project).unwrap();
+    let payload = encoded_project_payload(project);
+    let banks = format!(
+        "{}{}",
+        banked_project_parameters('A', &payload, 8),
+        banked_project_parameters('B', &payload, 7)
+    );
+    let fov = "<param name=\"Host FOV\" key=\"9999/10013/10016/3/10036/2001\" value=\"1.75\"><keyframeAnimation><keyframe time=\"0s\" value=\"1.5\"/><keyframe time=\"1s\" value=\"1.75\"/></keyframeAnimation></param>";
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Clip.mov").display()
+    );
+    let clips = format!(
+        "<asset-clip name=\"Clip\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\">{banks}{fov}<param name=\"平滑度\" key=\"9999/10013/10016/3/10036/2002\" value=\"77\"/><param name=\"Timing Payload\" key=\"9999/10013/10016/3/10036/1903\" value=\"\"/></filter-video></asset-clip>"
+    );
+    let input = exact_sibling_batch_input(&assets, &clips);
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    let output = std::str::from_utf8(&patched.xml).unwrap();
+    assert!(output.contains(fov));
+    assert!(
+        output.contains(
+            "<param name=\"平滑度\" key=\"9999/10013/10016/3/10036/2002\" value=\"77\"/>"
+        )
+    );
+    assert!(output.contains("name=\"Project Display Name\" key=\"9999/10013/10016/3/10036/1906\" value=\"Clip.gyroflow\""));
+    assert_ne!(encoded_timing_payloads(&patched.xml), vec![String::new()]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_uses_parameter_key_ids_not_localized_names() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-localized-parameters-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("Clip.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Clip.mov").display()
+    );
+    let clips = "<asset-clip name=\"Clip\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"><param name=\"视野\" key=\"9999/10013/10016/3/10036/2001\" value=\"2.5\"><keyframeAnimation><keyframe time=\"0s\" value=\"2.5\"/></keyframeAnimation></param><param name=\"平滑度\" key=\"9999/10013/10016/3/10036/2002\" value=\"250\"/><param name=\"镜头校正\" key=\"9999/10013/10016/3/10036/2003\" value=\"0\"/><param name=\"水平锁定\" key=\"9999/10013/10016/3/10036/2004\" value=\"100\"/><param name=\"水平滚转\" key=\"9999/10013/10016/3/10036/2005\" value=\"-90\"/><param name=\"缩放模式\" key=\"9999/10013/10016/3/10036/2006\" value=\"0\"/><param name=\"稳定概览\" key=\"9999/10013/10016/3/10036/2007\" value=\"1\"/></filter-video></asset-clip>";
+    let input = exact_sibling_batch_input(&assets, clips);
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    let output = std::str::from_utf8(&patched.xml).unwrap();
+    for name in [
+        "视野",
+        "平滑度",
+        "镜头校正",
+        "水平锁定",
+        "水平滚转",
+        "缩放模式",
+        "稳定概览",
+    ] {
+        assert!(output.contains(&format!("name=\"{name}\"")));
+    }
+    assert!(!output.contains("<keyframeAnimation>"));
+    assert_eq!(patched.updated_project_count, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_skips_missing_invalid_permission_over_capacity_and_geometry_targets_independently() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-independent-skips-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Invalid.gyroflow"), b"not a project").unwrap();
+    std::fs::write(
+        root.join("Permission.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Geometry.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Good.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    let mut random = String::with_capacity(5_500_000);
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    for _ in 0..5_500_000 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        random.push(char::from(b'!' + (state % 90) as u8));
+    }
+    std::fs::write(
+        root.join("Oversized.gyroflow"),
+        format!(
+            "{{\"title\":\"oversized\",\"version\":3,\"videofile\":\"\",\"gyro_source\":{{}},\"padding\":{}}}",
+            serde_json::to_string(&random).unwrap()
+        ),
+    )
+    .unwrap();
+    let assets = format!(
+        "<asset id=\"missing\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"invalid\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"permission\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"oversized\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"geometry\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"good\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Missing.mov").display(),
+        root.join("Invalid.mov").display(),
+        root.join("Permission.mov").display(),
+        root.join("Oversized.mov").display(),
+        root.join("Geometry.mov").display(),
+        root.join("Good.mov").display()
+    );
+    let clips = "<asset-clip name=\"Missing\" ref=\"missing\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Invalid\" ref=\"invalid\" offset=\"1s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Permission\" ref=\"permission\" offset=\"2s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Oversized\" ref=\"oversized\" offset=\"3s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Geometry\" ref=\"geometry\" offset=\"4s\" start=\"0s\" duration=\"1s\"><adjust-corners botLeft=\"1 2\"/><filter-video ref=\"fx\"/></asset-clip><asset-clip name=\"Good\" ref=\"good\" lane=\"1\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>";
+    let input = exact_sibling_batch_input(&assets, clips);
+
+    let reader = |path: &std::path::Path| {
+        if path.file_name().and_then(|name| name.to_str()) == Some("Permission.gyroflow") {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected permission denial",
+            ))
+        } else {
+            std::fs::read(path)
+        }
+    };
+    let patched =
+        patch_fcpxml_project_batch_with_project_reader(input.as_bytes(), &reader).unwrap();
+    assert_eq!(patched.skipped_count, 5);
+    assert_eq!(patched.updated_project_count, 1);
+    assert_eq!(patched.targets.len(), 6);
+    assert!(
+        patched
+            .targets
+            .iter()
+            .all(|target| target.expected_project_path.is_some())
+    );
+    let reasons: Vec<_> = patched
+        .targets
+        .iter()
+        .filter_map(|target| target.skip_reason.clone())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            gyroflow_finalcut::BatchSkipReason::MissingProject,
+            gyroflow_finalcut::BatchSkipReason::InvalidProject,
+            gyroflow_finalcut::BatchSkipReason::PermissionDenied,
+            gyroflow_finalcut::BatchSkipReason::PayloadTooLarge,
+            gyroflow_finalcut::BatchSkipReason::BlockedGeometry,
+        ]
+    );
+    assert_ne!(patched.xml, input.as_bytes());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_without_existing_effects_returns_no_updateable_targets() {
     let unique = format!(
         "gyroflow-finalcut-resource-{}-{}",
         std::process::id(),
@@ -856,38 +1289,182 @@ fn batch_inserts_unique_production_effect_resource_when_absent() {
     let input = format!(
         r#"<fcpxml version="1.14"><resources><format id="r1" frameDuration="1/30s"/>
         <asset id="r2" start="0s" duration="1s" format="r1"><media-rep kind="original-media" src="{media_url}"/></asset>
-        </resources><project name="P" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" duration="1s"><spine>
+        <effect id="fx" uid="{EFFECT_UUID}"/></resources><project name="P" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" duration="1s"><spine>
         <asset-clip name="Leaf" ref="r2" offset="0s" start="0s" duration="1s"/>
         </spine></sequence></project></fcpxml>"#
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
-    let document = roxmltree::Document::parse_with_options(
-        std::str::from_utf8(&patched.xml).unwrap(),
-        roxmltree::ParsingOptions {
-            allow_dtd: true,
-            ..roxmltree::ParsingOptions::default()
+    let error = patch_fcpxml_project_batch(input.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("no updateable existing"));
+    assert_eq!(input.matches("<filter-video").count(), 0);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_global_xml_ambiguity_returns_no_output() {
+    let input = format!(
+        "<fcpxml version=\"1.14\"><resources><format id=\"r1\" frameDuration=\"1/30s\"/><effect id=\"fx1\" uid=\"{EFFECT_UUID}\"/><effect id=\"fx2\" uid=\"{EFFECT_TEMPLATE_UID}\"/></resources><project name=\"Ambiguous\" uid=\"11111111-1111-4111-8111-111111111111\"><sequence format=\"r1\" duration=\"1s\"><spine/></sequence></project></fcpxml>"
+    );
+    let mut result = GFRouteDPatchResult::default();
+    let mut error: *mut GFError = std::ptr::null_mut();
+
+    assert_eq!(
+        unsafe {
+            gf_finalcut_route_d_batch_patch(input.as_ptr(), input.len(), &mut result, &mut error)
         },
+        GFStatus::RouteDUnsafeStructure
+    );
+    assert!(result.xml.data.is_null());
+    assert_eq!(result.xml.len, 0);
+    unsafe {
+        gf_finalcut_error_free(error);
+        gf_finalcut_route_d_patch_result_free(&mut result);
+    }
+}
+
+#[test]
+fn batch_fails_globally_before_mutation_for_any_duplicate_resource_id() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-global-resource-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("Good.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
     )
     .unwrap();
-    let effects: Vec<_> = document
-        .descendants()
-        .filter(|node| {
-            node.has_tag_name("effect") && node.attribute("uid") == Some(EFFECT_TEMPLATE_UID)
-        })
-        .collect();
-    assert_eq!(effects.len(), 1);
-    let effect_ref = effects[0].attribute("id").unwrap();
-    assert_eq!(
-        document
-            .descendants()
-            .filter(|node| {
-                node.has_tag_name("filter-video") && node.attribute("ref") == Some(effect_ref)
-            })
-            .count(),
-        1
+    let assets = format!(
+        "<asset id=\"good\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"duplicate\"/><format id=\"duplicate\" frameDuration=\"1/30s\"/>",
+        root.join("Good.mov").display()
     );
-    assert_eq!(patched.inserted_count, 1);
+    let input = exact_sibling_batch_input(
+        &assets,
+        "<asset-clip name=\"Good\" ref=\"good\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>",
+    );
+
+    let error = patch_fcpxml_project_batch(input.as_bytes()).unwrap_err();
+
+    assert!(error.to_string().contains("duplicate global resource id"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_fails_globally_for_duplicate_exact_reserved_parameter_key() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-global-reserved-key-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("Good.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    let assets = format!(
+        "<asset id=\"missing\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset><asset id=\"good\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Missing.mov").display(),
+        root.join("Good.mov").display()
+    );
+    let key = "9999/10013/10016/3/10036/1903";
+    let clips = format!(
+        "<asset-clip name=\"Bad\" ref=\"missing\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"><param name=\"One\" key=\"{key}\" value=\"\"/><param name=\"Two\" key=\"{key}\" value=\"\"/></filter-video></asset-clip><asset-clip name=\"Good\" ref=\"good\" offset=\"1s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>"
+    );
+    let input = exact_sibling_batch_input(&assets, &clips);
+
+    let error = patch_fcpxml_project_batch(input.as_bytes()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate reserved parameter key")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reserved_parameter_names_are_display_only_and_wrong_prefix_banks_are_replaced() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-reserved-display-only-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    std::fs::write(root.join("Clip.gyroflow"), project).unwrap();
+    let payload = encoded_project_payload(project);
+    let wrong_prefix_banks = format!(
+        "{}{}",
+        banked_project_parameters('A', &payload, 8),
+        banked_project_parameters('B', &payload, 7)
+    )
+    .replace("9999/10013/10016/3/10036", "untrusted/prefix");
+    let custom =
+        "<param name=\"Project Payload Manifest A\" key=\"custom/setting\" value=\"opaque\"/>";
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Clip.mov").display()
+    );
+    let clips = format!(
+        "<asset-clip name=\"Clip\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\">{wrong_prefix_banks}{custom}</filter-video></asset-clip>"
+    );
+    let input = exact_sibling_batch_input(&assets, &clips);
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    let output = String::from_utf8(patched.xml).unwrap();
+
+    assert_eq!(patched.updated_project_count, 1);
+    assert_eq!(patched.timing_only_count, 0);
+    assert!(output.contains(custom));
+    assert!(output.contains("untrusted/prefix/1904"));
+    assert!(output.contains("9999/10013/10016/3/10036/1904"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn same_hash_fills_only_an_empty_project_display_value() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-empty-project-display-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    std::fs::write(root.join("Clip.gyroflow"), project).unwrap();
+    let payload = encoded_project_payload(project);
+    let banks = format!(
+        "{}{}",
+        banked_project_parameters('A', &payload, 8),
+        banked_project_parameters('B', &payload, 7)
+    );
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Clip.mov").display()
+    );
+    let clips = format!(
+        "<asset-clip name=\"Clip\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\">{banks}<param name=\"Project Display Name\" key=\"9999/10013/10016/3/10036/1906\" value=\"\"/></filter-video></asset-clip>"
+    );
+    let input = exact_sibling_batch_input(&assets, &clips);
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    let output = String::from_utf8(patched.xml).unwrap();
+
+    assert_eq!(patched.timing_only_count, 1);
+    assert!(output.contains("key=\"9999/10013/10016/3/10036/1906\" value=\"Clip.gyroflow\""));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -921,26 +1498,26 @@ fn batch_accepts_only_exact_noop_conform_rate() {
         </spine></sequence></project></fcpxml>"#
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
-    assert_eq!(patched.updated_count, 1);
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    assert_eq!(patched.updated_project_count, 1);
 
     let different_output_rate = input.replace(
         "<sequence format=\"source\"",
         "<sequence format=\"different\"",
     );
     assert!(
-        patch_fcpxml_project_batch(different_output_rate.as_bytes(), None)
+        patch_fcpxml_project_batch(different_output_rate.as_bytes())
             .unwrap_err()
             .to_string()
-            .contains("conform-rate")
+            .contains("no updateable targets")
     );
 
     let wrong_label = input.replace("srcFrameRate=\"59.94\"", "srcFrameRate=\"30\"");
     assert!(
-        patch_fcpxml_project_batch(wrong_label.as_bytes(), None)
+        patch_fcpxml_project_batch(wrong_label.as_bytes())
             .unwrap_err()
             .to_string()
-            .contains("conform-rate")
+            .contains("no updateable targets")
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1000,13 +1577,13 @@ fn batch_inserts_into_exact_single_video_clip_wrapper_only() {
         <project name="Wrapper" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" duration="1s"><spine>
         <clip name="Retime Wrapper" offset="0s" start="0s" duration="1s"><timeMap>
         <timept time="0s" value="0s" interp="linear"/><timept time="1s" value="2s" interp="linear"/>
-        </timeMap><video ref="a" offset="0s" start="0s" duration="2s"/>
+        </timeMap><video ref="a" offset="0s" start="0s" duration="2s"/><filter-video ref="fx"/>
         <metadata><md key="keep" value="yes"/></metadata></clip>
         </spine></sequence></project></fcpxml>"#
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
-    assert_eq!(patched.inserted_count, 1);
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    assert_eq!(patched.updated_project_count, 1);
     assert_eq!(patched.occurrence_count, 1);
     let output = std::str::from_utf8(&patched.xml).unwrap();
     let video = output.find("<video ref=\"a\"").unwrap();
@@ -1021,13 +1598,18 @@ fn batch_inserts_into_exact_single_video_clip_wrapper_only() {
         "<video ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"2s\"/>",
         "<video ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"2s\"/><video ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"2s\"/>",
     );
-    assert!(patch_fcpxml_project_batch(ambiguous.as_bytes(), None).is_err());
+    assert!(
+        patch_fcpxml_project_batch(ambiguous.as_bytes())
+            .unwrap_err()
+            .to_string()
+            .contains("no updateable targets")
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn batch_matrix_preserves_banks_skips_complex_and_fails_without_partial_output() {
+fn batch_matrix_preserves_banks_and_ignores_effectless_complex_clips() {
     let unique = format!(
         "gyroflow-finalcut-matrix-{}-{}",
         std::process::id(),
@@ -1059,26 +1641,14 @@ fn batch_matrix_preserves_banks_skips_complex_and_fails_without_partial_output()
         </spine></sequence></project></fcpxml>"#
     );
 
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
     let output = std::str::from_utf8(&patched.xml).unwrap();
     assert_eq!(output.matches(&valid_banks).count(), 1);
-    assert_eq!(patched.updated_count, 1);
-    assert_eq!(patched.inserted_count, 1);
-    assert_eq!(patched.skipped_count, 2);
-    assert_eq!(
-        output
-            .matches("<filter-video ref=\"fx\" name=\"Gyroflow NiYien\">")
-            .count(),
-        1
-    );
-    assert!(patched.targets.iter().any(|target| {
-        target.clip_name == "Unsupported Sync"
-            && target.action == gyroflow_finalcut::BatchTargetAction::Skipped
-    }));
-    assert!(patched.targets.iter().any(|target| {
-        target.clip_name == "Unsupported Compound"
-            && target.action == gyroflow_finalcut::BatchTargetAction::Skipped
-    }));
+    assert_eq!(patched.timing_only_count, 1);
+    assert_eq!(patched.updated_project_count, 0);
+    assert_eq!(patched.skipped_count, 0);
+    assert_eq!(output.matches("<filter-video ref=\"fx\"").count(), 1);
+    assert_eq!(patched.targets.len(), 1);
 
     let ambiguous_existing = input.replace(
         &format!("{valid_banks}<param name=\"Timing Payload\""),
@@ -1091,16 +1661,14 @@ fn batch_matrix_preserves_banks_skips_complex_and_fails_without_partial_output()
             gf_finalcut_route_d_batch_patch(
                 ambiguous_existing.as_ptr(),
                 ambiguous_existing.len(),
-                std::ptr::null(),
-                0,
                 &mut result,
                 &mut error,
             )
         },
-        GFStatus::InvalidArgument
+        GFStatus::RouteDUnsafeStructure
     );
+    assert!(!error.is_null());
     assert!(result.xml.data.is_null());
-    assert_eq!(result.xml.len, 0);
     unsafe {
         gf_finalcut_error_free(error);
         gf_finalcut_route_d_patch_result_free(&mut result);
@@ -1109,7 +1677,321 @@ fn batch_matrix_preserves_banks_skips_complex_and_fails_without_partial_output()
 }
 
 #[test]
-fn batch_missing_corrupt_ambiguous_over_capacity_and_resource_conflicts_fail_closed() {
+fn batch_skips_existing_effects_below_unproved_complex_ancestors_without_mutating_them() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-complex-existing-effects-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["Good", "Sync", "Multi", "Reference", "Audition", "Mystery"] {
+        std::fs::write(
+            root.join(format!("{name}.gyroflow")),
+            include_bytes!("fixtures/phase0-valid.gyroflow"),
+        )
+        .unwrap();
+    }
+    let assets = ["Good", "Sync", "Multi", "Reference", "Audition", "Mystery"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            format!(
+                "<asset id=\"a{index}\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+                root.join(format!("{name}.mov")).display()
+            )
+        })
+        .collect::<String>();
+    let sync_filter = "<filter-video ref=\"fx\"><param name=\"Sentinel\" key=\"host/sync\" value=\"keep-sync\"/></filter-video>";
+    let multi_filter = "<filter-video ref=\"fx\"><param name=\"Sentinel\" key=\"host/multi\" value=\"keep-multi\"/></filter-video>";
+    let reference_filter = "<filter-video ref=\"fx\"><param name=\"Sentinel\" key=\"host/reference\" value=\"keep-reference\"/></filter-video>";
+    let audition_filter = "<filter-video ref=\"fx\"><param name=\"Sentinel\" key=\"host/audition\" value=\"keep-audition\"/></filter-video>";
+    let mystery_filter = "<filter-video ref=\"fx\"><param name=\"Sentinel\" key=\"host/mystery\" value=\"keep-mystery\"/></filter-video>";
+    let clips = format!(
+        "<asset-clip name=\"Good\" ref=\"a0\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip><sync-clip name=\"Sync Container\" offset=\"1s\" duration=\"1s\"><asset-clip name=\"Sync\" ref=\"a1\" offset=\"0s\" start=\"0s\" duration=\"1s\">{sync_filter}</asset-clip></sync-clip><mc-clip name=\"Multi Container\" offset=\"2s\" duration=\"1s\"><asset-clip name=\"Multi\" ref=\"a2\" offset=\"0s\" start=\"0s\" duration=\"1s\">{multi_filter}</asset-clip></mc-clip><ref-clip name=\"Reference Container\" offset=\"3s\" duration=\"1s\"><asset-clip name=\"Reference\" ref=\"a3\" offset=\"0s\" start=\"0s\" duration=\"1s\">{reference_filter}</asset-clip></ref-clip><audition name=\"Audition Container\"><asset-clip name=\"Audition\" ref=\"a4\" offset=\"0s\" start=\"0s\" duration=\"1s\">{audition_filter}</asset-clip></audition><project-wrapper name=\"Unknown Container\"><asset-clip name=\"Mystery\" ref=\"a5\" offset=\"0s\" start=\"0s\" duration=\"1s\">{mystery_filter}</asset-clip></project-wrapper>"
+    );
+    let input = exact_sibling_batch_input(&assets, &clips);
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+
+    assert_eq!(patched.updated_project_count, 1);
+    assert_eq!(patched.skipped_count, 5);
+    assert_eq!(patched.targets.len(), 6);
+    for target in patched.targets.iter().skip(1) {
+        assert_eq!(
+            target.skip_reason,
+            Some(gyroflow_finalcut::BatchSkipReason::UnsupportedStructure)
+        );
+    }
+    let output = std::str::from_utf8(&patched.xml).unwrap();
+    assert!(output.contains(sync_filter));
+    assert!(output.contains(multi_filter));
+    assert!(output.contains(reference_filter));
+    assert!(output.contains(audition_filter));
+    assert!(output.contains(mystery_filter));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_preserves_verified_single_compound_reference_support() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-batch-compound-reference-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("Compound.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    let media_url = format!("file://{}", root.join("Compound.mov").display());
+    let input = format!(
+        r#"<fcpxml version="1.14"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <asset id="asset" start="0s" duration="1s" format="r1"><media-rep kind="original-media" src="{media_url}"/></asset>
+        <media id="compound"><sequence format="r1" duration="1s"><spine>
+        <asset-clip name="Compound" ref="asset" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>
+        </spine></sequence></media><effect id="fx" uid="{EFFECT_UUID}"/>
+        </resources><project name="Compound" uid="22222222-2222-4222-8222-222222222222"><sequence format="r1" duration="1s"><spine>
+        <ref-clip ref="compound" offset="0s" duration="1s"/>
+        </spine></sequence></project></fcpxml>"#
+    );
+
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+
+    assert_eq!(patched.updated_project_count, 1);
+    assert_eq!(patched.skipped_count, 0);
+    assert_eq!(patched.targets.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn real_compound_legacy_patch_output_passes_action_semantic_verifier() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-verifier-compound-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let sibling = root.join("Compound.gyroflow");
+    let sibling_bytes = include_str!("fixtures/phase0-valid.gyroflow")
+        .replace("managed-media candidate", "verifier authoritative sibling");
+    let old_bytes = include_str!("fixtures/phase0-valid.gyroflow")
+        .replace("managed-media candidate", "verifier legacy payload");
+    std::fs::write(&sibling, &sibling_bytes).unwrap();
+    let legacy = encoded_project_payload(old_bytes.as_bytes());
+    let media_url = format!("file://{}", root.join("Compound.mov").display());
+    let original_xml = format!(
+        r#"<fcpxml version="1.14"><resources>
+        <format id="r1" frameDuration="1/30s"/><format id="untouched" frameDuration="1/60s"/>
+        <asset id="asset" start="0s" duration="1s" format="r1"><media-rep kind="original-media" src="{media_url}"/></asset>
+        <media id="compound"><sequence format="r1" duration="1s"><spine>
+        <asset-clip name="Compound" ref="asset" offset="0s" start="0s" duration="1s"><filter-video ref="fx"><param name="Legacy Payload" key="9999/10013/10016/3/10036/1902" value="{legacy}"/><param name="Old Identity" key="9999/10013/10016/3/10036/1901" value="11111111-2222-4333-8444-555555555555"/><param name="Host FOV" key="9999/10013/10016/3/10036/2001" value="2.5"><keyframeAnimation><keyframe time="0s" value="2.5"/></keyframeAnimation></param><param name="Custom" key="custom/sentinel" value="keep"/></filter-video></asset-clip>
+        </spine></sequence></media><effect id="fx" uid="{EFFECT_UUID}"/>
+        </resources><project name="Compound" uid="22222222-2222-4222-8222-222222222222"><sequence format="r1" duration="1s"><spine>
+        <ref-clip ref="compound" offset="0s" duration="1s"/>
+        </spine></sequence></project></fcpxml>"#
+    );
+    let patched = patch_fcpxml_project_batch_with_media_roots(
+        original_xml.as_bytes(),
+        std::slice::from_ref(&root),
+    )
+    .unwrap();
+    assert_eq!(patched.updated_project_count, 1);
+    let output_text = std::str::from_utf8(&patched.xml).unwrap();
+    assert!(!output_text.contains("/1902\""));
+    assert!(!output_text.contains("11111111-2222-4333-8444-555555555555"));
+    assert!(output_text.contains("key=\"custom/sentinel\" value=\"keep\""));
+
+    let original = root.join("Original.fcpxml");
+    let output = root.join("Replacement.fcpxml");
+    std::fs::write(&original, original_xml).unwrap();
+    std::fs::write(&output, &patched.xml).unwrap();
+    let route =
+        "/fcpxml[1]/resources[1]/media[1]/sequence[1]/spine[1]/asset-clip[1]/filter-video[1]";
+    let verified = run_route_d_output_verifier(
+        &original,
+        &output,
+        &sibling,
+        route,
+        Some("1,15,100,0,0,1,0"),
+    );
+    assert!(
+        verified.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+
+    let corrupted = root.join("Corrupted.fcpxml");
+    std::fs::write(
+        &corrupted,
+        output_text.replace(
+            "<format id=\"untouched\" frameDuration=\"1/60s\"/>",
+            "<format id=\"untouched\" frameDuration=\"1/24s\"/>",
+        ),
+    )
+    .unwrap();
+    let rejected = run_route_d_output_verifier(
+        &original,
+        &corrupted,
+        &sibling,
+        route,
+        Some("1,15,100,0,0,1,0"),
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("resources"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn real_same_hash_patch_output_preserves_host_subtrees_for_verifier() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-verifier-same-hash-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let sibling = root.join("Clip.gyroflow");
+    let project = include_bytes!("fixtures/phase0-valid.gyroflow");
+    std::fs::write(&sibling, project).unwrap();
+    let payload = encoded_project_payload(project);
+    let banks = format!(
+        "{}{}",
+        banked_project_parameters('A', &payload, 8),
+        banked_project_parameters('B', &payload, 7)
+    );
+    let media_url = format!("file://{}", root.join("Clip.mov").display());
+    let original_xml = format!(
+        r#"<fcpxml version="1.14"><resources><format id="r1" frameDuration="1/30s"/><asset id="a" start="0s" duration="1s" format="r1"><media-rep kind="original-media" src="{media_url}"/></asset><effect id="fx" uid="{EFFECT_UUID}"/></resources><project name="Same Hash" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" duration="1s"><spine><asset-clip name="Clip" ref="a" offset="0s" start="0s" duration="1s"><filter-video ref="fx"><param name="Host Identity" key="9999/10013/10016/3/10036/1901" value="11111111-2222-4333-8444-555555555555"/>{banks}<param name="Host Display" key="9999/10013/10016/3/10036/1906" value="Keep This Display"><metadata key="display-sentinel" value="keep"/></param><param name="Host FOV" key="9999/10013/10016/3/10036/2001" value="1.75"><keyframeAnimation><keyframe time="0s" value="1.5"/><keyframe time="1s" value="1.75"/></keyframeAnimation></param><param name="Timing Payload" key="9999/10013/10016/3/10036/1903" value=""/></filter-video></asset-clip></spine></sequence></project></fcpxml>"#
+    );
+    let patched = patch_fcpxml_project_batch_with_media_roots(
+        original_xml.as_bytes(),
+        std::slice::from_ref(&root),
+    )
+    .unwrap();
+    assert_eq!(patched.timing_only_count, 1);
+
+    let original = root.join("Original.fcpxml");
+    let output = root.join("Replacement.fcpxml");
+    std::fs::write(&original, original_xml).unwrap();
+    std::fs::write(&output, &patched.xml).unwrap();
+    let route = "/fcpxml[1]/project[1]/sequence[1]/spine[1]/asset-clip[1]/filter-video[1]";
+    let verified = run_route_d_output_verifier(&original, &output, &sibling, route, None);
+    assert!(
+        verified.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_all_skipped_returns_no_updateable_targets() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-all-skipped-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let assets = format!(
+        "<asset id=\"missing\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Missing.mov").display()
+    );
+    let input = exact_sibling_batch_input(
+        &assets,
+        "<asset-clip name=\"Missing\" ref=\"missing\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>",
+    );
+
+    let error = patch_fcpxml_project_batch(input.as_bytes()).unwrap_err();
+
+    assert!(
+        error.to_string().contains("no updateable targets"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_snapshot_batch_reports_all_skipped_targets_without_output_changes() {
+    let assets = "<asset id=\"missing\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file:///Media/Missing.mov\"/></asset>";
+    let input = exact_sibling_batch_input(
+        assets,
+        "<asset-clip name=\"Missing\" ref=\"missing\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>",
+    );
+    let reader = |_path: &std::path::Path| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "fixture denied",
+        ))
+    };
+
+    let reported = patch_fcpxml_project_batch_with_project_reader_report_all_skipped(
+        input.as_bytes(),
+        &reader,
+    )
+    .unwrap();
+
+    assert_eq!(reported.xml, input.as_bytes());
+    assert_eq!(reported.updated_project_count, 0);
+    assert_eq!(reported.skipped_count, 1);
+    assert_eq!(
+        reported.targets[0].skip_reason,
+        Some(gyroflow_finalcut::BatchSkipReason::PermissionDenied)
+    );
+}
+
+#[test]
+fn batch_rejects_byte_identical_timing_only_output() {
+    let root = std::env::temp_dir().join(format!(
+        "gyroflow-identical-timing-only-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("Clip.gyroflow"),
+        include_bytes!("fixtures/phase0-valid.gyroflow"),
+    )
+    .unwrap();
+    let assets = format!(
+        "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file://{}\"/></asset>",
+        root.join("Clip.mov").display()
+    );
+    let input = exact_sibling_batch_input(
+        &assets,
+        "<asset-clip name=\"Clip\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>",
+    );
+    let first = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
+    assert_eq!(first.updated_project_count, 1);
+
+    let error = patch_fcpxml_project_batch(&first.xml).unwrap_err();
+
+    assert!(error.to_string().contains("no XML changes"), "{error}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn batch_target_failures_are_skipped_but_resource_conflicts_fail_closed() {
     let unique = format!(
         "gyroflow-finalcut-failures-{}-{}",
         std::process::id(),
@@ -1149,24 +2031,24 @@ fn batch_missing_corrupt_ambiguous_over_capacity_and_resource_conflicts_fail_clo
 
     let missing_is_skipped = base(
         &format!("{good_asset}{missing_asset}"),
-        r#"<asset-clip name="Good" ref="good" offset="0s" start="0s" duration="1s"></asset-clip>
-        <asset-clip name="Missing" ref="missing" offset="1s" start="0s" duration="1s"></asset-clip>"#,
+        r#"<asset-clip name="Good" ref="good" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>
+        <asset-clip name="Missing" ref="missing" offset="1s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>"#,
         &effects,
     );
-    let patched = patch_fcpxml_project_batch(missing_is_skipped.as_bytes(), None).unwrap();
-    assert_eq!(patched.inserted_count, 1);
+    let patched = patch_fcpxml_project_batch(missing_is_skipped.as_bytes()).unwrap();
+    assert_eq!(patched.updated_project_count, 1);
     assert_eq!(patched.skipped_count, 1);
 
     let corrupt_target = base(
         &corrupt_asset,
-        r#"<asset-clip name="Corrupt" ref="corrupt" offset="0s" start="0s" duration="1s"></asset-clip>"#,
+        r#"<asset-clip name="Corrupt" ref="corrupt" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>"#,
         &effects,
     );
     assert!(
-        patch_fcpxml_project_batch(corrupt_target.as_bytes(), None)
+        patch_fcpxml_project_batch(corrupt_target.as_bytes())
             .unwrap_err()
             .to_string()
-            .contains("is invalid")
+            .contains("no updateable targets")
     );
 
     let ambiguous_asset = format!(
@@ -1179,10 +2061,10 @@ fn batch_missing_corrupt_ambiguous_over_capacity_and_resource_conflicts_fail_clo
         &effects,
     );
     assert!(
-        patch_fcpxml_project_batch(ambiguous_existing.as_bytes(), None)
+        patch_fcpxml_project_batch(ambiguous_existing.as_bytes())
             .unwrap_err()
             .to_string()
-            .contains("exactly one original-media")
+            .contains("no updateable targets")
     );
 
     let duplicate_resources = base(
@@ -1193,10 +2075,10 @@ fn batch_missing_corrupt_ambiguous_over_capacity_and_resource_conflicts_fail_clo
         ),
     );
     assert!(
-        patch_fcpxml_project_batch(duplicate_resources.as_bytes(), None)
+        patch_fcpxml_project_batch(duplicate_resources.as_bytes())
             .unwrap_err()
             .to_string()
-            .contains("at most one")
+            .contains("exactly one")
     );
 
     let mut random = String::with_capacity(5_500_000);
@@ -1218,14 +2100,14 @@ fn batch_missing_corrupt_ambiguous_over_capacity_and_resource_conflicts_fail_clo
     );
     let oversized_target = base(
         &oversized_asset,
-        r#"<asset-clip name="Oversized" ref="oversized" offset="0s" start="0s" duration="1s"></asset-clip>"#,
+        r#"<asset-clip name="Oversized" ref="oversized" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>"#,
         &effects,
     );
     assert!(
-        patch_fcpxml_project_batch(oversized_target.as_bytes(), None)
+        patch_fcpxml_project_batch(oversized_target.as_bytes())
             .unwrap_err()
             .to_string()
-            .contains("4 MiB")
+            .contains("no updateable targets")
     );
 
     std::fs::remove_dir_all(root).unwrap();
@@ -1266,10 +2148,10 @@ fn batch_uses_ten_416_kib_chunks_per_bank() {
         <asset id="a" start="0s" duration="1s" format="r1"><media-rep kind="original-media" src="{media_url}"/></asset>
         <effect id="fx" uid="{EFFECT_UUID}"/>
         </resources><project name="Geometry" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" duration="1s"><spine>
-        <asset-clip name="Geometry" ref="a" offset="0s" start="0s" duration="1s"/>
+        <asset-clip name="Geometry" ref="a" offset="0s" start="0s" duration="1s"><filter-video ref="fx"/></asset-clip>
         </spine></sequence></project></fcpxml>"#
     );
-    let patched = patch_fcpxml_project_batch(input.as_bytes(), None).unwrap();
+    let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
     let document = roxmltree::Document::parse_with_options(
         std::str::from_utf8(&patched.xml).unwrap(),
         roxmltree::ParsingOptions {

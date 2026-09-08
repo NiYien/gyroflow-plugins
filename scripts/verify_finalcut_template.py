@@ -71,8 +71,10 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
             1901,
             1902,
             1903,
+            1906,
             *expected_bank_names,
             2000,
+            2001,
             10001,
             10002,
             10003,
@@ -87,6 +89,11 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
         direct_parameters[1901].attrib.get("name") == "Instance Identity"
         and direct_parameters[1901].attrib.get("flags") == "12889161760",
         "instance identity parameter mapping drifted",
+    )
+    require(
+        direct_parameters[1906].attrib.get("name") == "Project Display Name"
+        and direct_parameters[1906].attrib.get("flags") == "12889161760",
+        "project display name parameter mapping drifted",
     )
     require(
         all(
@@ -106,8 +113,14 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
     }
     require(project_ids == {1001}, "project parameter mapping drifted")
     require(
-        adjustment_ids == {2001, 2002, 2003, 2004, 2005, 2006, 2007},
+        adjustment_ids == {2002, 2003, 2004, 2005, 2006, 2007},
         "adjustment parameter mapping drifted",
+    )
+    require(
+        direct_parameters[2001].attrib.get("name") == "FOV"
+        and direct_parameters[2001].attrib.get("default") == "1"
+        and direct_parameters[2001].attrib.get("value") == "1",
+        "hidden FOV parameter mapping drifted",
     )
     published = {
         (target.attrib.get("object"), target.attrib.get("channel"), target.attrib.get("name"))

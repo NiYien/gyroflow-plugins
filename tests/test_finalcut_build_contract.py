@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_PROBE = ROOT / "scripts" / "check_finalcut_sdk.py"
+APP_ENTITLEMENTS = {}
 
 
 class FinalCutSdkProbeTests(unittest.TestCase):
@@ -195,7 +196,7 @@ class FinalCutWorkspaceSkeletonTests(unittest.TestCase):
         )
         self.assertNotIn("Workflow", result.stdout)
 
-    def test_app_target_compiles_accessibility_components(self):
+    def test_app_target_compiles_sandboxed_manual_workflow_components(self):
         project = (
             ROOT
             / "finalcut"
@@ -210,9 +211,14 @@ class FinalCutWorkspaceSkeletonTests(unittest.TestCase):
         )
         self.assertIsNotNone(app_sources)
         for source in (
-            "FinalCutAXModel.swift",
-            "FinalCutAXLocator.swift",
-            "FinalCutAccessibilityDriver.swift",
+            "AppMain.swift",
+            "FinalCutAppModel.swift",
+            "BatchProcessView.swift",
+            "FCPXMLDocumentInput.swift",
+            "SecurityScopedAccess.swift",
+            "ReplacementProjectStore.swift",
+            "SandboxedRouteDWorkflow.swift",
+            "TemplateInstaller.swift",
         ):
             file_reference = re.search(
                 rf"([A-F0-9]+) = \{{isa = PBXFileReference;[^\n]+path = {re.escape(source)};",
@@ -226,100 +232,37 @@ class FinalCutWorkspaceSkeletonTests(unittest.TestCase):
             self.assertIsNotNone(build_reference, msg=source)
             self.assertIn(build_reference.group(1), app_sources.group(1))
 
-    def test_app_target_compiles_fcpxml_input_components(self):
-        project = (
-            ROOT
-            / "finalcut"
-            / "Xcode"
-            / "GyroflowFinalCut.xcodeproj"
-            / "project.pbxproj"
-        ).read_text(encoding="utf-8")
-        app_sources = re.search(
-            r"700000000000000000000001 = \{isa = PBXSourcesBuildPhase;.*?files = \((.*?)\);",
-            project,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(app_sources)
-        for source in ("FCPXMLDocumentInput.swift", "ProcessedProjectStore.swift"):
-            file_reference = re.search(
-                rf"([A-F0-9]+) = \{{isa = PBXFileReference;[^\n]+path = {re.escape(source)};",
-                project,
-            )
-            self.assertIsNotNone(file_reference, msg=source)
-            build_reference = re.search(
-                rf"([A-F0-9]+) = \{{isa = PBXBuildFile; fileRef = {file_reference.group(1)};",
-                project,
-            )
-            self.assertIsNotNone(build_reference, msg=source)
-            self.assertIn(build_reference.group(1), app_sources.group(1))
-
-    def test_app_target_compiles_one_click_workflow_components(self):
-        project = (
-            ROOT
-            / "finalcut"
-            / "Xcode"
-            / "GyroflowFinalCut.xcodeproj"
-            / "project.pbxproj"
-        ).read_text(encoding="utf-8")
-        app_sources = re.search(
-            r"700000000000000000000001 = \{isa = PBXSourcesBuildPhase;.*?files = \((.*?)\);",
-            project,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(app_sources)
-        for source in (
-            "OneClickRouteDWorkflow.swift",
-            "OneClickRouteDProduction.swift",
-        ):
-            file_reference = re.search(
-                rf"([A-F0-9]+) = \{{isa = PBXFileReference;[^\n]+path = {re.escape(source)};",
-                project,
-            )
-            self.assertIsNotNone(file_reference, msg=source)
-            build_reference = re.search(
-                rf"([A-F0-9]+) = \{{isa = PBXBuildFile; fileRef = {file_reference.group(1)};",
-                project,
-            )
-            self.assertIsNotNone(build_reference, msg=source)
-            self.assertIn(build_reference.group(1), app_sources.group(1))
-
-    def test_app_omits_temporary_route_d_diagnostic_harness(self):
+    def test_app_omits_accessibility_and_one_click_automation(self):
         app_root = ROOT / "finalcut" / "Xcode" / "App"
-        source = (app_root / "AppMain.swift").read_text(
-            encoding="utf-8"
-        )
-        for temporary_hook in (
-            "--diagnose-route-d-export-and-quit",
-            "diagnostic-run-current-project-once",
-            "autoProcessCurrentProjectOnAppear",
-            "restoreRegularActivationAfterDiagnosticPreview",
-            "NSApplication.shared.setActivationPolicy(.accessory)",
-            '.keyboardShortcut("p", modifiers: [.command, .shift])',
-            "LocalFinalCutAutomationDiagnostics",
-            "LocalRouteDWorkflowDiagnostics",
-        ):
-            with self.subTest(temporary_hook=temporary_hook):
-                self.assertNotIn(temporary_hook, source)
         all_sources = "\n".join(
             path.read_text(encoding="utf-8") for path in app_root.glob("*.swift")
         )
-        for temporary_diagnostic in (
-            "finalcut-route-d-diagnostic.json",
-            "finalcut-route-d-workflow-diagnostic.json",
-            "FinalCutAutomationDiagnosticRecord",
-            "RouteDWorkflowDiagnosticRecord",
-        ):
-            with self.subTest(temporary_diagnostic=temporary_diagnostic):
-                self.assertNotIn(temporary_diagnostic, all_sources)
-        production = (
-            ROOT / "finalcut" / "Xcode" / "App" / "OneClickRouteDProduction.swift"
+        project = (
+            ROOT
+            / "finalcut"
+            / "Xcode"
+            / "GyroflowFinalCut.xcodeproj"
+            / "project.pbxproj"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("DispatchQueue.main.sync", production)
-        driver = (
-            ROOT / "finalcut" / "Xcode" / "App" / "FinalCutAccessibilityDriver.swift"
-        ).read_text(encoding="utf-8")
-        self.assertIn("Thread.isMainThread", driver)
-        self.assertIn("DispatchQueue.main.sync", driver)
+        forbidden = (
+            "AXUIElement",
+            "AXIsProcessTrusted",
+            "CGEvent",
+            "ApplicationServices",
+            "Process Current Final Cut Project",
+            "processedName",
+            "insertedCount",
+            "OneClickRouteD",
+            "FinalCutAX",
+            "ProcessedProjectStore",
+        )
+        for forbidden_symbol in forbidden:
+            with self.subTest(forbidden=forbidden_symbol):
+                self.assertNotIn(forbidden_symbol, all_sources)
+                self.assertNotIn(forbidden_symbol, project)
+        processor = (app_root / "RouteDProcessor.h").read_text(encoding="utf-8")
+        self.assertNotIn("processFCPXML", processor)
+        self.assertNotIn("processedName", processor)
 
     def test_production_workspace_has_shared_build_schemes(self):
         workspace = ROOT / "finalcut" / "GyroflowFinalCut.xcworkspace"
@@ -442,7 +385,7 @@ class FinalCutIdentityAndEntitlementTests(unittest.TestCase):
 
         self.assertEqual(
             app_entitlements,
-            {},
+            APP_ENTITLEMENTS,
         )
         self.assertEqual(
             effect_entitlements,
@@ -553,11 +496,11 @@ class FinalCutMotionlessBuildTests(unittest.TestCase):
             )
             self.assertEqual(build.returncode, 0, msg=build.stdout + build.stderr)
             products = output / "DerivedData" / "Build" / "Products" / "Debug"
-            self.assertTrue((products / "GyroflowNiYien Final Cut.app").is_dir())
+            self.assertTrue((products / "NiYien FCP.app").is_dir())
             self.assertTrue(
                 (
                     products
-                    / "GyroflowNiYien Final Cut.app"
+                    / "NiYien FCP.app"
                     / "Contents"
                     / "PlugIns"
                     / "GyroflowNiYienFinalCutEffect.pluginkit"
@@ -588,7 +531,7 @@ class FinalCutMotionlessBuildTests(unittest.TestCase):
 
 
 class FinalCutCAbiContractTests(unittest.TestCase):
-    def test_public_header_is_valid_c11_with_fixed_pod_layout(self):
+    def test_public_header_is_valid_c11_with_fixed_pod_layout_and_parameter_apis(self):
         header_directory = ROOT / "finalcut" / "include"
         helper = ROOT / "tests" / "helpers" / "finalcut_abi_header_main.c"
         result = subprocess.run(
@@ -609,6 +552,43 @@ class FinalCutCAbiContractTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+    def test_batch_route_d_abi_rejects_the_removed_processed_name_arguments(self):
+        header_directory = ROOT / "finalcut" / "include"
+        legacy_call = r'''
+#include "GyroflowFinalCut.h"
+
+int main(void) {
+    GFRouteDPatchResult result = {0};
+    GFError *error = 0;
+    const uint8_t input[] = "<fcpxml/>";
+    const uint8_t name[] = "Processed";
+    return gf_finalcut_route_d_batch_patch(
+        input, sizeof(input) - 1, name, sizeof(name) - 1, &result, &error
+    );
+}
+'''
+        result = subprocess.run(
+            [
+                "xcrun",
+                "clang",
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-I",
+                str(header_directory),
+                "-x",
+                "c",
+                "-",
+                "-fsyntax-only",
+            ],
+            cwd=ROOT,
+            input=legacy_call,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
 
     def test_geometry_pod_has_a_fixed_versioned_c11_layout(self):
         header_directory = ROOT / "finalcut" / "include"

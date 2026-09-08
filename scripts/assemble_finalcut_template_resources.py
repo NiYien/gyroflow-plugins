@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 import argparse
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ GENERATOR = ROOT / "scripts" / "generate_finalcut_template.py"
 VERIFIER = ROOT / "scripts" / "verify_finalcut_template.py"
 XPC_INFO = ROOT / "finalcut" / "xcode" / "Effect" / "Info.plist"
 PREVIEW_SOURCE = ROOT / "adobe" / "logo_white.png"
-ATTRIBUTION = ROOT / "finalcut" / "template" / "UPSTREAM.md"
+ATTRIBUTION = ROOT / "finalcut" / "template" / "UPSTREAM.txt"
 
 
 def run(command: list[str]) -> None:
@@ -60,7 +61,7 @@ def assemble(output: Path) -> None:
         run([sys.executable, str(VERIFIER), str(template), str(XPC_INFO)])
         preview(PREVIEW_SOURCE, staging / "large.png", 240, 300, 400)
         preview(PREVIEW_SOURCE, staging / "small.png", 48, 60, 80)
-        shutil.copy2(ATTRIBUTION, staging / "UPSTREAM.md")
+        shutil.copy2(ATTRIBUTION, staging / "UPSTREAM.txt")
         staging.rename(output)
 
 

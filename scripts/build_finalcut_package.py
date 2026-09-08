@@ -17,8 +17,11 @@ RUST_BUILDER = ROOT / "scripts" / "build_finalcut_rust.py"
 SDK_PREFLIGHT = ROOT / "scripts" / "check_finalcut_sdk.py"
 TEMPLATE_ASSEMBLER = ROOT / "scripts" / "assemble_finalcut_template_resources.py"
 PACKAGE_VERIFIER = ROOT / "scripts" / "verify_finalcut_package.py"
+LOCALIZATION_GENERATOR = ROOT / "scripts" / "generate_finalcut_localizations.py"
 CAPACITY_GATE = ROOT / "finalcut" / "config" / "capacity-gate.json"
-APP_NAME = "GyroflowNiYien Final Cut.app"
+GEOMETRY_SUPPORT = ROOT / "finalcut" / "validation" / "geometry-support.json"
+IDENTITY_PATH = ROOT / "finalcut" / "config" / "identity.json"
+APP_NAME = json.loads(IDENTITY_PATH.read_text(encoding="utf-8"))["app_name"] + ".app"
 ZIP_NAME = "GyroflowNiyien-FinalCut-macos.zip"
 XPC_NAME = "GyroflowNiYienFinalCutEffect.pluginkit"
 DEFAULT_RUNTIME_FRAMEWORKS = Path("/Library/Developer/Frameworks")
@@ -41,8 +44,8 @@ def run(command: list[str], environment: dict[str, str] | None = None) -> str:
     return result.stdout.strip()
 
 
-def require_capacity_gate(allow_unvalidated: bool) -> None:
-    gate = json.loads(CAPACITY_GATE.read_text(encoding="utf-8"))
+def require_capacity_gate(allow_unvalidated: bool, path: Path | None = None) -> None:
+    gate = json.loads((path or CAPACITY_GATE).read_text(encoding="utf-8"))
     if (
         gate.get("release_blocked", True)
         or not gate.get("host_parameter_round_trip_validated", False)
@@ -53,6 +56,16 @@ def require_capacity_gate(allow_unvalidated: bool) -> None:
         )
     if gate.get("fallback_path_allowed") is not False:
         raise RuntimeError("capacity gate must forbid path fallback")
+
+
+def require_geometry_gate(allow_unvalidated: bool, path: Path | None = None) -> None:
+    support = json.loads((path or GEOMETRY_SUPPORT).read_text(encoding="utf-8"))
+    verified = support.get("verified_supported_entry_ids", [])
+    if (support.get("release_blocked", True) or not verified) and not allow_unvalidated:
+        raise RuntimeError(
+            "Final Cut release is blocked until the real-host geometry manifest "
+            "contains pixel-verified supported entries"
+        )
 
 
 def copy_runtime_frameworks(runtime_root: Path, xpc_contents: Path) -> list[Path]:
@@ -120,6 +133,7 @@ def sign_bundle(
 
 def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
     require_capacity_gate(arguments.allow_unvalidated_capacity_for_testing)
+    require_geometry_gate(arguments.allow_unvalidated_geometry_for_testing)
     if not arguments.unsigned_for_testing and not arguments.signing_identity:
         raise RuntimeError("production package requires --signing-identity")
     output_dir = arguments.output_dir.resolve()
@@ -129,6 +143,7 @@ def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
         raise FileExistsError("refusing to replace an existing Final Cut package")
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    run([sys.executable, str(LOCALIZATION_GENERATOR)])
     run([sys.executable, str(SDK_PREFLIGHT), "--deployment-target", "13.0"])
     run([sys.executable, str(RUST_BUILDER)])
     with tempfile.TemporaryDirectory(
@@ -136,7 +151,7 @@ def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
         dir=output_dir,
     ) as directory:
         staging_root = Path(directory)
-        derived_data = staging_root / "DerivedData"
+        archive_path = staging_root / "GyroflowFinalCut.xcarchive"
         run(
             [
                 "xcodebuild",
@@ -149,16 +164,18 @@ def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
                 "Release",
                 "-destination",
                 "generic/platform=macOS",
-                "-derivedDataPath",
-                str(derived_data),
+                "-archivePath",
+                str(archive_path),
                 "CODE_SIGNING_ALLOWED=NO",
                 "ONLY_ACTIVE_ARCH=NO",
                 "ARCHS=arm64 x86_64",
-                "clean",
-                "build",
+                "SWIFT_STRICT_CONCURRENCY=complete",
+                "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
+                "GCC_TREAT_WARNINGS_AS_ERRORS=YES",
+                "archive",
             ]
         )
-        built_app = derived_data / "Build" / "Products" / "Release" / APP_NAME
+        built_app = archive_path / "Products" / "Applications" / APP_NAME
         if not built_app.is_dir():
             raise RuntimeError(f"Xcode did not produce {built_app}")
         staged_app = staging_root / APP_NAME
@@ -230,6 +247,10 @@ def main() -> None:
     parser.add_argument("--unsigned-for-testing", action="store_true")
     parser.add_argument(
         "--allow-unvalidated-capacity-for-testing",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--allow-unvalidated-geometry-for-testing",
         action="store_true",
     )
     arguments = parser.parse_args()
