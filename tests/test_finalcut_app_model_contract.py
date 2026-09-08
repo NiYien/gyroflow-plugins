@@ -11,7 +11,7 @@ HELPER = ROOT / "tests" / "helpers" / "finalcut_app_model_main.swift"
 
 
 class FinalCutAppModelContractTests(unittest.TestCase):
-    def test_one_selection_automatically_processes_saves_and_opens(self):
+    def test_one_selection_automatically_processes_replaces_and_opens(self):
         with tempfile.TemporaryDirectory(prefix="finalcut-app-model-") as directory:
             root = Path(directory)
             executable = root / "finalcut-app-model-contract"

@@ -1026,6 +1026,88 @@
         }
       }
     },
+    "app.error.replacement.invalid_source": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The selected Final Cut XML cannot be replaced safely."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択した Final Cut XML を安全に置き換えられません。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "선택한 Final Cut XML을 안전하게 대치할 수 없습니다."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выбранный XML Final Cut невозможно безопасно заменить."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法安全替换所选 Final Cut XML。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無法安全取代所選 Final Cut XML。"
+          }
+        }
+      }
+    },
+    "app.error.replacement.source_changed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The selected Final Cut XML changed during processing. Select it again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "処理中に選択した Final Cut XML が変更されました。もう一度選択してください。"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "처리 중 선택한 Final Cut XML이 변경되었습니다. 다시 선택하십시오."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выбранный XML Final Cut изменился во время обработки. Выберите его снова."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "处理期间所选 Final Cut XML 已发生变化，请重新选择。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "處理期間所選 Final Cut XML 已發生變更，請重新選擇。"
+          }
+        }
+      }
+    },
     "app.error.replacement.source_would_change": {
       "extractionState": "manual",
       "localizations": {
@@ -1073,37 +1155,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Symbolic-link replacement destinations are not accepted."
+            "value": "The selected Final Cut XML is or became a symbolic link and cannot be replaced."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "シンボリックリンクの保存先は使用できません。"
+            "value": "選択した Final Cut XML はシンボリックリンクであるか、処理中にシンボリックリンクへ変更されたため置き換えられません。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "심볼릭 링크 대치 대상은 허용되지 않습니다."
+            "value": "선택한 Final Cut XML이 심볼릭 링크이거나 처리 중 심볼릭 링크로 변경되어 대치할 수 없습니다."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Пути назначения по символическим ссылкам не принимаются."
+            "value": "Выбранный XML Final Cut является символической ссылкой или стал ею во время обработки, поэтому его нельзя заменить."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "不接受符号链接形式的替换目标。"
+            "value": "所选 Final Cut XML 是符号链接或已变为符号链接，无法替换。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "不接受符號連結形式的替換目標。"
+            "value": "所選 Final Cut XML 是符號連結或已變為符號連結，無法取代。"
           }
         }
       }
@@ -5189,37 +5271,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Saved, but could not open the replacement project."
+            "value": "The XML was replaced, but it could not be opened in Final Cut."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "保存しましたが、置き換え用プロジェクトを開けませんでした。"
+            "value": "XML は置き換えられましたが、Final Cut で開けませんでした。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "저장했지만 대치 프로젝트를 열 수 없습니다."
+            "value": "XML을 대치했지만 Final Cut에서 열 수 없습니다."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Файл сохранён, но открыть проект замены не удалось."
+            "value": "XML заменён, но открыть его в Final Cut не удалось."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已保存，但无法打开替换项目。"
+            "value": "XML 已替换，但无法在 Final Cut 中打开。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "已儲存，但無法開啟替換專案。"
+            "value": "XML 已取代，但無法在 Final Cut 中開啟。"
           }
         }
       }

@@ -13,7 +13,7 @@ enum RouteDProcessor {
         {"original_project_name":"Original","occurrence_count":2,"updated_project_count":1,"timing_only_count":0,"skipped_count":1,"targets":[{"occurrence":1,"clip_name":"Same Name","asset_ref":"a","media_url":"file:///Media/A.mov","expected_project_path":"/Media/A.gyroflow","project_display_name":"A.gyroflow","action":"updated_project","detail":"updated","geometry_reasons":[]},{"occurrence":2,"clip_name":"Same Name","asset_ref":"b","media_url":"file:///Media/B.mov","expected_project_path":"/Media/B.gyroflow","project_display_name":"B.gyroflow","action":"skipped","skip_reason":"missing_project","detail":"missing","geometry_reasons":[]}]}
         """.utf8)
         let output = Data(
-            "<fcpxml version=\"1.14\"><project name=\"Original\"/></fcpxml>".utf8
+            "<fcpxml version=\"1.14\"><project name=\"Replaced\"/></fcpxml>".utf8
         )
         return ["fcpxml": output, "report": report]
     }
@@ -33,8 +33,7 @@ struct FinalCutAppModelContractRunner {
             openURL: { url in
                 opened.append(url)
                 return true
-            },
-            outputRoot: root.appendingPathComponent("Automatic", isDirectory: true)
+            }
         )
         model.selectFCPXML(source)
         let deadline = Date().addingTimeInterval(5)
@@ -48,8 +47,7 @@ struct FinalCutAppModelContractRunner {
             openURL: { _ in
                 failedOpenCount += 1
                 return false
-            },
-            outputRoot: root.appendingPathComponent("Open Failure", isDirectory: true)
+            }
         )
         openFailureModel.selectFCPXML(source)
         let failureDeadline = Date().addingTimeInterval(5)
@@ -76,8 +74,7 @@ struct FinalCutAppModelContractRunner {
                     report: result["report"]!
                 )
             },
-            openURL: { _ in true },
-            outputRoot: root.appendingPathComponent("Cancelled", isDirectory: true)
+            openURL: { _ in true }
         )
         cancelledModel.selectFCPXML(source)
         let started = slowStarted.wait(timeout: .now() + 2) == .success
@@ -99,8 +96,7 @@ struct FinalCutAppModelContractRunner {
             openURL: { _ in
                 allSkippedOpened = true
                 return true
-            },
-            outputRoot: root.appendingPathComponent("All Skipped", isDirectory: true)
+            }
         )
         allSkippedModel.selectFCPXML(source)
         let allSkippedDeadline = Date().addingTimeInterval(5)
@@ -108,20 +104,23 @@ struct FinalCutAppModelContractRunner {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
 
-        let boundedName = model.defaultReplacementFilename(
-            for: String(repeating: "é", count: 300) + "/unsafe"
+        let expectedOutput = Data(
+            "<fcpxml version=\"1.14\"><project name=\"Replaced\"/></fcpxml>".utf8
         )
+        let replacedSourceData = try Data(contentsOf: source)
         let result: [String: Any] = [
-            "oneSelectionAutomaticallySaved": model.routeDState == .saved
-                && savedURL.map { FileManager.default.fileExists(atPath: $0.path) } == true,
-            "oneSelectionAutomaticallyOpened": opened == savedURL.map { [$0] } ?? [],
+            "oneSelectionAutomaticallyReplacesSource": model.routeDState == .saved
+                && replacedSourceData == expectedOutput,
+            "oneSelectionAutomaticallyOpensOriginalSelection": opened == [source.standardizedFileURL]
+                && savedURL == source.standardizedFileURL,
             "mixedReportIsPreserved": model.preparedProject?.report.occurrenceCount == 2
                 && model.skippedTargets.count == 1,
-            "outputUsesUniqueContainerDirectory": savedURL?.deletingLastPathComponent()
-                .deletingLastPathComponent() == root.appendingPathComponent("Automatic"),
-            "openFailurePreservesOutput": failedOpenURL.map {
-                FileManager.default.fileExists(atPath: $0.path)
-            } == true && openFailureModel.savedProject?.warning != nil,
+            "noCacheOutputDirectoryIsCreated": !FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("Automatic").path
+            ),
+            "openFailurePreservesReplacedSource": failedOpenURL == source.standardizedFileURL
+                && replacedSourceData == expectedOutput
+                && openFailureModel.savedProject?.warning != nil,
             "openFailureCanRetry": failedOpenCount == 2,
             "explicitCancellationDiscardsLateResult": started
                 && cancelledModel.routeDState == .inputReady
@@ -136,7 +135,6 @@ struct FinalCutAppModelContractRunner {
                     "app.error.route.no_targets",
                     fallback: "The batch did not update any replacement targets."
                 ),
-            "filenameWithinUTF8Budget": boundedName.utf8.count <= 255,
         ]
         let json = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
         FileHandle.standardOutput.write(json)

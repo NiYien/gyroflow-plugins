@@ -317,6 +317,33 @@ final class RouteDPreparationJob: @unchecked Sendable {
     }
 }
 
+private enum RouteDSaveJobError: Error {
+    case stale
+}
+
+final class RouteDSaveGenerationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var currentGeneration: UInt64 = 0
+
+    func update(to generation: UInt64) {
+        lock.lock()
+        currentGeneration = generation
+        lock.unlock()
+    }
+
+    func commitIfCurrent<T>(
+        _ generation: UInt64,
+        operation: () throws -> T
+    ) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        guard currentGeneration == generation else {
+            throw RouteDSaveJobError.stale
+        }
+        return try operation()
+    }
+}
+
 final class RouteDSaveJob: @unchecked Sendable {
     let id: UUID
     let generation: UInt64
@@ -325,46 +352,43 @@ final class RouteDSaveJob: @unchecked Sendable {
     private let preparedProject: PreparedReplacementProject
     private let access: SecurityScopedAccess
     private let store: ReplacementProjectStore
+    private let generationGate: RouteDSaveGenerationGate
 
     init(
         id: UUID,
         generation: UInt64,
-        destination: URL,
         preparedProject: PreparedReplacementProject,
         access: SecurityScopedAccess,
-        store: ReplacementProjectStore
+        store: ReplacementProjectStore,
+        generationGate: RouteDSaveGenerationGate
     ) {
         self.id = id
         self.generation = generation
-        self.destination = destination.standardizedFileURL
+        destination = preparedProject.source.selectionURL.standardizedFileURL
         self.preparedProject = preparedProject
         self.access = access
         self.store = store
+        self.generationGate = generationGate
     }
 
     func run() -> Result<URL, Error> {
         do {
             try access.withAccess(to: [destination]) {
-                try store.write(
+                let staged = try store.stage(
                     preparedProject.fcpxml,
-                    to: destination,
-                    source: preparedProject.source
+                    replacing: preparedProject.source
                 )
+                defer { store.discard(staged) }
+                try generationGate.commitIfCurrent(generation) {
+                    try store.commit(
+                        staged,
+                        replacing: preparedProject.source
+                    )
+                }
             }
             return .success(destination)
         } catch {
             return .failure(error)
-        }
-    }
-
-    func discardOutputIfUnchanged() {
-        try? access.withAccess(to: [destination]) {
-            guard let current = try? Data(contentsOf: destination, options: .mappedIfSafe),
-                  current == preparedProject.fcpxml
-            else {
-                return
-            }
-            try store.fileManager.removeItem(at: destination)
         }
     }
 }
@@ -399,6 +423,7 @@ final class SandboxedRouteDWorkflow {
     private let processBatch: (ResolvedFCPXMLInput) throws -> RouteDBatchProcessorOutput
     private let store: ReplacementProjectStore
     private let open: (URL) -> Bool
+    private let saveGenerationGate = RouteDSaveGenerationGate()
 
     private(set) var state: SandboxedRouteDState = .idle
     private(set) var source: ResolvedFCPXMLInput?
@@ -428,6 +453,7 @@ final class SandboxedRouteDWorkflow {
 
     func makeInputSelectionJob(_ selection: URL) -> RouteDInputSelectionJob {
         inputGeneration &+= 1
+        saveGenerationGate.update(to: inputGeneration)
         activeInputSelectionID = nil
         activeProcessingID = nil
         activeSaveID = nil
@@ -522,17 +548,14 @@ final class SandboxedRouteDWorkflow {
         acceptPreparation(job.run(), from: job)
     }
 
-    func save(to destination: URL?) {
-        guard let destination else {
-            return
-        }
-        guard let job = makeSaveJob(to: destination) else {
+    func saveReplacingSource() {
+        guard let job = makeSaveJob() else {
             return
         }
         acceptSave(job.run(), from: job)
     }
 
-    func makeSaveJob(to destination: URL) -> RouteDSaveJob? {
+    func makeSaveJob() -> RouteDSaveJob? {
         guard let preparedProject, state == .preview else {
             fail(SandboxedRouteDWorkflowError.previewRequired)
             return nil
@@ -543,10 +566,10 @@ final class SandboxedRouteDWorkflow {
         return RouteDSaveJob(
             id: id,
             generation: inputGeneration,
-            destination: destination,
             preparedProject: preparedProject,
             access: access,
-            store: store
+            store: store,
+            generationGate: saveGenerationGate
         )
     }
 
@@ -562,7 +585,7 @@ final class SandboxedRouteDWorkflow {
                 ? nil
                 : FinalCutStrings.text(
                     "app.warning.open_saved_failed",
-                    fallback: "Saved, but could not open the replacement project."
+                    fallback: "The XML was replaced, but it could not be opened in Final Cut."
                 )
             let saved = SavedReplacementProject(
                 destination: destination,
@@ -581,6 +604,7 @@ final class SandboxedRouteDWorkflow {
             return
         }
         inputGeneration &+= 1
+        saveGenerationGate.update(to: inputGeneration)
         activeInputSelectionID = nil
         activeProcessingID = nil
         activeSaveID = nil
@@ -605,7 +629,7 @@ final class SandboxedRouteDWorkflow {
                 ? nil
                 : FinalCutStrings.text(
                     "app.warning.open_saved_failed",
-                    fallback: "Saved, but could not open the replacement project."
+                    fallback: "The XML was replaced, but it could not be opened in Final Cut."
                 )
         )
         state = .saved

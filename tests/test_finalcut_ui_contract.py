@@ -28,7 +28,9 @@ class FinalCutUIContractTests(unittest.TestCase):
         ):
             self.assertNotIn(removed, view + model)
         self.assertIn("self.process()", model)
-        self.assertIn("self.saveReplacement(to: self.automaticDestination", model)
+        self.assertIn("self.saveReplacement()", model)
+        self.assertNotIn("automaticDestination", model)
+        self.assertNotIn("outputRoot", model)
 
     def test_report_is_one_collapsed_processed_video_list(self):
         view = (APP / "BatchProcessView.swift").read_text(encoding="utf-8")

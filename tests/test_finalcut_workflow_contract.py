@@ -8,7 +8,7 @@ APP = ROOT / "finalcut" / "Xcode" / "App"
 
 
 class FinalCutWorkflowContractTests(unittest.TestCase):
-    def test_one_selection_automatically_processes_saves_and_opens(self):
+    def test_one_selection_automatically_processes_replaces_and_opens(self):
         model = (APP / "FinalCutAppModel.swift").read_text(encoding="utf-8")
         workflow = (APP / "SandboxedRouteDWorkflow.swift").read_text(encoding="utf-8")
 
@@ -21,9 +21,15 @@ class FinalCutWorkflowContractTests(unittest.TestCase):
         self.assertIn("documentURL: source.xmlURL", model)
         self.assertNotIn("documentURL: source.selectionURL", model)
         self.assertIn("self.process()", model)
-        self.assertIn("automaticDestination", model)
+        self.assertIn("self.saveReplacement()", model)
+        self.assertNotIn("automaticDestination", model)
+        self.assertNotIn("outputRoot", model)
+        self.assertIn("store.stage(", workflow)
+        self.assertIn("store.commit(", workflow)
+        self.assertIn("saveGenerationGate.update", workflow)
         self.assertIn("acceptSave", model)
         self.assertIn("let warning = open(destination)", workflow)
+        self.assertNotIn("discardOutputIfUnchanged", workflow)
         for removed in (
             "mediaRoots",
             "setMediaRoots",

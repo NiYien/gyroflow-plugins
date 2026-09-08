@@ -30,14 +30,12 @@ final class FinalCutAppModel: ObservableObject {
 
     private let installer: TemplateInstaller?
     private let workflow: SandboxedRouteDWorkflow
-    private let outputRoot: URL
 
     init(
         bundle: Bundle = .main,
         workflow: SandboxedRouteDWorkflow? = nil,
         processBatch: ((ResolvedFCPXMLInput) throws -> RouteDBatchProcessorOutput)? = nil,
-        openURL: ((URL) -> Bool)? = nil,
-        outputRoot: URL? = nil
+        openURL: ((URL) -> Bool)? = nil
     ) {
         appVersion = bundle.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
@@ -73,14 +71,6 @@ final class FinalCutAppModel: ObservableObject {
             process: productionProcess,
             open: productionOpen
         )
-        let caches = FileManager.default.urls(
-            for: .cachesDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
-        self.outputRoot = (outputRoot ?? caches.appendingPathComponent(
-            "GyroflowNiYien Final Cut/Replacement Projects",
-            isDirectory: true
-        )).standardizedFileURL
         refreshTemplateStatus()
     }
 
@@ -233,17 +223,15 @@ final class FinalCutAppModel: ObservableObject {
                 }
                 let accepted = self.workflow.acceptPreparation(result, from: job)
                 self.synchronizeWorkflow()
-                if accepted,
-                   self.routeDState == .preview,
-                   let prepared = self.preparedProject {
-                    self.saveReplacement(to: self.automaticDestination(for: prepared))
+                if accepted, self.routeDState == .preview {
+                    self.saveReplacement()
                 }
             }
         }
     }
 
-    func saveReplacement(to destination: URL) {
-        guard let job = workflow.makeSaveJob(to: destination) else {
+    func saveReplacement() {
+        guard let job = workflow.makeSaveJob() else {
             synchronizeWorkflow()
             return
         }
@@ -252,25 +240,12 @@ final class FinalCutAppModel: ObservableObject {
             let result = job.run()
             DispatchQueue.main.async { [weak self] in
                 guard let self else {
-                    if case .success = result {
-                        Self.discardStaleOutput(from: job)
-                    }
                     return
                 }
-                if !self.workflow.acceptSave(result, from: job), case .success = result {
-                    Self.discardStaleOutput(from: job)
-                }
+                _ = self.workflow.acceptSave(result, from: job)
                 self.synchronizeWorkflow()
             }
         }
-    }
-
-    private func automaticDestination(for prepared: PreparedReplacementProject) -> URL {
-        outputRoot
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            .appendingPathComponent(defaultReplacementFilename(
-                for: prepared.report.originalProjectName
-            ))
     }
 
     private func synchronizeWorkflow() {
@@ -295,40 +270,6 @@ final class FinalCutAppModel: ObservableObject {
         case let .failed(message):
             workflowMessage = message
         }
-    }
-
-    nonisolated private static func discardStaleOutput(from job: RouteDSaveJob) {
-        DispatchQueue.global(qos: .utility).async {
-            job.discardOutputIfUnchanged()
-        }
-    }
-
-    private func sanitizedFilenameBase(_ name: String) -> String {
-        let invalidCharacters = CharacterSet(charactersIn: "/:")
-            .union(.controlCharacters)
-            .union(.newlines)
-        let pieces = name.components(separatedBy: invalidCharacters)
-        let sanitized = pieces.joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (sanitized.isEmpty ? "Project" : sanitized)
-            .decomposedStringWithCanonicalMapping
-    }
-
-    func defaultReplacementFilename(for projectName: String) -> String {
-        let suffix = " — Gyroflow.fcpxml".decomposedStringWithCanonicalMapping
-        let byteBudget = max(0, 255 - suffix.utf8.count)
-        var stem = ""
-        for character in sanitizedFilenameBase(projectName) {
-            let candidate = stem + String(character)
-            if candidate.utf8.count > byteBudget {
-                break
-            }
-            stem = candidate
-        }
-        if stem.isEmpty {
-            stem = "Project"
-        }
-        return stem + suffix
     }
 
     private func requireInstaller() throws -> TemplateInstaller {

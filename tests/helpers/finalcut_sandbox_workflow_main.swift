@@ -53,7 +53,7 @@ struct FinalCutSandboxWorkflowContractRunner {
         {"original_project_name":"Original","occurrence_count":1,"updated_project_count":0,"timing_only_count":0,"skipped_count":1,"targets":[{"occurrence":2,"clip_name":"Skipped","asset_ref":"b","media_url":"file:///B.mov","expected_project_path":"/Projects/B.gyroflow","project_display_name":"B.gyroflow","action":"skipped","skip_reason":"missing_project","detail":"missing","geometry_reasons":[]}]}
         """.utf8)
         let outputData = Data(
-            "<fcpxml version=\"1.14\"><project name=\"Original\"/></fcpxml>".utf8
+            "<fcpxml version=\"1.14\"><project name=\"Replaced\"/></fcpxml>".utf8
         )
         var processCalls = 0
         var useEmptyReport = false
@@ -90,12 +90,12 @@ struct FinalCutSandboxWorkflowContractRunner {
         results["onlySelectedDocumentScopeIsBalanced"] = starts.values == stops.values
             && starts.values.filter { $0 == sourceURL.standardizedFileURL }.count == 2
 
-        let destination = root.appendingPathComponent("Replacement.fcpxml")
-        workflow.save(to: destination)
-        results["openFailurePreservesSavedOutput"] = workflow.state.isSaved
+        workflow.saveReplacingSource()
+        let replacedSourceData = try Data(contentsOf: sourceURL)
+        results["openFailurePreservesReplacedSource"] = workflow.state.isSaved
             && workflow.savedProject?.warning != nil
-            && fileManager.fileExists(atPath: destination.path)
-            && opened.values == [destination.standardizedFileURL]
+            && replacedSourceData == outputData
+            && opened.values == [sourceURL.standardizedFileURL]
         _ = workflow.reopenSavedProject()
         results["openFailureCanRetry"] = opened.values.count == 2
 
@@ -119,18 +119,43 @@ struct FinalCutSandboxWorkflowContractRunner {
         }
 
         workflow.process()
-        let staleDestination = root.appendingPathComponent("Stale.fcpxml")
-        let staleSave = workflow.makeSaveJob(to: staleDestination)
+        let packageXML = packageURL.appendingPathComponent("Info.fcpxml")
+        let packageBeforeStaleSave = try Data(contentsOf: packageXML)
+        let staleSave = workflow.makeSaveJob()
         workflow.selectInput(sourceURL)
         if let staleSave {
             let saveResult = staleSave.run()
             let accepted = workflow.acceptSave(saveResult, from: staleSave)
-            if !accepted, case .success = saveResult {
-                staleSave.discardOutputIfUnchanged()
-            }
-            results["staleSaveIsRejectedAndRemoved"] = !accepted
-                && !fileManager.fileExists(atPath: staleDestination.path)
+            let stagingFiles = try fileManager.contentsOfDirectory(atPath: packageURL.path)
+                .filter { $0.hasPrefix(".gyroflow-staging-") }
+            let packageAfterStaleSave = try Data(contentsOf: packageXML)
+            results["staleSaveCannotReplacePreviousSelection"] = !accepted
+                && packageAfterStaleSave == packageBeforeStaleSave
+                && stagingFiles.isEmpty
         }
+
+        workflow.selectInput(packageURL)
+        workflow.process()
+        workflow.saveReplacingSource()
+        let replacedPackageData = try Data(contentsOf: packageXML)
+        results["packageReplacesInfoAndOpensPackage"] = workflow.state.isSaved
+            && replacedPackageData == outputData
+            && opened.values.last == packageURL.standardizedFileURL
+
+        let changedURL = root.appendingPathComponent("Changed.fcpxml")
+        try sourceData.write(to: changedURL)
+        workflow.selectInput(changedURL)
+        workflow.process()
+        let externallyChanged = Data(
+            "<fcpxml version=\"1.14\"><project name=\"External\"/></fcpxml>".utf8
+        )
+        try externallyChanged.write(to: changedURL)
+        let openedBeforeChangedSave = opened.values.count
+        workflow.saveReplacingSource()
+        let preservedExternalData = try Data(contentsOf: changedURL)
+        results["externallyChangedSourceIsPreserved"] = workflow.state.isFailed
+            && preservedExternalData == externallyChanged
+            && opened.values.count == openedBeforeChangedSave
 
         let report = RouteDBatchReport(
             originalProjectName: "Original",
