@@ -199,6 +199,8 @@ jobs:
         run: python3 -m unittest discover -s tests -p test_finalcut_distribution_contract.py
       - name: Check localization generation
         run: python3 scripts/generate_finalcut_localizations.py --check
+      - name: Check host language switching and sandbox scope
+        run: python3 -m unittest tests.test_finalcut_host_localization tests.test_finalcut_release_contract.FinalCutPackageBuildContractTests.test_wrapper_and_xpc_signed_entitlement_policy_is_fail_closed
 
   build_finalcut:
     name: NiYien FCP signed universal package
