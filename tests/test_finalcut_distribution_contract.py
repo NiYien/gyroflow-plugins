@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -120,6 +120,17 @@ class ReleaseContractTests(unittest.TestCase):
                                 ("workflow_dispatch", "", "0")):
             with self.assertRaises(ValueError):
                 release.version("2.1.2", event, ref, run)
+
+    def test_preflight_failure_is_visible_in_actions_and_still_blocks_the_run(self):
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), \
+             mock.patch.object(sys, "argv", ["finalcut_release.py", "prepare"]), \
+             mock.patch.object(release, "prepare", side_effect=RuntimeError("Geometry is 0% verified\nRelease blocked")), \
+             redirect_stdout(output):
+            with self.assertRaisesRegex(SystemExit, "Release blocked"):
+                release.main()
+        self.assertIn("::error title=Final Cut release preflight failed::", output.getvalue())
+        self.assertIn("Geometry is 0%25 verified%0ARelease blocked", output.getvalue())
 
     def test_local_core_dependency_cannot_enter_production(self):
         with tempfile.TemporaryDirectory() as directory:

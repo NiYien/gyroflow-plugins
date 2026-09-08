@@ -1,4 +1,4 @@
-name: NiYien Plugins Release
+name: Gyroflow(Niyien) plugins release
 
 run-name: Plugins ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.build_label || github.ref_name || github.sha }}
 
@@ -85,6 +85,7 @@ jobs:
         run: |
           sudo docker run -v ${{ github.workspace }}:${{ github.workspace }} -v $HOME/.cargo:/root/.cargo debian:bullseye bash -c "
             set -e
+            bash ${{ github.workspace }}/scripts/configure_linux_ci_sources.sh
             apt-get update -y
             echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
             apt install -y sudo dialog apt-utils git curl zip clang make python3 ocl-icd-opencl-dev libwayland-client0 libwayland-dev
@@ -188,7 +189,7 @@ jobs:
             release_artifacts/GyroflowNiyien-FinalCut-macos.dmg
 
   check_finalcut:
-    name: Final Cut distribution contracts
+    name: Gyroflow(Niyien) plugin checks for macos
     runs-on: macos-26
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
@@ -197,13 +198,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check branding, SDK, signing and delivery contracts
         run: python3 -m unittest discover -s tests -p test_finalcut_distribution_contract.py
+      - name: Check Linux dependency setup and package contracts
+        run: python3 -m unittest tests.test_linux_release_contract
       - name: Check localization generation
         run: python3 scripts/generate_finalcut_localizations.py --check
       - name: Check host language switching and sandbox scope
         run: python3 -m unittest tests.test_finalcut_host_localization tests.test_finalcut_release_contract.FinalCutPackageBuildContractTests.test_wrapper_and_xpc_signed_entitlement_policy_is_fail_closed
 
   build_finalcut:
-    name: NiYien FCP signed universal package
+    name: Gyroflow(Niyien) Final Cut plugin for macos
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     needs: check_finalcut
     runs-on: macos-26

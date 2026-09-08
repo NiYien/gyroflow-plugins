@@ -187,6 +187,9 @@ def main() -> None:
                    "check-toolchain": check_toolchain, "check-signing": check_signing}
         print(json.dumps(actions[args.action](), indent=2))
     except (ValueError, OSError, KeyError, RuntimeError) as error:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            message = str(error).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+            print(f"::error title=Final Cut release preflight failed::{message}")
         raise SystemExit(f"Final Cut release preflight failed: {error}") from None
 
 

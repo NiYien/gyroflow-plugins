@@ -1,6 +1,10 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+from __future__ import annotations
+
 import importlib.util
 import re
 import stat
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -18,6 +22,52 @@ def load_verifier():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class LinuxSourceSetupTests(unittest.TestCase):
+    def run_setup(self, etc_dir):
+        return subprocess.run(
+            ["bash", str(ROOT / "scripts/configure_linux_ci_sources.sh"), str(etc_dir)],
+            capture_output=True, text=True, check=False,
+        )
+
+    def test_both_debian_source_layouts_keep_signatures_and_are_repeatable(self):
+        for layout in ("sources.list", "sources.list.d/debian.sources"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as directory:
+                etc_dir = Path(directory)
+                (etc_dir / "os-release").write_text("ID=debian\nVERSION_CODENAME=bullseye\n")
+                original = etc_dir / "apt" / layout
+                original.parent.mkdir(parents=True)
+                original.write_text("original Debian sources\n")
+                custom = etc_dir / "apt/sources.list.d/custom.sources"
+                custom.parent.mkdir(exist_ok=True)
+                custom.write_text("unrelated source\n")
+                result = self.run_setup(etc_dir)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                sources = (etc_dir / "apt/sources.list").read_text()
+                lines = sources.splitlines()
+                self.assertEqual(len(lines), 3)
+                self.assertEqual(sources.count("check-valid-until=no"), 1)
+                self.assertIn("bullseye-security", next(line for line in lines if "check-valid-until=no" in line))
+                self.assertTrue(all("signed-by=/usr/share/keyrings/debian-archive-keyring.gpg" in line for line in lines))
+                self.assertNotIn("trusted=yes", sources)
+                self.assertFalse((etc_dir / "apt/sources.list.d/debian.sources").exists())
+                backup = original.with_name(original.name + ".ci-backup")
+                self.assertEqual(backup.read_text(), "original Debian sources\n")
+                repeated = self.run_setup(etc_dir)
+                self.assertEqual(repeated.returncode, 0, repeated.stderr)
+                self.assertEqual((etc_dir / "apt/sources.list").read_text(), sources)
+                self.assertEqual(backup.read_text(), "original Debian sources\n")
+                self.assertEqual(custom.read_text(), "unrelated source\n")
+
+    def test_other_distributions_are_rejected_before_modifying_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            etc_dir = Path(directory)
+            (etc_dir / "os-release").write_text("ID=debian\nVERSION_CODENAME=bookworm\n")
+            result = self.run_setup(etc_dir)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("require Debian Bullseye", result.stderr)
+            self.assertFalse((etc_dir / "apt").exists())
 
 
 class LinuxWorkflowContractTests(unittest.TestCase):
