@@ -249,7 +249,7 @@ def compile_only(arguments: argparse.Namespace) -> Path:
         with open(summary, "a") as output:
             output.write("### NiYien FCP compilation\n\n"
                          "Rust, App and XPC compiled and passed universal bundle verification.\n"
-                         "Signing, notarization and distribution require separate release acceptance.\n\n")
+                         "The next stage selects a host-validation candidate or an accepted release package.\n\n")
     return output_app
 
 
@@ -262,15 +262,26 @@ def validate_compiled_app(app: Path) -> None:
 def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
     testing = (arguments.unsigned_for_testing or arguments.allow_unvalidated_capacity_for_testing
                or arguments.allow_unvalidated_geometry_for_testing)
+    candidate = arguments.candidate
+    if candidate:
+        if testing or not arguments.compiled_app:
+            raise ValueError("A validation candidate requires a verified compiled App and Developer ID signing")
+        if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
+            raise ValueError("CI validation candidates require a manual workflow_dispatch run")
+        from finalcut_release import validate_core
+        validate_core(ROOT, json.loads((ROOT / "finalcut/config/release-inputs.json").read_text()))
     if arguments.compiled_app and testing:
         raise ValueError("Reusing a compiled App requires production release acceptance")
-    if not testing:
+    if not testing and not candidate:
         from finalcut_release import require_acceptance
         require_acceptance(ROOT)
     require_capacity_gate(arguments.allow_unvalidated_capacity_for_testing)
-    require_geometry_gate(arguments.allow_unvalidated_geometry_for_testing)
+    if not candidate:
+        require_geometry_gate(arguments.allow_unvalidated_geometry_for_testing)
     if not arguments.unsigned_for_testing and not arguments.signing_identity:
         raise RuntimeError("production package requires --signing-identity")
+    from finalcut_release import acceptance_blockers
+    blockers = acceptance_blockers(ROOT)
     output_dir = arguments.output_dir.resolve()
     output_app = output_dir / APP_NAME
     output_zip = output_dir / ZIP_NAME
@@ -312,11 +323,16 @@ def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
         )
         staged_app.rename(output_app)
         staged_zip.rename(output_zip)
+    distribution = {"channel": "candidate" if candidate else ("testing" if testing else "validated"),
+                    "acceptance_ready": not blockers, "acceptance_blockers": blockers}
+    (output_dir / "distribution-status.json").write_text(json.dumps(distribution, indent=2) + "\n")
     return output_app, output_zip
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--candidate", action="store_true",
+                        help="Sign a manually requested validation candidate without declaring release acceptance")
     parser.add_argument("--compile-only", action="store_true",
                         help="Compile and verify locally without signing or creating a distribution ZIP")
     parser.add_argument("--compiled-app", type=Path,
@@ -344,7 +360,7 @@ def main() -> None:
     arguments = parser.parse_args()
     try:
         if arguments.compile_only:
-            if (arguments.compiled_app or arguments.unsigned_for_testing
+            if (arguments.candidate or arguments.compiled_app or arguments.unsigned_for_testing
                     or arguments.allow_unvalidated_capacity_for_testing
                     or arguments.allow_unvalidated_geometry_for_testing):
                 raise ValueError("Compile-only cannot be combined with package or testing options")

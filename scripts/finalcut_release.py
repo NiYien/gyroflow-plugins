@@ -121,19 +121,29 @@ def require_acceptance(root: Path) -> None:
 
 def check_acceptance(directory: Path, root: Path = ROOT) -> dict:
     blockers = acceptance_blockers(root)
-    result = {"ready": not blockers, "blockers": blockers}
+    candidate = bool(blockers) and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    result = {"ready": not blockers, "blockers": blockers,
+              "delivery": "candidate" if candidate else ("validated" if not blockers else "blocked"),
+              "package": not blockers or candidate}
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "release-readiness.json").write_text(json.dumps(result, indent=2) + "\n")
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         with open(output_path, "a") as output:
             output.write(f"ready={str(result['ready']).lower()}\n")
+            output.write(f"package={str(result['package']).lower()}\n")
+            output.write(f"delivery={result['delivery']}\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a") as output:
             output.write("### NiYien FCP release acceptance\n\n")
             if blockers:
-                output.write("**Release pending acceptance.** Signing, notarization and installable artifacts are skipped.\n\n")
+                output.write("**Release pending acceptance.** ")
+                if candidate:
+                    output.write("This manual run will sign and notarize installable candidate ZIP/DMG artifacts "
+                                 "for host validation. The standard update artifact and GitHub Release remain blocked.\n\n")
+                else:
+                    output.write("Signing, notarization and installable artifacts are skipped.\n\n")
                 output.writelines(f"- {reason}\n" for reason in blockers)
                 output.write("\n")
             else:
@@ -210,7 +220,9 @@ def summarize(directory: Path) -> dict:
     notary = json.loads((directory / "notary-result.json").read_text())
     if notary.get("status") != "Accepted":
         raise ValueError("Summary requires an Accepted notarization result")
+    distribution = json.loads((directory / "distribution-status.json").read_text())
     report = {
+        "distribution": distribution,
         "plugin_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         **inputs, "sdk_sha256": sdk["sha256"], "sdk_package_version": sdk["package_version"],
         "version": identity["marketing_version"], "build_version": identity["build_version"],
