@@ -305,6 +305,10 @@ pub enum Params {
     CreateCamera,
     Interpolation,
     FusionStartFrame,
+    // Append new IDs so existing Adobe serialized parameters keep their identity.
+    ZoomModeGroup, ZoomModeGroupEnd,
+    UseDynamicZoom,
+    UseStaticZoom,
 }
 
 // ---- Plugin file logger ----
@@ -600,7 +604,7 @@ impl GyroflowPluginBase {
         }
     }
 
-    pub fn get_param_definitions() -> [ParameterType; 13] {
+    pub fn get_param_definitions() -> [ParameterType; 14] {
         [
             ParameterType::HiddenString { id: "InstanceId" },
             ParameterType::HiddenString { id: "ProjectPath" },
@@ -653,7 +657,7 @@ impl GyroflowPluginBase {
                         t!("option.zoom_mode_dynamic"),
                         t!("option.zoom_mode_static"),
                     ],
-                    default: t!("option.zoom_mode_dynamic"), hidden: false },
+                    default: t!("option.zoom_mode_dynamic"), hidden: true },
                 ParameterType::Checkbox { id: "ToggleOverview",         label: t!("label.toggle_overview"),          hint: t!("hint.toggle_overview"),              default: false, hidden: false },
             ] },
             ParameterType::Group { id: "KeyframesGroup", label: t!("group.keyframes"), opened: false, hidden: true, parameters: vec![
@@ -688,6 +692,12 @@ impl GyroflowPluginBase {
             ParameterType::Group { id: "InfoGroup", label: t!("group.info"), opened: true, hidden: true, parameters: vec![
                 ParameterType::Text { id: "LoadedPreset",  label: t!("label.loaded_preset"),  hint: t!("hint.loaded_preset"),  hidden: true },
                 ParameterType::Text { id: "LoadedLens",   label: t!("label.loaded_lens"),    hint: t!("hint.loaded_lens"),     hidden: true },
+            ] },
+            // Keep the old dropdown's values for saved projects. Explicit actions
+            // offer only the supported new choices without remapping old indices.
+            ParameterType::Group { id: "ZoomModeGroup", label: t!("label.zoom_mode"), opened: true, hidden: false, parameters: vec![
+                ParameterType::Button { id: "UseDynamicZoom", label: t!("option.zoom_mode_dynamic"), hint: t!("hint.zoom_mode"), hidden: false },
+                ParameterType::Button { id: "UseStaticZoom", label: t!("option.zoom_mode_static"), hint: t!("hint.zoom_mode"), hidden: false },
             ] },
         ]
     }
@@ -895,6 +905,15 @@ pub fn mode_index_from_zoom_window(window: f64) -> i32 {
     if window <= -0.9 { 2 }
     else if window < 0.0001 { 0 }
     else { 1 }
+}
+
+/// Visible actions never write the legacy no-zoom value.
+pub fn zoom_mode_from_action(param: Params) -> Option<i32> {
+    match param {
+        Params::UseDynamicZoom => Some(1),
+        Params::UseStaticZoom => Some(2),
+        _ => None,
+    }
 }
 
 /// `InputRotation` is a 4-choice dropdown matching DaVinci Resolve's Clip-Attributes "Rotate" options:
@@ -1146,6 +1165,7 @@ impl GyroflowPluginBaseInstance {
         let _ = params.set_enabled(Params::DisableStretch, loaded);
         let _ = params.set_enabled(Params::IntegrationMethod, loaded);
         let _ = params.set_enabled(Params::ZoomMode, loaded);
+        self.update_zoom_actions(params, loaded);
         let _ = params.set_enabled(Params::ToggleOverview, loaded);
         let _ = params.set_enabled(Params::ReloadProject, loaded);
         let _ = params.set_enabled(Params::OutputWidth, loaded);
@@ -1154,6 +1174,12 @@ impl GyroflowPluginBaseInstance {
         let _ = params.set_enabled(Params::OutputSizeSwap, loaded);
         let _ = params.set_string(Params::Status, if loaded { t!("status.ok") } else { t!("status.project_not_loaded") });
         let _ = params.set_label(Params::OpenGyroflow, if loaded { t!("label.open_gyroflow_loaded") } else { t!("label.open_gyroflow") });
+    }
+
+    fn update_zoom_actions(&self, params: &mut dyn GyroflowPluginParams, loaded: bool) {
+        let mode = params.get_i32(Params::ZoomMode).unwrap_or(1);
+        let _ = params.set_enabled(Params::UseDynamicZoom, loaded && mode != 1);
+        let _ = params.set_enabled(Params::UseStaticZoom, loaded && mode != 2);
     }
 
     pub fn initialize_instance_id(&mut self, instance_id: &mut String) {
@@ -1896,6 +1922,15 @@ impl GyroflowPluginBaseInstance {
     }
 
     pub fn param_changed(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, param: Params, user_edited: bool) -> Result<(), Box<dyn std::error::Error>> {
+        let param = if user_edited {
+            if let Some(mode) = zoom_mode_from_action(param) {
+                params.set_i32(Params::ZoomMode, mode)?;
+                Params::ZoomMode
+            } else { param }
+        } else { param };
+        if param == Params::ZoomMode {
+            self.update_zoom_actions(params, self.has_motion);
+        }
         if param == Params::Browse {
             let new_path = Self::browse(&params.get_string(Params::ProjectPath)?);
             if !new_path.is_empty() {
@@ -2972,6 +3007,57 @@ mod tests {
         assert_eq!(pre, post);
         assert!(pre.diff(&post).is_empty());
         assert_eq!(post_mutation_invalidation(&pre, &post), None);
+    }
+
+    #[test]
+    fn zoom_actions_preserve_legacy_until_explicit_selection() {
+        let mut instance = GyroflowPluginBaseInstance { ever_changed: true, has_motion: true, ..Default::default() };
+        let cache = cache_with_instance_manager(&mut instance);
+        let stab = instance.managers.peek_lru().unwrap().1.clone();
+        let mut params = TestParams::default();
+        params.set_i32(Params::ZoomMode, 0).unwrap();
+        stab.params.write().adaptive_zoom_window = 0.0;
+
+        instance.update_loaded_state(&mut params, true);
+        instance.param_changed(&mut params, &cache, Params::UseDynamicZoom, false).unwrap();
+        assert_eq!(params.get_i32(Params::ZoomMode).unwrap(), 0);
+        assert_eq!(stab.params.read().adaptive_zoom_window, 0.0);
+
+        instance.param_changed(&mut params, &cache, Params::UseDynamicZoom, true).unwrap();
+        assert_eq!(params.get_i32(Params::ZoomMode).unwrap(), 1);
+        assert_eq!(stab.params.read().adaptive_zoom_window, 4.0);
+        instance.param_changed(&mut params, &cache, Params::UseStaticZoom, true).unwrap();
+        assert_eq!(params.get_i32(Params::ZoomMode).unwrap(), 2);
+        assert_eq!(stab.params.read().adaptive_zoom_window, -1.0);
+    }
+
+    #[test]
+    fn zoom_definitions_keep_old_storage_and_append_new_choices() {
+        fn find(defs: &[ParameterType], key: &str) -> bool {
+            defs.iter().any(|d| match d {
+                ParameterType::Group { parameters, .. } => find(parameters, key),
+                ParameterType::Select { id, options, default, hidden, .. } if *id == key => {
+                    assert!(*hidden);
+                    assert_eq!(options.len(), 3);
+                    assert_eq!(options[1], *default);
+                    true
+                },
+                _ => false,
+            })
+        }
+        let defs = GyroflowPluginBase::get_param_definitions();
+        assert!(find(&defs, "ZoomMode"));
+        let ParameterType::Group { id, parameters, .. } = defs.last().unwrap() else { panic!("zoom actions must be appended") };
+        assert_eq!(*id, "ZoomModeGroup");
+        assert_eq!(parameters.len(), 2);
+        for (def, expected) in parameters.iter().zip(["UseDynamicZoom", "UseStaticZoom"]) {
+            assert!(matches!(def, ParameterType::Button { id, hidden: false, .. } if *id == expected));
+        }
+        for (index, window) in [(0, 0.0), (1, 4.0), (2, -1.0)] {
+            assert_eq!(zoom_window_from_mode_index(index), window);
+            assert_eq!(mode_index_from_zoom_window(window), index);
+        }
+        assert_eq!(mode_index_from_zoom_window(2.0), 1);
     }
 
     fn manager_for_snapshot_stretch(stretch: (f64, f64)) -> StabilizationManager {
