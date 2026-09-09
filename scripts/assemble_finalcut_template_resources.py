@@ -59,8 +59,8 @@ def assemble(output: Path) -> None:
         template = staging / "Gyroflow NiYien.moef"
         run([sys.executable, str(GENERATOR), "--output", str(template)])
         run([sys.executable, str(VERIFIER), str(template), str(XPC_INFO)])
-        preview(PREVIEW_SOURCE, staging / "large.png", 240, 300, 400)
-        preview(PREVIEW_SOURCE, staging / "small.png", 48, 60, 80)
+        preview(PREVIEW_SOURCE, staging / "large.png", 240, 360, 640)
+        preview(PREVIEW_SOURCE, staging / "small.png", 168, 108, 192)
         shutil.copy2(ATTRIBUTION, staging / "UPSTREAM.txt")
         staging.rename(output)
 

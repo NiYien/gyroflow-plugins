@@ -57,6 +57,18 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def png_dimensions(path: Path) -> tuple[int, int]:
+    header = path.read_bytes()[:24]
+    require(
+        header[:8] == b"\x89PNG\r\n\x1a\n" and header[12:16] == b"IHDR",
+        f"{path.name} is not a valid PNG preview",
+    )
+    return (
+        int.from_bytes(header[16:20], "big"),
+        int.from_bytes(header[20:24], "big"),
+    )
+
+
 def architectures(binary: Path) -> set[str]:
     return set(run(["xcrun", "lipo", "-archs", str(binary)]).split())
 
@@ -275,8 +287,18 @@ def verify_app(app: Path, expect_signed: bool, expect_notarized: bool) -> None:
         / "Gyroflow"
     )
     template = template_root / "Gyroflow NiYien.moef"
-    require((template_root / "large.png").is_file(), "large preview is missing")
-    require((template_root / "small.png").is_file(), "small preview is missing")
+    large_preview = template_root / "large.png"
+    small_preview = template_root / "small.png"
+    require(large_preview.is_file(), "large preview is missing")
+    require(small_preview.is_file(), "small preview is missing")
+    require(
+        png_dimensions(large_preview) == (640, 360),
+        "large preview must be 640x360",
+    )
+    require(
+        png_dimensions(small_preview) == (192, 108),
+        "small preview must be 192x108",
+    )
     require((template_root / "UPSTREAM.txt").is_file(), "MIT attribution is missing")
     verify_template(template, xpc_info_path, IDENTITY_PATH)
 

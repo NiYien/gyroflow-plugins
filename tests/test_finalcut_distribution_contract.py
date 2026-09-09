@@ -61,6 +61,19 @@ class BrandingContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 verifier.signed_entitlements(self.app)
 
+    def test_preview_dimensions_are_read_from_the_png_header(self):
+        preview = Path(self.temporary.name) / "small.png"
+        preview.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\x0dIHDR"
+            + (192).to_bytes(4, "big")
+            + (108).to_bytes(4, "big")
+        )
+        self.assertEqual(verifier.png_dimensions(preview), (192, 108))
+        preview.write_bytes(b"not a png")
+        with self.assertRaisesRegex(ValueError, "valid PNG preview"):
+            verifier.png_dimensions(preview)
+
 
 class SdkDownloadContractTests(unittest.TestCase):
     def test_html_and_same_size_corruption_are_rejected(self):

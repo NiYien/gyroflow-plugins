@@ -237,6 +237,24 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
             self.assertTrue((output / "Gyroflow NiYien.moef").is_file())
             self.assertTrue((output / "large.png").is_file())
             self.assertTrue((output / "small.png").is_file())
+            large_header = (output / "large.png").read_bytes()[:24]
+            small_header = (output / "small.png").read_bytes()[:24]
+            self.assertEqual(large_header[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(small_header[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(
+                (
+                    int.from_bytes(large_header[16:20], "big"),
+                    int.from_bytes(large_header[20:24], "big"),
+                ),
+                (640, 360),
+            )
+            self.assertEqual(
+                (
+                    int.from_bytes(small_header[16:20], "big"),
+                    int.from_bytes(small_header[20:24], "big"),
+                ),
+                (192, 108),
+            )
             self.assertIn(
                 "MIT License",
                 (output / "UPSTREAM.txt").read_text(encoding="utf-8"),
