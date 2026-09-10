@@ -36,10 +36,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 @interface GFProjectDropView ()
 @property(nonatomic, strong) NSButton *loadButton;
-@property(nonatomic, strong) NSTextField *nameLabel;
-@property(nonatomic, strong) NSTextField *modeLabel;
 @property(nonatomic, strong) NSTextField *statusLabel;
-@property(nonatomic, strong) NSTextField *dropHintLabel;
 @property(nonatomic, strong) GFProjectStore *projectStore;
 @property(nonatomic, copy) GFProjectImportCommitHandler commitHandler;
 @property(nonatomic) NSUInteger importGeneration;
@@ -59,7 +56,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 - (instancetype)initWithProjectStore:(GFProjectStore *)projectStore
                        commitHandler:(GFProjectImportCommitHandler)commitHandler {
-    self = [super initWithFrame:NSMakeRect(0, 0, 280, 116)];
+    self = [super initWithFrame:NSMakeRect(0, 0, 280, 56)];
     if (self == nil) {
         return nil;
     }
@@ -70,49 +67,27 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     [types addObjectsFromArray:GFFCPXMLPasteboardTypes()];
     [self registerForDraggedTypes:types];
     self.wantsLayer = YES;
-    self.layer.cornerRadius = 6.0;
-    self.layer.borderWidth = 0.5;
-    self.layer.borderColor = NSColor.separatorColor.CGColor;
+    self.layer.cornerRadius = 4.0;
 
-    self.nameLabel = [NSTextField labelWithString:@""];
-    self.nameLabel.frame = NSMakeRect(8, 94, 264, 17);
-    self.nameLabel.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightSemibold];
-    self.nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [self addSubview:self.nameLabel];
-
-    self.modeLabel = [NSTextField labelWithString:@""];
-    self.modeLabel.frame = NSMakeRect(8, 76, 264, 15);
-    self.modeLabel.font = [NSFont systemFontOfSize:11.0 weight:NSFontWeightMedium];
-    self.modeLabel.textColor = NSColor.secondaryLabelColor;
-    [self addSubview:self.modeLabel];
-
-    self.statusLabel = [NSTextField labelWithString:projectStore.status];
-    self.statusLabel.frame = NSMakeRect(8, 45, 264, 29);
-    self.statusLabel.font = [NSFont systemFontOfSize:11.0];
-    self.statusLabel.textColor = NSColor.secondaryLabelColor;
-    self.statusLabel.maximumNumberOfLines = 2;
-    self.statusLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    self.statusLabel = [NSTextField labelWithString:@""];
+    self.statusLabel.frame = NSMakeRect(8, 34, 264, 18);
+    self.statusLabel.autoresizingMask = NSViewWidthSizable;
+    self.statusLabel.font = [NSFont systemFontOfSize:12.0];
+    self.statusLabel.maximumNumberOfLines = 1;
+    self.statusLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     self.statusLabel.selectable = YES;
     [self addSubview:self.statusLabel];
 
-    self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 17, 264, 26)];
-    self.loadButton.title = GFLocalized(@"effect.action.load_project",
-                                        @"Load .gyroflow…");
+    self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 2, 264, 26)];
+    self.loadButton.autoresizingMask = NSViewWidthSizable;
+    self.loadButton.title = GFLocalized(@"effect.action.load_project", @"Load .gyroflow…");
+    self.loadButton.bezelStyle = NSBezelStyleRounded;
     self.loadButton.target = self;
     self.loadButton.action = @selector(importProject:);
-    self.loadButton.bezelStyle = NSBezelStyleRounded;
     self.loadButton.toolTip = GFLocalized(@"effect.action.load_project_help",
         @"Load a .gyroflow project. Complex edits can be prepared in Gyroflow and imported here.");
     self.loadButton.accessibilityHelp = self.loadButton.toolTip;
     [self addSubview:self.loadButton];
-
-    self.dropHintLabel = [NSTextField labelWithString:GFLocalized(@"effect.drop.hint",
-        @"Files or a Final Cut Browser clip may also be dropped")];
-    self.dropHintLabel.frame = NSMakeRect(8, 2, 264, 13);
-    self.dropHintLabel.font = [NSFont systemFontOfSize:10.0];
-    self.dropHintLabel.textColor = NSColor.tertiaryLabelColor;
-    self.dropHintLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [self addSubview:self.dropHintLabel];
 
     self.accessibilityHelp = GFLocalized(@"effect.inspector.help",
         @"Load a .gyroflow project. Complex edits should be made in Gyroflow, then loaded here.");
@@ -122,39 +97,22 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 - (void)refreshStatus {
     NSString *name = self.projectStore.currentProjectName;
-    self.nameLabel.stringValue = name.length > 0
-        ? name
-        : GFLocalized(@"effect.status.no_project", @"No project loaded");
-    self.statusLabel.stringValue = self.projectStore.status;
-    self.statusLabel.toolTip = self.projectStore.status;
-    self.statusLabel.accessibilityLabel = self.projectStore.status;
-    self.statusLabel.textColor = NSColor.secondaryLabelColor;
-    switch (self.projectStore.modeStatus) {
-        case GFProjectModeStatusPending:
-            self.modeLabel.stringValue = GFLocalized(@"effect.mode.pending",
-                                                      @"Waiting for Final Cut");
-            break;
-        case GFProjectModeStatusDirect:
-            self.modeLabel.stringValue = GFLocalized(@"effect.mode.direct", @"Direct mode");
-            break;
-        case GFProjectModeStatusRouteD:
-            self.modeLabel.stringValue = GFLocalized(@"effect.mode.route_d", @"Route D");
-            break;
-        case GFProjectModeStatusReprocessRequired:
-            self.modeLabel.stringValue = GFLocalized(@"effect.mode.reprocess",
-                                                      @"Reprocess required");
-            break;
-        case GFProjectModeStatusNone:
-            self.modeLabel.stringValue = GFLocalized(@"effect.mode.none",
-                                                      @"No stabilization project");
-            break;
+    if (name.length == 0) {
+        name = @"Gyroflow";
     }
-    self.loadButton.frame = NSMakeRect(8, 17, 264, 26);
+    BOOL loaded = self.projectStore.currentProjectPayload.length > 0;
+    self.statusLabel.stringValue = [NSString stringWithFormat:loaded
+        ? GFLocalized(@"effect.status.project_loaded", @"%@ loaded")
+        : GFLocalized(@"effect.status.project_unloaded", @"%@ not loaded"), name];
     self.loadButton.enabled = !self.importInFlight;
-    self.accessibilityLabel = [NSString stringWithFormat:@"%@. %@. %@",
-                               self.nameLabel.stringValue,
-                               self.modeLabel.stringValue,
-                               self.statusLabel.stringValue];
+    self.statusLabel.accessibilityLabel = self.statusLabel.stringValue;
+    self.accessibilityLabel = self.statusLabel.stringValue;
+    [self showStatusDetail:self.projectStore.status];
+}
+
+- (void)showStatusDetail:(NSString *)detail {
+    self.statusLabel.toolTip = detail;
+    self.statusLabel.accessibilityValue = detail;
 }
 
 - (BOOL)importURL:(NSURL *)url sender:(NSView *)sender allowAuthorizationPanel:(BOOL)allowPanel {
@@ -163,9 +121,8 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     NSUInteger generation = self.importGeneration;
     self.importInFlight = YES;
     self.loadButton.enabled = NO;
-    self.statusLabel.stringValue = [NSString stringWithFormat:GFLocalized(
-        @"effect.status.loading_project", @"Loading %@…"), url.lastPathComponent];
-    self.statusLabel.textColor = NSColor.secondaryLabelColor;
+    [self showStatusDetail:[NSString stringWithFormat:GFLocalized(
+        @"effect.status.loading_project", @"Loading %@…"), url.lastPathComponent]];
 
     GFProjectStore *store = self.projectStore;
     NSURL *preparedURL = [url copy];
@@ -292,7 +249,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 - (void)draggingExited:(id<NSDraggingInfo>)sender {
     (void)sender;
-    self.layer.borderWidth = 0.5;
+    self.layer.borderWidth = 0.0;
     self.layer.borderColor = NSColor.separatorColor.CGColor;
 }
 
@@ -301,7 +258,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 }
 
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
-    self.layer.borderWidth = 0.5;
+    self.layer.borderWidth = 0.0;
     self.layer.borderColor = NSColor.separatorColor.CGColor;
     NSPasteboard *pasteboard = sender.draggingPasteboard;
     NSArray<NSPasteboardType> *types = pasteboard.types ?: @[];
@@ -330,25 +287,19 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
         }
     }
     if (resolution == nil) {
-        self.statusLabel.stringValue = [NSString stringWithFormat:GFLocalized(
+        [self showStatusDetail:[NSString stringWithFormat:GFLocalized(
             @"effect.drop.locate_failed",
             @"Could not locate a project: %@; use Browse…"),
             error.localizedDescription
-                ?: GFLocalized(@"effect.error.unknown", @"unknown error")];
-        self.statusLabel.textColor = NSColor.systemRedColor;
-        self.statusLabel.toolTip = self.statusLabel.stringValue;
-        self.statusLabel.accessibilityLabel = self.statusLabel.stringValue;
+                ?: GFLocalized(@"effect.error.unknown", @"unknown error")]];
         return NO;
     }
     NSURL *projectURL = [NSURL URLWithString:resolution[@"projectURL"]];
     if (![resolution[@"projectExists"] boolValue]) {
-        self.statusLabel.stringValue = [NSString stringWithFormat:GFLocalized(
+        [self showStatusDetail:[NSString stringWithFormat:GFLocalized(
             @"effect.drop.sibling_missing",
             @"No sibling %@ found; use Browse…"),
-            projectURL.lastPathComponent];
-        self.statusLabel.textColor = NSColor.systemRedColor;
-        self.statusLabel.toolTip = self.statusLabel.stringValue;
-        self.statusLabel.accessibilityLabel = self.statusLabel.stringValue;
+            projectURL.lastPathComponent]];
         return NO;
     }
     return [self importURL:projectURL

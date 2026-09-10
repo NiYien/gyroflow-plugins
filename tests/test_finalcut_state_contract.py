@@ -895,17 +895,17 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
     def test_project_view_has_manual_import_and_single_item_drop_contract(self):
         view = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
 
-        self.assertIn('GFLocalized(@"effect.action.load_project"', view)
+        self.assertIn("@selector(importProject:)", view)
         self.assertNotIn('effect.action.open_gyroflow', view)
         self.assertIn("panel.allowedContentTypes = @[gyroflowType]", view)
         self.assertIn("panel.allowsMultipleSelection = NO", view)
         self.assertIn("urls.count == 1", view)
         self.assertNotIn("AVAsset", view)
-        self.assertIn("NSMakeRect(0, 0, 280, 116)", view)
-        self.assertIn("self.statusLabel.maximumNumberOfLines = 2", view)
-        self.assertIn("self.statusLabel.selectable = YES", view)
+        self.assertIn("NSMakeRect(0, 0, 280, 56)", view)
+        self.assertIn("self.statusLabel.maximumNumberOfLines = 1", view)
+        self.assertIn("self.statusLabel.accessibilityValue = detail", view)
         self.assertNotIn("openButton", view)
-        self.assertIn("NSMakeRect(8, 17, 264, 26)", view)
+        self.assertIn("NSMakeRect(8, 2, 264, 26)", view)
         self.assertNotIn("GFEmbeddedProjectOpener", view)
 
     def test_empty_timing_commit_enters_direct_mode(self):
@@ -934,7 +934,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertIn("- (BOOL)accessibilityPerformPress", view)
         self.assertIn("- (BOOL)acceptsFirstMouse:", button)
         self.assertIn("[NSApp sendAction:self.action to:self.target from:self]", view)
-        self.assertIn("[[GFImportButton alloc] initWithFrame:NSMakeRect(8, 17, 264, 26)]", view)
+        self.assertIn("[[GFImportButton alloc] initWithFrame:NSMakeRect(8, 2, 264, 26)]", view)
         self.assertIn("NSApplicationActivationPolicy previousActivationPolicy", view)
         self.assertIn(
             "[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory]",

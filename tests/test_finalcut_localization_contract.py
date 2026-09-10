@@ -177,6 +177,9 @@ class FinalCutLocalizationContractTests(unittest.TestCase):
 
     def test_load_button_has_dedicated_action_and_help(self):
         source = (EFFECT_SOURCE / "GFProjectDropView.m").read_text()
+        self.assertIn('GFLocalized(@"effect.status.project_loaded"', source)
+        self.assertIn('GFLocalized(@"effect.status.project_unloaded"', source)
+        self.assertIn("@selector(importProject:)", source)
         self.assertIn('GFLocalized(@"effect.action.load_project"', source)
         self.assertIn('GFLocalized(@"effect.action.load_project_help"', source)
         tooltip_assignment = source.split("self.loadButton.toolTip =", 1)[1].split(";", 1)[0]

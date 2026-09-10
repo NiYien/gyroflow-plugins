@@ -82,10 +82,17 @@ class FinalCutUIContractTests(unittest.TestCase):
                    "project.pbxproj").read_text(encoding="utf-8")
 
         self.assertIn("GFProjectModeStatus", store)
-        self.assertIn("self.nameLabel", view)
-        self.assertIn("self.modeLabel", view)
-        self.assertIn("self.statusLabel.maximumNumberOfLines = 2", view)
-        self.assertIn('GFLocalized(@"effect.action.load_project"', view)
+        self.assertIn("self.statusLabel.maximumNumberOfLines = 1", view)
+        self.assertIn("self.loadButton.bezelStyle = NSBezelStyleRounded", view)
+        self.assertIn("self.projectStore.currentProjectPayload.length > 0", view)
+        self.assertIn('@"effect.status.project_loaded"', view)
+        self.assertIn('@"effect.status.project_unloaded"', view)
+        self.assertIn("@selector(importProject:)", view)
+        self.assertIn('self.loadButton.title = GFLocalized(@"effect.action.load_project"', view)
+        self.assertIn("self.statusLabel.stringValue = [NSString stringWithFormat:loaded", view)
+        self.assertNotIn("self.loadButton.title = [NSString stringWithFormat:loaded", view)
+        for label in ("nameLabel", "modeLabel", "dropHintLabel"):
+            self.assertNotIn(label, view)
         for removed in (
             "openButton",
             "openProject:",

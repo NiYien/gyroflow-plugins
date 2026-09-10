@@ -203,6 +203,8 @@
   "effect.status.loading_project": "正在載入 %@…",
   "effect.status.loaded": "已載入 %@（%lu 位元組）",
   "effect.status.awaiting_confirmation": "正在等待 Final Cut 確認 %@",
+  "effect.status.project_loaded": "%@ 已載入",
+  "effect.status.project_unloaded": "%@ 未載入",
   "effect.status.no_project": "尚未載入專案",
   "effect.status.none_loaded": "尚未載入專案",
   "effect.status.ready": "%@ 已就緒",

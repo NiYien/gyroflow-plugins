@@ -212,6 +212,8 @@
   "effect.status.loading_project": "Загрузка %@…",
   "effect.status.loaded": "Загружен %@ (%lu байт)",
   "effect.status.awaiting_confirmation": "Ожидание подтверждения %@ в Final Cut",
+  "effect.status.project_loaded": "%@ загружен",
+  "effect.status.project_unloaded": "%@ не загружен",
   "effect.status.no_project": "Проект не загружен",
   "effect.status.none_loaded": "проект не загружен",
   "effect.status.ready": "%@ готов",

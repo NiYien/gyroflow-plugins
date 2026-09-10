@@ -67,7 +67,7 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
         direct_ids
         == {
             1,
-            1000,
+            1001,
             1901,
             1902,
             1903,
@@ -103,15 +103,12 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
         ),
         "banked project payload parameter mapping drifted",
     )
-    project_ids = {
-        int(parameter.attrib["id"])
-        for parameter in filter_element.findall("./parameter[@id='1000']/parameter")
-    }
     adjustment_ids = {
         int(parameter.attrib["id"])
         for parameter in filter_element.findall("./parameter[@id='2000']/parameter")
     }
-    require(project_ids == {1001}, "project parameter mapping drifted")
+    require(direct_parameters[1001].attrib.get("name") == "",
+            "project control must not add an inspector heading")
     require(
         adjustment_ids == {2002, 2003, 2004, 2005, 2006, 2007},
         "adjustment parameter mapping drifted",
@@ -129,7 +126,7 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
     require(
         published
         == {
-            ("10036", "./1000", "Gyroflow Project"),
+            ("10036", "./1001", ""),
             ("10036", "./2000", "Stabilization"),
         },
         "publishSettings mapping drifted",

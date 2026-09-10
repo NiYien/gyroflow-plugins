@@ -203,6 +203,8 @@
   "effect.status.loading_project": "%@ 불러오는 중…",
   "effect.status.loaded": "%@ 불러옴(%lu바이트)",
   "effect.status.awaiting_confirmation": "Final Cut에서 %@ 확인 대기 중",
+  "effect.status.project_loaded": "%@ 로드됨",
+  "effect.status.project_unloaded": "%@ 로드되지 않음",
   "effect.status.no_project": "불러온 프로젝트 없음",
   "effect.status.none_loaded": "불러온 프로젝트 없음",
   "effect.status.ready": "%@ 준비됨",

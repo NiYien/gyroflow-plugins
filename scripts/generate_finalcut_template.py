@@ -33,14 +33,9 @@ def production_parameters(body: str) -> str:
     drop_end = body.index('\n\t\t\t\t\t<parameter name="" id="30"', drop_start)
     project_control = body[drop_start:drop_end].replace(
         'name="Drop Clip Here ➡" id="10"',
-        'name="Project Import" id="1001"',
+        'name="" id="1001"',
     )
     prefix = body[:internal_start]
-    project_group = (
-        '\n\t\t\t\t<parameter name="Gyroflow Project" id="1000" flags="8589938704">'
-        + project_control
-        + '\n\t\t\t\t</parameter>'
-    )
     hidden_fov = (
         '\n\t\t\t\t<parameter name="FOV" id="2001" flags="12884901904" default="1" value="1"/>'
     )
@@ -77,7 +72,7 @@ def production_parameters(body: str) -> str:
     return (
         prefix
         + internal
-        + project_group
+        + project_control
         + hidden_fov
         + adjustment_group
         + hidden_and_builtin
@@ -118,7 +113,7 @@ def render_template() -> str:
     publish_settings = (
         "<publishSettings>\n"
         "\t\t<version>2</version>\n"
-        '\t\t<target object="10036" channel="./1000" name="Gyroflow Project"/>\n'
+        '\t\t<target object="10036" channel="./1001" name=""/>\n'
         '\t\t<target object="10036" channel="./2000" name="Stabilization"/>\n'
         "\t</publishSettings>"
     )

@@ -206,6 +206,8 @@
   "effect.status.loading_project": "Loading %@…",
   "effect.status.loaded": "Loaded %@ (%lu bytes)",
   "effect.status.awaiting_confirmation": "Waiting for Final Cut to confirm %@",
+  "effect.status.project_loaded": "%@ loaded",
+  "effect.status.project_unloaded": "%@ not loaded",
   "effect.status.no_project": "No project loaded",
   "effect.status.none_loaded": "no project loaded",
   "effect.status.ready": "%@ ready",

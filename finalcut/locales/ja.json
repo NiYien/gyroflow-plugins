@@ -203,6 +203,8 @@
   "effect.status.loading_project": "%@ を読み込んでいます…",
   "effect.status.loaded": "%@ を読み込みました（%lu バイト）",
   "effect.status.awaiting_confirmation": "Final Cut による %@ の確認を待っています",
+  "effect.status.project_loaded": "%@ 読み込み済み",
+  "effect.status.project_unloaded": "%@ 未読み込み",
   "effect.status.no_project": "プロジェクトが読み込まれていません",
   "effect.status.none_loaded": "プロジェクトは読み込まれていません",
   "effect.status.ready": "%@ の準備ができました",

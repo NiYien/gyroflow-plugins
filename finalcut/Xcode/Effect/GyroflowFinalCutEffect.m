@@ -127,20 +127,12 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         }
         return NO;
     }
-    BOOL ok = [parameters startParameterSubGroup:GFLocalized(
-                                                       @"effect.group.project",
-                                                       @"Gyroflow(Niyien) project")
-                                     parameterID:kGFProjectGroup
-                                  parameterFlags:kFxParameterFlag_DEFAULT];
-    ok = ok && [parameters addCustomParameterWithName:GFLocalized(
-                                                        @"effect.param.project_import",
-                                                        @"Project Import")
+    BOOL ok = [parameters addCustomParameterWithName:@""
                                             parameterID:kGFProjectControl
                                            defaultValue:@0
                                          parameterFlags:(kFxParameterFlag_CUSTOM_UI |
                                                          kFxParameterFlag_NOT_ANIMATABLE |
                                                          kFxParameterFlag_USE_FULL_VIEW_WIDTH)];
-    ok = ok && [parameters endParameterSubGroup];
     ok = ok && [parameters addFloatSliderWithName:GFLocalized(@"effect.param.fov", @"FOV")
                                        parameterID:kGFFOV
                                       defaultValue:1.0

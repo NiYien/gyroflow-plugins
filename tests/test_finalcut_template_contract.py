@@ -94,7 +94,7 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
             self.assertEqual(
                 published,
                 {
-                    ("./1000", "Gyroflow Project"),
+                    ("./1001", ""),
                     ("./2000", "Stabilization"),
                 },
             )
@@ -102,7 +102,7 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
                 direct_ids,
                 {
                     1,
-                    1000,
+                    1001,
                     1901,
                     1902,
                     1903,
