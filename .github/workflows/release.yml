@@ -86,9 +86,9 @@ jobs:
           sudo docker run -v ${{ github.workspace }}:${{ github.workspace }} -v $HOME/.cargo:/root/.cargo debian:bullseye bash -c "
             set -e
             bash ${{ github.workspace }}/scripts/configure_linux_ci_sources.sh
-            apt-get update -y
+            apt-get -o Acquire::Retries=3 update --error-on=any
             echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
-            apt install -y sudo dialog apt-utils git curl zip clang make python3 ocl-icd-opencl-dev libwayland-client0 libwayland-dev
+            apt-get -o Acquire::Retries=3 install -y sudo dialog apt-utils git curl zip clang make python3 ocl-icd-opencl-dev libwayland-client0 libwayland-dev
             export RUNLEVEL=1
             export CC=clang
             export CXX=clang++
