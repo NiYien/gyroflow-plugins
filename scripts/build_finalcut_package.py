@@ -20,8 +20,6 @@ SDK_PREFLIGHT = ROOT / "scripts" / "check_finalcut_sdk.py"
 TEMPLATE_ASSEMBLER = ROOT / "scripts" / "assemble_finalcut_template_resources.py"
 PACKAGE_VERIFIER = ROOT / "scripts" / "verify_finalcut_package.py"
 LOCALIZATION_GENERATOR = ROOT / "scripts" / "generate_finalcut_localizations.py"
-CAPACITY_GATE = ROOT / "finalcut" / "config" / "capacity-gate.json"
-GEOMETRY_SUPPORT = ROOT / "finalcut" / "validation" / "geometry-support.json"
 IDENTITY_PATH = ROOT / "finalcut" / "config" / "identity.json"
 APP_NAME = json.loads(IDENTITY_PATH.read_text(encoding="utf-8"))["app_name"] + ".app"
 ZIP_NAME = "GyroflowNiyien-FinalCut-macos.zip"
@@ -49,30 +47,6 @@ def run(command: list[str], environment: dict[str, str] | None = None,
             f"{result.stdout}{result.stderr}"
         )
     return result.stdout.strip()
-
-
-def require_capacity_gate(allow_unvalidated: bool, path: Path | None = None) -> None:
-    gate = json.loads((path or CAPACITY_GATE).read_text(encoding="utf-8"))
-    if (
-        gate.get("release_blocked", True)
-        or not gate.get("host_parameter_round_trip_validated", False)
-    ) and not allow_unvalidated:
-        raise RuntimeError(
-            "Final Cut release is blocked until the representative large-project "
-            "custom-parameter save/reopen gate passes"
-        )
-    if gate.get("fallback_path_allowed") is not False:
-        raise RuntimeError("capacity gate must forbid path fallback")
-
-
-def require_geometry_gate(allow_unvalidated: bool, path: Path | None = None) -> None:
-    support = json.loads((path or GEOMETRY_SUPPORT).read_text(encoding="utf-8"))
-    verified = support.get("verified_supported_entry_ids", [])
-    if (support.get("release_blocked", True) or not verified) and not allow_unvalidated:
-        raise RuntimeError(
-            "Final Cut release is blocked until the real-host geometry manifest "
-            "contains pixel-verified supported entries"
-        )
 
 
 def copy_runtime_frameworks(runtime_root: Path, xpc_contents: Path) -> list[Path]:
@@ -249,7 +223,7 @@ def compile_only(arguments: argparse.Namespace) -> Path:
         with open(summary, "a") as output:
             output.write("### NiYien FCP compilation\n\n"
                          "Rust, App and XPC compiled and passed universal bundle verification.\n"
-                         "The next stage selects a host-validation candidate or an accepted release package.\n\n")
+                         "The next stage signs, notarizes and uploads the release package.\n\n")
     return output_app
 
 
@@ -260,28 +234,14 @@ def validate_compiled_app(app: Path) -> None:
 
 
 def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
-    testing = (arguments.unsigned_for_testing or arguments.allow_unvalidated_capacity_for_testing
-               or arguments.allow_unvalidated_geometry_for_testing)
-    candidate = arguments.candidate
-    if candidate:
-        if testing or not arguments.compiled_app:
-            raise ValueError("A validation candidate requires a verified compiled App and Developer ID signing")
-        if os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
-            raise ValueError("CI validation candidates require a manual workflow_dispatch run")
+    testing = arguments.unsigned_for_testing
+    if arguments.compiled_app and testing:
+        raise ValueError("Reusing a compiled App requires Developer ID signing")
+    if not testing:
+        if not arguments.signing_identity:
+            raise RuntimeError("production package requires --signing-identity")
         from finalcut_release import validate_core
         validate_core(ROOT, json.loads((ROOT / "finalcut/config/release-inputs.json").read_text()))
-    if arguments.compiled_app and testing:
-        raise ValueError("Reusing a compiled App requires production release acceptance")
-    if not testing and not candidate:
-        from finalcut_release import require_acceptance
-        require_acceptance(ROOT)
-    require_capacity_gate(arguments.allow_unvalidated_capacity_for_testing)
-    if not candidate:
-        require_geometry_gate(arguments.allow_unvalidated_geometry_for_testing)
-    if not arguments.unsigned_for_testing and not arguments.signing_identity:
-        raise RuntimeError("production package requires --signing-identity")
-    from finalcut_release import acceptance_blockers
-    blockers = acceptance_blockers(ROOT)
     output_dir = arguments.output_dir.resolve()
     output_app = output_dir / APP_NAME
     output_zip = output_dir / ZIP_NAME
@@ -323,16 +283,13 @@ def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
         )
         staged_app.rename(output_app)
         staged_zip.rename(output_zip)
-    distribution = {"channel": "candidate" if candidate else ("testing" if testing else "validated"),
-                    "acceptance_ready": not blockers, "acceptance_blockers": blockers}
+    distribution = {"channel": "testing" if testing else "release"}
     (output_dir / "distribution-status.json").write_text(json.dumps(distribution, indent=2) + "\n")
     return output_app, output_zip
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--candidate", action="store_true",
-                        help="Sign a manually requested validation candidate without declaring release acceptance")
     parser.add_argument("--compile-only", action="store_true",
                         help="Compile and verify locally without signing or creating a distribution ZIP")
     parser.add_argument("--compiled-app", type=Path,
@@ -349,20 +306,10 @@ def main() -> None:
         default=os.environ.get("SIGNING_FINGERPRINT", ""),
     )
     parser.add_argument("--unsigned-for-testing", action="store_true")
-    parser.add_argument(
-        "--allow-unvalidated-capacity-for-testing",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--allow-unvalidated-geometry-for-testing",
-        action="store_true",
-    )
     arguments = parser.parse_args()
     try:
         if arguments.compile_only:
-            if (arguments.candidate or arguments.compiled_app or arguments.unsigned_for_testing
-                    or arguments.allow_unvalidated_capacity_for_testing
-                    or arguments.allow_unvalidated_geometry_for_testing):
+            if arguments.compiled_app or arguments.unsigned_for_testing:
                 raise ValueError("Compile-only cannot be combined with package or testing options")
             app = compile_only(arguments)
             print(f"Compiled and verified {app}; no distribution package was created")

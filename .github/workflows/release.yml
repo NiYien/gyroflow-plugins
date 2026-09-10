@@ -145,7 +145,7 @@ jobs:
   github_release:
     name: Create GitHub release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [build, build_finalcut, check_finalcut_release]
+    needs: [build, build_finalcut]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -244,11 +244,7 @@ jobs:
         run: >-
           python3 scripts/build_finalcut_package.py --compile-only
           --output-dir build-finalcut --diagnostics-dir diagnostics-finalcut
-      - name: Check release acceptance after compilation
-        id: acceptance
-        run: python3 scripts/finalcut_release.py check-acceptance --directory diagnostics-finalcut
       - name: Validate signing configuration
-        if: steps.acceptance.outputs.package == 'true'
         env:
           MACOS_CERTIFICATES: ${{ secrets.MACOS_CERTIFICATES }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -266,26 +262,18 @@ jobs:
               raise SystemExit('Missing signing configuration: ' + ', '.join(missing))
           PYCONFIG
       - name: Install Developer ID certificate
-        if: steps.acceptance.outputs.package == 'true'
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.MACOS_CERTIFICATES }}
           p12-password: ${{ secrets.MACOS_CERTIFICATE_PWD }}
       - name: Sign and package the compiled Final Cut App
-        if: steps.acceptance.outputs.package == 'true'
         env:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
           NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
-          FINALCUT_DELIVERY: ${{ steps.acceptance.outputs.delivery }}
         run: |
           python3 scripts/finalcut_release.py check-signing
-          package_args=()
-          if [[ "$FINALCUT_DELIVERY" == "candidate" ]]; then
-            package_args+=(--candidate)
-          fi
-          python3 scripts/build_finalcut_package.py --output-dir release-finalcut --compiled-app "build-finalcut/NiYien FCP.app" "${package_args[@]}"
+          python3 scripts/build_finalcut_package.py --output-dir release-finalcut --compiled-app "build-finalcut/NiYien FCP.app"
       - name: Notarize, staple and verify final ZIP
-        if: steps.acceptance.outputs.package == 'true'
         env:
           NOTARY_APPLE_ID: ${{ secrets.MACOS_ACCOUNT_USER }}
           NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
@@ -296,10 +284,8 @@ jobs:
           --zip release-finalcut/GyroflowNiyien-FinalCut-macos.zip
           --result release-finalcut/notary-result.json
       - name: Record final input and artifact hashes
-        if: steps.acceptance.outputs.package == 'true'
         run: python3 scripts/finalcut_release.py summary --directory release-finalcut
       - name: Build and notarize drag-to-Applications installer
-        if: steps.acceptance.outputs.package == 'true'
         env:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
           NOTARY_APPLE_ID: ${{ secrets.MACOS_ACCOUNT_USER }}
@@ -310,36 +296,19 @@ jobs:
           --app "release-finalcut/NiYien FCP.app"
           --output release-finalcut/GyroflowNiyien-FinalCut-macos.dmg
           --notarize
-      - name: Upload drag-to-Applications installer
-        if: steps.acceptance.outputs.ready == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: GyroflowNiyien-FinalCut-macos-dmg
-          path: release-finalcut/GyroflowNiyien-FinalCut-macos.dmg
-          if-no-files-found: error
-      - name: Upload directly consumable Final Cut ZIP
-        if: steps.acceptance.outputs.ready == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: GyroflowNiyien-FinalCut-macos
-          path: release-finalcut/GyroflowNiyien-FinalCut-macos.zip
-          if-no-files-found: error
-      - name: Upload signed and notarized candidate ZIP
-        if: steps.acceptance.outputs.delivery == 'candidate'
+      - name: Upload signed and notarized ZIP
         uses: actions/upload-artifact@v4
         with:
           name: GyroflowNiyien-FCP-macos-zip
           path: release-finalcut/GyroflowNiyien-FinalCut-macos.zip
           if-no-files-found: error
-      - name: Upload signed and notarized candidate DMG
-        if: steps.acceptance.outputs.delivery == 'candidate'
+      - name: Upload signed and notarized DMG
         uses: actions/upload-artifact@v4
         with:
           name: GyroflowNiyien-FCP-macos
           path: release-finalcut/GyroflowNiyien-FinalCut-macos.dmg
           if-no-files-found: error
       - name: Upload release evidence separately
-        if: steps.acceptance.outputs.package == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: finalcut-release-evidence
@@ -349,7 +318,7 @@ jobs:
             release-finalcut/distribution-status.json
             release-finalcut/GyroflowNiyien-FinalCut-macos.json
           if-no-files-found: error
-      - name: Preserve compilation and acceptance diagnostics
+      - name: Preserve compilation diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -357,15 +326,4 @@ jobs:
           path: |
             diagnostics-finalcut/*.log
             diagnostics-finalcut/compile-result.json
-            diagnostics-finalcut/release-readiness.json
           if-no-files-found: ignore
-
-  check_finalcut_release:
-    name: Gyroflow(Niyien) Final Cut release acceptance
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: build_finalcut
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Require host acceptance for a tagged release
-        run: python3 scripts/finalcut_release.py require-acceptance

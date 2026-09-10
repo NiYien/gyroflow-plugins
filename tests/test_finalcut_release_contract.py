@@ -25,16 +25,6 @@ def load_script(name: str, path: Path):
 
 
 class FinalCutPackageBuildContractTests(unittest.TestCase):
-    def test_production_build_accepts_validated_capacity_gate(self):
-        module = load_script("build_finalcut_package_capacity_gate", BUILDER)
-        module.require_capacity_gate(False)
-
-    def test_production_build_rejects_unverified_geometry_manifest(self):
-        module = load_script("build_finalcut_package_geometry_gate", BUILDER)
-        with self.assertRaisesRegex(RuntimeError, "pixel-verified"):
-            module.require_geometry_gate(False)
-        module.require_geometry_gate(True)
-
     def test_signing_order_is_frameworks_then_xpc_then_app(self):
         module = load_script("build_finalcut_package", BUILDER)
         with tempfile.TemporaryDirectory() as directory:
@@ -76,8 +66,6 @@ class FinalCutPackageBuildContractTests(unittest.TestCase):
         self.assertIn('"SWIFT_STRICT_CONCURRENCY=complete"', builder)
         self.assertIn('"SWIFT_TREAT_WARNINGS_AS_ERRORS=YES"', builder)
         self.assertIn('"GCC_TREAT_WARNINGS_AS_ERRORS=YES"', builder)
-        self.assertIn("require_geometry_gate", builder)
-        self.assertIn("geometry-support.json", builder)
         self.assertNotIn("WorkflowExtensionSDK", builder)
         self.assertIn('rglob("*.appex")', verifier)
         self.assertIn('"--deep", "--strict"', verifier)

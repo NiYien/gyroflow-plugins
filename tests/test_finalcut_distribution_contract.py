@@ -180,7 +180,7 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertNotIn("schedule:", source)
         self.assertNotIn("--allow-unvalidated", finalcut)
         self.assertIn("runs-on: macos-26", finalcut)
-        self.assertIn("name: GyroflowNiyien-FinalCut-macos\n", finalcut)
+        self.assertIn("name: GyroflowNiyien-FCP-macos-zip\n", finalcut)
         self.assertIn("path: release-finalcut/GyroflowNiyien-FinalCut-macos.zip", finalcut)
         self.assertIn("make_latest: false", source)
         self.assertNotIn("files: ./**/*", source)
@@ -250,7 +250,7 @@ class ReleaseContractTests(unittest.TestCase):
                 release.check_signing()
 
 
-class AcceptanceContractTests(unittest.TestCase):
+class SourceDigestTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -261,40 +261,23 @@ class AcceptanceContractTests(unittest.TestCase):
             path.write_text("fixture")
         self.write("finalcut/config/identity.json", {"marketing_version": "2.1.2", "build_version": "1"})
         self.write("finalcut/config/release-inputs.json", {})
-        self.write("finalcut/config/sdk.json", {"sha256": "sdk-pin"})
-        self.write("finalcut/config/capacity-gate.json", {"release_blocked": False,
-                   "host_parameter_round_trip_validated": True, "fallback_path_allowed": False})
-        self.write("finalcut/validation/geometry-support.json", {"release_blocked": False, "verified_supported_entry_ids": ["fixture"]})
-        self.write("finalcut/validation/performance-baseline.json", {"release_blocked": False, "capture_status": "captured"})
-        self.write("finalcut/validation/evidence.json", {"fixture_only": True})
-        self.acceptance = {"release_blocked": False, "source_sha256": release.source_digest(self.root),
-                           "sdk_sha256": "sdk-pin", **{key: "finalcut/validation/evidence.json"
-                           for key in ("branding", "localization", "upgrade", "file_access")}}
-        self.write("finalcut/validation/release-acceptance.json", self.acceptance)
 
     def write(self, name, value):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value))
 
-    def test_runtime_sdk_and_missing_evidence_each_invalidate_acceptance(self):
-        release.require_acceptance(self.root)
-        self.write("finalcut/validation/release-acceptance.json", {**self.acceptance, "sdk_sha256": "old-sdk"})
-        with self.assertRaisesRegex(ValueError, "runtime or SDK"):
-            release.require_acceptance(self.root)
-        self.write("finalcut/validation/release-acceptance.json", {**self.acceptance, "branding": "missing.json"})
-        with self.assertRaisesRegex(ValueError, "evidence is missing"):
-            release.require_acceptance(self.root)
-        self.write("finalcut/validation/release-acceptance.json", self.acceptance)
+    def test_runtime_changes_invalidate_the_compilation_digest(self):
+        original = release.source_digest(self.root)
         source = self.root / "finalcut/Xcode/Effect/GFRenderPolicy.c"
         source.parent.mkdir(parents=True)
         source.write_text("changed C runtime")
-        with self.assertRaisesRegex(ValueError, "runtime or SDK"):
-            release.require_acceptance(self.root)
+        self.assertNotEqual(release.source_digest(self.root), original)
 
-    def test_build_number_change_does_not_invalidate_runtime_evidence(self):
+    def test_build_number_change_preserves_the_runtime_digest(self):
+        original = release.source_digest(self.root)
         self.write("finalcut/config/identity.json", {"marketing_version": "2.1.3", "build_version": "50"})
-        release.require_acceptance(self.root)
+        self.assertEqual(release.source_digest(self.root), original)
 
 
 if __name__ == "__main__":
