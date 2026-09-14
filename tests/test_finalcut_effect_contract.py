@@ -120,7 +120,7 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
         self.assertNotIn("sourceTexture.width != destinationTexture.width", render)
         self.assertNotIn("sourceTexture.height != destinationTexture.height", render)
 
-    def test_effect_requests_the_current_destination_tile_from_the_source(self):
+    def test_effect_requests_the_complete_source_in_its_own_coordinate_space(self):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
         destination_rect = source.split("- (BOOL)destinationImageRect:", 1)[1].split(
             "- (BOOL)sourceTileRect:", 1
@@ -131,8 +131,8 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
 
         self.assertIn("destinationImage.imagePixelBounds", destination_rect)
         self.assertNotIn("sourceImages.firstObject.imagePixelBounds", destination_rect)
-        self.assertIn("*sourceTileRect = destinationTileRect", source_rect)
-        self.assertNotIn("sourceImages[sourceImageIndex].imagePixelBounds", source_rect)
+        self.assertNotIn("*sourceTileRect = destinationTileRect", source_rect)
+        self.assertIn("sourceImages[sourceImageIndex].imagePixelBounds", source_rect)
 
     def test_effect_declares_pixel_transform_support_and_records_each_render(self):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")

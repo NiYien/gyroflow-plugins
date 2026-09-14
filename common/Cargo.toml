@@ -15,7 +15,7 @@ metal = []
 log = "0.4"
 itertools = "0.14"
 lru = "0.17"
-gyroflow-core = { git = "https://github.com/NiYien/gyroflow.git", rev = "e921207e913d4bd9dc7c9933ed6aac54b496012a", default-features = false, features = ["bundle-lens-profiles", "cache-gyro-metadata"] }
+gyroflow-core = { git = "https://github.com/NiYien/gyroflow.git", rev = "c38c6456b0f8d67221ba1e71bbeb05cdca2a8f4e", default-features = false, features = ["bundle-lens-profiles", "cache-gyro-metadata"] }
 log-panics = "2.1"
 serde = "1"
 serde_json = "1"

@@ -275,8 +275,8 @@ impl Instance {
                     let input_rotation = 0.0_f32;
 
                     let mut buffers = Buffers {
-                        input:  BufferDescription { sampling_transform: None, size: src_size,  rect: None, data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false },
-                        output: BufferDescription { sampling_transform: None, size: dest_size, rect: None, data: buffers.1, rotation: None, texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false }
+                        input:  BufferDescription { size: src_size,  rect: None, data: buffers.0, rotation: Some(input_rotation), texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false },
+                        output: BufferDescription { size: dest_size, rect: None, data: buffers.1, rotation: None, texture_copy: buffers.2, post_affine: None, flip_h: false, flip_v: false }
                     };
                     if let Err(e) = match pixel_format {
                         ae::PixelFormat::GpuBgra128 |
@@ -317,8 +317,8 @@ impl Instance {
             let dst_buffer = unsafe { std::slice::from_raw_parts_mut(dst.buffer().as_ptr() as *mut u8, dst.buffer().len()) };
 
             let mut buffers = Buffers {
-                input:  BufferDescription { sampling_transform: None, size: src_size, rect: Some(src_rect), data: BufferSource::Cpu { buffer: src_buffer }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
-                output: BufferDescription { sampling_transform: None, size: dst_size, rect: None,           data: BufferSource::Cpu { buffer: dst_buffer }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false }
+                input:  BufferDescription { size: src_size, rect: Some(src_rect), data: BufferSource::Cpu { buffer: src_buffer }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
+                output: BufferDescription { size: dst_size, rect: None,           data: BufferSource::Cpu { buffer: dst_buffer }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false }
             };
             if let Err(e) = match src.bit_depth() {
                 8  => stab.process_pixels::<RGBA8> (timestamp_us, None, &mut buffers),

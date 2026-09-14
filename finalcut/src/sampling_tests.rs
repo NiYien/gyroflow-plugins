@@ -2,7 +2,7 @@
 use super::host_geometry::*;
 use super::{GFAffineTransform, GFDimensionsU32, GFProjectGeometry};
 use gyroflow_plugin_base::gyroflow_core::{
-    gpu::{BufferDescription, BufferSource, Buffers, SamplingTransform, wgpu::WgpuWrapper},
+    gpu::{BufferDescription, BufferSource, Buffers, wgpu::WgpuWrapper},
     stabilization::{
         FrameTransform, KernelParams, PixelType, RGBAf, Stabilization,
         distortion_models::DistortionModel,
@@ -35,7 +35,7 @@ fn render(
     p: KernelParams,
     gpu: bool,
 ) -> Vec<f32> {
-    let mut result = vec![0x7f; output.0 * output.1 * 16];
+    let mut result = vec![0; output.0 * output.1 * 16];
     let mut buffers = Buffers {
         input: BufferDescription {
             size: (size.0, size.1, size.0 * 16),
@@ -95,110 +95,8 @@ fn render(
         .map(|v| f32::from_ne_bytes(v.try_into().unwrap()))
         .collect()
 }
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "Requires host-owned Metal textures; run explicitly"]
-fn metal_texture_pixel_centers_match_cpu() {
-    use objc2::rc::Retained;
-    use objc2::runtime::ProtocolObject;
-    use objc2_metal::*;
-    use std::{ffi::c_void, ptr::NonNull};
-    let device = MTLCreateSystemDefaultDevice().expect("Metal device");
-    let queue = device.newCommandQueue().unwrap();
-    let descriptor = MTLTextureDescriptor::new();
-    unsafe {
-        descriptor.setWidth(64);
-        descriptor.setHeight(48);
-    }
-    descriptor.setPixelFormat(MTLPixelFormat::RGBA32Float);
-    descriptor.setStorageMode(MTLStorageMode::Shared);
-    descriptor.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
-    let source = device.newTextureWithDescriptor(&descriptor).unwrap();
-    unsafe {
-        descriptor.setWidth(96);
-        descriptor.setHeight(96);
-    }
-    let destination = device.newTextureWithDescriptor(&descriptor).unwrap();
-    let mut data = rgba_bytes(
-        (0..64 * 48).map(|n| [(n % 64) as f32 / 64.0, (n / 64) as f32 / 48.0, 0.25, 1.0]),
-    );
-    let region = |w, h| MTLRegion {
-        origin: MTLOrigin { x: 0, y: 0, z: 0 },
-        size: MTLSize {
-            width: w,
-            height: h,
-            depth: 1,
-        },
-    };
-    unsafe {
-        source.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-            region(64, 48),
-            0,
-            NonNull::new(data.as_mut_ptr().cast()).unwrap(),
-            64 * 16,
-        );
-    }
-    let ptr = |v: &Retained<ProtocolObject<dyn MTLTexture>>| Retained::as_ptr(v) as *mut c_void;
-    let mut buffers = Buffers {
-        input: BufferDescription {
-            size: (64, 48, 64 * 16),
-            data: BufferSource::Metal {
-                texture: ptr(&source),
-                command_queue: Retained::as_ptr(&queue) as *mut c_void,
-            },
-            ..Default::default()
-        },
-        output: BufferDescription {
-            size: (96, 96, 96 * 16),
-            data: BufferSource::Metal {
-                texture: ptr(&destination),
-                command_queue: Retained::as_ptr(&queue) as *mut c_void,
-            },
-            ..Default::default()
-        },
-    };
-    let mut p = params((64, 48), (96, 96));
-    p.sampling_output = SamplingTransform {
-        rows: [[2.0 / 3.0, 0.0, 0.0, 0.0], [0.0, 2.0 / 3.0, -8.0, 0.0]],
-    }
-    .rows;
-    let model = DistortionModel::from_name("poly3");
-    let backend =
-        WgpuWrapper::new(&p, RGBAf::wgpu_format().unwrap(), model, None, &buffers, 0).unwrap();
-    let matrices = vec![[
-        1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    ]];
-    assert!(backend.undistort_image(
-        &mut buffers,
-        &FrameTransform {
-            matrices,
-            kernel_params: p,
-            ..Default::default()
-        },
-        &[]
-    ));
-    let command = queue.commandBuffer().unwrap();
-    command.commit();
-    command.waitUntilCompleted();
-    let mut pixels = vec![0f32; 96 * 96 * 4];
-    unsafe {
-        destination.getBytes_bytesPerRow_fromRegion_mipmapLevel(
-            NonNull::new(pixels.as_mut_ptr().cast()).unwrap(),
-            96 * 16,
-            region(96, 96),
-            0,
-        );
-    }
-    let expected = render(&mut data, (64, 48), (96, 96), p, false);
-    for (i, (a, b)) in pixels.iter().zip(&expected).enumerate() {
-        assert!(
-            (a - b).abs() < 0.0001,
-            "Metal texture mismatch at {i}: {a} != {b}"
-        );
-    }
-}
-fn params(input: (usize, usize), output: (usize, usize)) -> KernelParams {
-    KernelParams {
+fn params(input: (usize, usize), output: (usize, usize), mapping: &HostMapping) -> KernelParams {
+    let mut p = KernelParams {
         width: 64,
         height: 48,
         output_width: 64,
@@ -207,21 +105,53 @@ fn params(input: (usize, usize), output: (usize, usize)) -> KernelParams {
         output_stride: output.0 as i32 * 16,
         matrix_count: 1,
         interpolation: 2,
-        flags: 16384,
+        flags: 32 | 64,
         bytes_per_pixel: 16,
         pix_element_count: 4,
         f: [1.0, 1.0],
         lens_correction_amount: 1.0,
-        source_rect: [0, 0, input.0 as i32, input.1 as i32],
-        output_rect: [0, 0, output.0 as i32, output.1 as i32],
+        source_rect: [
+            mapping.input_rect.0 as i32,
+            mapping.input_rect.1 as i32,
+            mapping.input_rect.2 as i32,
+            mapping.input_rect.3 as i32,
+        ],
+        output_rect: [
+            mapping.output_rect.0 as i32,
+            mapping.output_rect.1 as i32,
+            mapping.output_rect.2 as i32,
+            mapping.output_rect.3 as i32,
+        ],
+        input_rotation: mapping.input_rotation,
         max_pixel_value: 1.0,
         pixel_value_limit: 1.0,
         light_refraction_coefficient: 1.0,
         safe_area_rect: [0.0, 0.0, 64.0, 48.0],
         ..Default::default()
+    };
+    if let Some(a) = mapping.output_affine {
+        p.post_rotation = a.rotation_deg;
+        p.post_zoom = a.zoom;
+        p.post_scale = a.scale_xy;
+        p.post_offset = a.offset_norm;
+    }
+    p
+}
+fn project(rotation: i32) -> GFProjectGeometry {
+    GFProjectGeometry {
+        input_dimensions: GFDimensionsU32 {
+            width: 64,
+            height: 48,
+        },
+        output_dimensions: GFDimensionsU32 {
+            width: 64,
+            height: 48,
+        },
+        video_rotation: rotation,
+        reserved: 0,
     }
 }
-fn check_matrix(gpu: bool) {
+fn check_images(gpu: bool) {
     for rotation in [0, 90, 180, 270] {
         for native in [(32, 24), (64, 48), (128, 96)] {
             let size = if rotation % 180 == 0 {
@@ -229,10 +159,8 @@ fn check_matrix(gpu: bool) {
             } else {
                 (native.1, native.0)
             };
-            // The physical host image contains the rotated native gradient.
             let mut input = rgba_bytes((0..size.0 * size.1).map(|n| {
-                let x = n % size.0;
-                let y = n / size.0;
+                let (x, y) = (n % size.0, n / size.0);
                 let (nx, ny) = match rotation {
                     90 => (y, native.1 - 1 - x),
                     180 => (native.0 - 1 - x, native.1 - 1 - y),
@@ -248,57 +176,56 @@ fn check_matrix(gpu: bool) {
             }));
             for output in [(64, 48), (128, 96), (32, 24), (96, 96), (48, 64), (83, 47)] {
                 for sizing in [1, 2, 3] {
-                    let project = GFProjectGeometry {
-                        input_dimensions: GFDimensionsU32 {
-                            width: 64,
-                            height: 48,
-                        },
-                        output_dimensions: GFDimensionsU32 {
-                            width: 64,
-                            height: 48,
-                        },
-                        video_rotation: rotation,
-                        reserved: 0,
-                    };
                     let mapping = build_mapping(
                         image(size.0 as u32, size.1 as u32),
                         image(output.0 as u32, output.1 as u32),
-                        project,
+                        project(rotation),
                         GFHostOptions {
                             input_orientation: 0,
                             sizing,
                         },
                     )
                     .unwrap();
-                    let mut p = params(size, output);
-                    p.sampling_input = mapping.input.rows;
-                    p.sampling_output = mapping.output.rows;
+                    assert!(mapping.crop.is_none());
+                    let p = params(size, output, &mapping);
                     let pixels = render(&mut input, size, output, p, gpu);
-                    let sx = output.0 as f32 / 64.0;
-                    let sy = output.1 as f32 / 48.0;
-                    let (sx, sy) = match sizing {
-                        1 => (sx.min(sy), sx.min(sy)),
-                        2 => (sx.max(sy), sx.max(sy)),
-                        _ => (sx, sy),
+                    let (rx, ry, rw, rh) = mapping.output_rect;
+                    let affine = mapping.output_affine.unwrap_or_default();
+                    // The existing core rotates boundary coordinates, with the established
+                    // one-pixel phase on flipped axes. Preserve that Resolve convention.
+                    let sx = 64.0 / native.0 as f32;
+                    let sy = 48.0 / native.1 as f32;
+                    let dx = if matches!(rotation, 180 | 270) {
+                        -(sx + 1.0) * 0.5
+                    } else {
+                        (sx - 1.0) * 0.5
                     };
-                    let ox = (output.0 as f32 - 64.0 * sx) * 0.5;
-                    let oy = (output.1 as f32 - 48.0 * sy) * 0.5;
+                    let dy = if matches!(rotation, 90 | 180) {
+                        -(sy + 1.0) * 0.5
+                    } else {
+                        (sy - 1.0) * 0.5
+                    };
                     for y in 0..output.1 {
                         for x in 0..output.0 {
-                            let nx = (x as f32 + 0.5 - ox) / sx - 0.5;
-                            let ny = (y as f32 + 0.5 - oy) / sy - 0.5;
                             let pixel = &pixels[(y * output.0 + x) * 4..][..4];
-                            if nx < -0.5001 || ny < -0.5001 || nx >= 63.5001 || ny >= 47.5001 {
-                                assert_eq!(
-                                    pixel, [0.0; 4],
-                                    "unwritten letterbox {rotation} {output:?} {sizing} {x},{y}"
-                                );
-                            } else if nx >= 1.0 && ny >= 1.0 && nx < 62.0 && ny < 46.0 {
-                                let expected = [nx / 64.0, ny / 48.0, 0.25, 1.0];
-                                for c in 0..4 {
+                            if x + 1 < rx || y + 1 < ry || x > rx + rw + 1 || y > ry + rh + 1 {
+                                assert_eq!(pixel, [0.0; 4]);
+                                continue;
+                            }
+                            let phase = if gpu { 0.5 } else { 0.0 };
+                            let nx = ((x as f32 + phase - rx as f32) * 64.0 / rw as f32 - 32.0)
+                                / affine.scale_xy[0]
+                                + 32.0
+                                + dx;
+                            let ny = ((y as f32 + phase - ry as f32) * 48.0 / rh as f32 - 24.0)
+                                / affine.scale_xy[1]
+                                + 24.0
+                                + dy;
+                            if nx > 3.0 && nx < 60.0 && ny > 3.0 && ny < 44.0 {
+                                for (a, b) in pixel.iter().zip([nx / 64.0, ny / 48.0, 0.25, 1.0]) {
                                     assert!(
-                                        (pixel[c] - expected[c]).abs() < 0.001,
-                                        "pixel mismatch gpu={gpu} rotation={rotation} output={output:?} sizing={sizing} xy={x},{y} got={pixel:?} expected={expected:?}"
+                                        (a - b).abs() < 0.001,
+                                        "gpu={gpu} rot={rotation} in={size:?} out={output:?} mode={sizing} at={x},{y}: {pixel:?} expected={nx},{ny}"
                                     );
                                 }
                             }
@@ -310,31 +237,67 @@ fn check_matrix(gpu: bool) {
     }
 }
 #[test]
-fn host_mapping_renders_scaled_rotated_aspect_pixels_cpu() {
-    check_matrix(false);
+fn existing_core_processes_scaled_rotated_aspect_images_cpu() {
+    check_images(false);
 }
 #[test]
-#[ignore = "Requires a real GPU; run explicitly in the candidate verification"]
-fn host_mapping_renders_scaled_rotated_aspect_pixels_gpu() {
-    check_matrix(true);
+#[ignore = "Requires a real GPU"]
+fn existing_core_processes_scaled_rotated_aspect_images_gpu() {
+    check_images(true);
 }
 #[test]
-fn absent_sampling_preserves_legacy_pixels_cpu() {
-    let mut input = rgba_bytes(
-        (0..64 * 48).map(|n| [(n % 64) as f32 / 64.0, (n / 64) as f32 / 48.0, 0.25, 1.0]),
-    );
-    let p = params((64, 48), (64, 48));
-    let mapped = render(&mut input, (64, 48), (64, 48), p, false);
-    let mut legacy = p;
-    legacy.flags = 0;
-    legacy.sampling_input = SamplingTransform {
-        rows: [[9.0; 4]; 2],
+fn padding_and_fractional_host_scale_are_fcp_rectangles() {
+    let mut source = image(70, 54);
+    source.image_rect = [2.0, 4.0, 66.0, 52.0];
+    source.pixel_to_ideal.values = [0.5, 0.0, 25.0, 0.0, 0.5, -10.0, 0.0, 0.0, 1.0];
+    let mapping =
+        build_mapping(source, image(128, 96), project(0), GFHostOptions::default()).unwrap();
+    assert_eq!(mapping.input_rect, (2, 2, 64, 48));
+    assert_eq!(mapping.output_rect, (0, 0, 128, 96));
+}
+#[test]
+fn fill_crop_restores_the_original_camera_and_does_not_accumulate() {
+    use gyroflow_plugin_base::StabilizationManager;
+    use gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions;
+    let manager = StabilizationManager::default();
+    {
+        let mut p = manager.params.write();
+        p.size = (64, 48);
+        p.output_size = (64, 48);
+        p.fps = 30.0;
+        p.frame_count = 30;
+        p.duration_ms = 1000.0;
     }
-    .rows;
-    let original = render(&mut input, (64, 48), (64, 48), legacy, false);
-    assert_eq!(mapped, original);
+    {
+        let mut lens = manager.lens.write();
+        lens.calib_dimension = Dimensions { w: 128, h: 96 };
+        lens.fisheye_params.camera_matrix =
+            vec![[100.0, 0.0, 64.0], [0.0, 100.0, 48.0], [0.0, 0.0, 1.0]];
+    }
+    let mut state = HostGeometryState::new(&manager, project(0));
+    let mapping = build_mapping(
+        image(64, 64),
+        image(96, 96),
+        project(0),
+        GFHostOptions {
+            input_orientation: 0,
+            sizing: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(mapping.crop.unwrap().size, (48, 48));
+    state.apply(&manager, mapping.crop);
+    assert_eq!(manager.params.read().size, (48, 48));
+    assert_eq!(manager.lens.read().calib_dimension.w, 96);
+    assert_eq!(manager.lens.read().fisheye_params.camera_matrix[0][2], 48.0);
+    state.apply(&manager, mapping.crop);
+    assert_eq!(manager.lens.read().fisheye_params.camera_matrix[0][2], 48.0);
+    state.apply(&manager, None);
+    assert_eq!(manager.params.read().size, (64, 48));
+    assert_eq!(manager.params.read().output_size, (64, 48));
+    assert_eq!(manager.lens.read().calib_dimension.w, 128);
+    assert_eq!(manager.lens.read().fisheye_params.camera_matrix[0][2], 64.0);
 }
-
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "Requires Metal; exercises the production RGBA16Float bridge"]
@@ -497,29 +460,202 @@ fn versioned_bridge_processes_half_float_at_different_source_and_output_sizes() 
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
-#[ignore = "Requires a real GPU"]
-fn ewa_sampling_includes_both_affines_and_feather_derivatives() {
-    let mut input = rgba_bytes(
-        (0..64 * 48).map(|n| [(n % 64) as f32 / 64.0, (n / 64) as f32 / 48.0, 0.25, 1.0]),
-    );
-    for mode in 0..=3 {
-        let mut p = params((64, 48), (32, 48));
-        p.interpolation = 13;
-        p.background_mode = mode;
-        p.background_margin = 0.25;
-        p.background_margin_feather = 0.15;
-        p.ewa_coeffs_p = [1.0, 0.0, -2.5, 1.5];
-        p.ewa_coeffs_q = [2.0, -4.0, 2.5, -0.5];
-        p.sampling_output = [[2.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]];
-        p.sampling_input = [[0.8, 0.0, 6.4, 0.0], [0.0, 0.75, 6.0, 0.0]];
-        let cpu = render(&mut input, (64, 48), (32, 48), p, false);
-        let gpu = render(&mut input, (64, 48), (32, 48), p, true);
-        for (i, (a, b)) in cpu.iter().zip(&gpu).enumerate() {
-            assert!(
-                (a - b).abs() < 0.003,
-                "EWA mode={mode} pixel={i} {a} != {b}"
+#[ignore = "Requires Metal; validates actual project rotation and image origins"]
+fn production_rotation_and_origins_preserve_the_displayed_image() {
+    use super::*;
+    use gyroflow_plugin_base::RGBAf16;
+    use gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions;
+    use objc2::{rc::Retained, runtime::ProtocolObject};
+    use objc2_metal::*;
+    use std::{ffi::c_void, ptr::NonNull};
+    let device = MTLCreateSystemDefaultDevice().unwrap();
+    let queue = device.newCommandQueue().unwrap();
+    let texture = |w, h| {
+        let d = MTLTextureDescriptor::new();
+        unsafe {
+            d.setWidth(w);
+            d.setHeight(h);
+        }
+        d.setPixelFormat(MTLPixelFormat::RGBA16Float);
+        d.setStorageMode(MTLStorageMode::Shared);
+        d.setUsage(MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget);
+        device.newTextureWithDescriptor(&d).unwrap()
+    };
+    let pointer = |p: &Retained<ProtocolObject<dyn MTLTexture>>| Retained::as_ptr(p) as *mut c_void;
+    let region = |w, h| MTLRegion {
+        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+        size: MTLSize {
+            width: w,
+            height: h,
+            depth: 1,
+        },
+    };
+    let output = texture(96, 96);
+    for rotation in [0, 90, 180, 270] {
+        let (w, h) = if rotation % 180 == 0 {
+            (64, 48)
+        } else {
+            (48, 64)
+        };
+        let source = texture(w, h);
+        let mut reference = None;
+        for (source_origin, destination_origin) in [(2, 2), (0, 0), (0, 2), (2, 0)] {
+            let full = rgba_bytes((0..w * h).map(|n| {
+                let x = n % w;
+                let y = if source_origin == 0 {
+                    h - 1 - n / w
+                } else {
+                    n / w
+                };
+                let (nx, ny) = match rotation {
+                    90 => (y, 47 - x),
+                    180 => (63 - x, 47 - y),
+                    270 => (63 - y, x),
+                    _ => (x, y),
+                };
+                [nx as f32 / 64.0, ny as f32 / 48.0, 0.25, 1.0]
+            }));
+            let mut half: Vec<u8> = full
+                .chunks_exact(16)
+                .flat_map(|p| unsafe {
+                    std::mem::transmute::<RGBAf16, [u8; 8]>(RGBAf16::from_float_glam(
+                        RGBAf::to_float_glam(p),
+                    ))
+                })
+                .collect();
+            unsafe {
+                source.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                    region(w, h),
+                    0,
+                    NonNull::new(half.as_mut_ptr().cast()).unwrap(),
+                    w * 8,
+                );
+            }
+            let doc=serde_json::to_vec(&serde_json::json!({"version":3,"videofile":"fixture.mov","video_info":{"width":64,"height":48,"rotation":rotation,"fps":60.0,"num_frames":60,"duration_ms":1000.0},"output":{"output_width":w,"output_height":h},"gyro_source":{}})).unwrap();
+            let mut instance = GFFinalCutInstance::default();
+            let project = parse_project(&doc).unwrap();
+            {
+                let mut lens = project.manager.lens.write();
+                lens.calib_dimension = Dimensions { w: 64, h: 48 };
+                lens.asymmetrical = true;
+                lens.fisheye_params.camera_matrix =
+                    vec![[64.0, 0.0, 28.0], [0.0, 64.0, 18.0], [0.0, 0.0, 1.0]];
+                lens.fisheye_params.distortion_coeffs = vec![0.05, 0.0, 0.0, 0.0];
+            }
+            instance.state.write().unwrap().project = Some(project);
+            let mut error = std::ptr::null_mut();
+            let params = GFRenderParameters {
+                fov: 0.65,
+                smoothness: 15.0,
+                lens_correction: 100.0,
+                ..Default::default()
+            };
+            assert_eq!(
+                unsafe {
+                    gf_finalcut_instance_set_render_parameters(&mut instance, &params, &mut error)
+                },
+                GFStatus::Ok
             );
+            let bounds = GFTimeRange {
+                start: GFTime {
+                    numerator: 0,
+                    denominator: 1,
+                },
+                duration: GFTime {
+                    numerator: 1,
+                    denominator: 1,
+                },
+            };
+            let mut src = image(w as u32, h as u32);
+            src.origin = source_origin;
+            let mut dest = image(96, 96);
+            dest.origin = destination_origin;
+            let req = GFMetalRenderRequestV2 {
+                version: 2,
+                struct_size: std::mem::size_of::<GFMetalRenderRequestV2>() as u32,
+                input_texture: pointer(&source),
+                output_texture: pointer(&output),
+                command_queue: Retained::as_ptr(&queue) as *mut c_void,
+                device_registry_id: device.registryID(),
+                source: src,
+                destination: dest,
+                options: GFHostOptions::default(),
+                pixel_format: 115,
+                source_time_valid: 1,
+                source_time: GFTime {
+                    numerator: 1,
+                    denominator: 2,
+                },
+                render_time: GFTime {
+                    numerator: 1,
+                    denominator: 2,
+                },
+                effect_bounds: bounds,
+                input_bounds: bounds,
+            };
+            assert_eq!(
+                unsafe { gf_finalcut_instance_render_metal_v2(&mut instance, &req, &mut error) },
+                GFStatus::Ok
+            );
+            let command = queue.commandBuffer().unwrap();
+            command.commit();
+            command.waitUntilCompleted();
+            let mut bytes = vec![0u8; 96 * 96 * 8];
+            unsafe {
+                output.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::new(bytes.as_mut_ptr().cast()).unwrap(),
+                    96 * 8,
+                    region(96, 96),
+                    0,
+                );
+            }
+            let pixels: Vec<[f32; 4]> = bytes
+                .chunks_exact(8)
+                .map(|p| RGBAf16::to_float_glam(p).to_array())
+                .collect();
+            let read = |x: usize, y: usize| {
+                pixels[(if destination_origin == 0 { 95 - y } else { y }) * 96 + x]
+            };
+            if let Some(expected) = &reference {
+                let expected: &Vec<[f32; 4]> = expected;
+                for y in 32..64 {
+                    for x in 32..64 {
+                        for (a, b) in read(x, y).iter().zip(expected[y * 96 + x]) {
+                            assert!(
+                                (a - b).abs() < 0.04,
+                                "rotation={rotation}, origins={source_origin}/{destination_origin} at={x},{y}: {a} != {b}"
+                            );
+                        }
+                    }
+                }
+            } else {
+                let horizontal = (read(60, 48), read(36, 48));
+                let vertical = (read(48, 60), read(48, 36));
+                match rotation {
+                    0 => {
+                        assert!(horizontal.0[0] > horizontal.1[0]);
+                        assert!(vertical.0[1] > vertical.1[1]);
+                    }
+                    90 => {
+                        assert!(vertical.0[0] > vertical.1[0], "90 must point down");
+                        assert!(horizontal.0[1] < horizontal.1[1]);
+                    }
+                    180 => {
+                        assert!(horizontal.0[0] < horizontal.1[0]);
+                        assert!(vertical.0[1] < vertical.1[1]);
+                    }
+                    _ => {
+                        assert!(vertical.0[0] < vertical.1[0]);
+                        assert!(horizontal.0[1] > horizontal.1[1]);
+                    }
+                }
+                reference = Some(pixels);
+            }
+            unsafe {
+                gf_finalcut_error_free(error);
+            }
         }
     }
 }

@@ -2,6 +2,8 @@
 
 mod fcpxml;
 mod host_geometry;
+#[cfg(target_os = "macos")]
+mod metal_images;
 mod project_parameters;
 #[cfg(test)]
 mod sampling_tests;
@@ -381,6 +383,7 @@ const _: () = {
 };
 
 struct LoadedProject {
+    host_geometry: std::sync::Mutex<Option<host_geometry::HostGeometryState>>,
     manager: Arc<StabilizationManager>,
     _bytes: Arc<[u8]>,
 }
@@ -442,6 +445,8 @@ struct InstanceState {
 }
 
 pub struct GFFinalCutInstance {
+    #[cfg(target_os = "macos")]
+    metal_images: std::sync::Mutex<metal_images::MetalImages>,
     state: RwLock<InstanceState>,
 }
 
@@ -449,6 +454,8 @@ impl Default for GFFinalCutInstance {
     fn default() -> Self {
         Self {
             state: RwLock::new(InstanceState::default()),
+            #[cfg(target_os = "macos")]
+            metal_images: Default::default(),
         }
     }
 }
@@ -531,6 +538,7 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
     };
     validate_project_sync_readiness(&project_json, has_sync_points, has_accurate_timestamps)?;
     Ok(LoadedProject {
+        host_geometry: Default::default(),
         manager: Arc::new(manager),
         _bytes: Arc::from(project_bytes),
     })
@@ -682,6 +690,8 @@ fn apply_render_parameters(
     validate_render_parameters(parameters)?;
 
     let manager = &project.manager;
+    // FCP normalizes host textures before entering the existing stabilizer.
+    manager.params.write().framebuffer_inverted = true;
     manager.set_fov(parameters.fov);
     manager.set_smoothing_param("smoothness", parameters.smoothness / 100.0);
     manager.set_lens_correction_amount(parameters.lens_correction / 100.0);
@@ -2529,7 +2539,6 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
             })?;
         let mut buffers = Buffers {
             input: BufferDescription {
-                sampling_transform: None,
                 size: (
                     mapped_geometry.input.dimensions.width as usize,
                     mapped_geometry.input.dimensions.height as usize,
@@ -2544,7 +2553,6 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
                 ..Default::default()
             },
             output: BufferDescription {
-                sampling_transform: None,
                 size: (
                     mapped_geometry.output.dimensions.width as usize,
                     mapped_geometry.output.dimensions.height as usize,
@@ -2905,7 +2913,7 @@ mod tests {
         assert_eq!(core.lens_correction_amount, 0.8);
         assert_eq!(core.adaptive_zoom_window, -1.0);
         assert!(core.fov_overview);
-        assert!(!core.framebuffer_inverted);
+        assert!(core.framebuffer_inverted);
         drop(core);
         let smoothing = project.manager.smoothing.read();
         assert_eq!(smoothing.current().get_parameter("smoothness"), 0.42);
@@ -3331,7 +3339,8 @@ fn set_framebuffer_orientation(manager: &StabilizationManager, inverted: bool) {
         changed
     };
     if changed {
-        manager.recompute_undistortion();
+        manager.invalidate_blocking_zooming();
+        manager.recompute_blocking();
     }
 }
 
@@ -3436,7 +3445,16 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                 ),
             });
         }
-        let (manager, timing) = {
+        #[cfg(target_os = "macos")]
+        let mut metal_images = instance
+            .metal_images
+            .lock()
+            .map_err(|_| invalid("FCP Metal cache lock is poisoned".into()))?;
+        #[cfg(target_os = "macos")]
+        let frame_images = unsafe { metal_images.begin(request) }.map_err(invalid)?;
+        #[cfg(target_os = "macos")]
+        let request = frame_images.request;
+        let (manager, timing, mapping) = {
             let state = instance
                 .state
                 .read()
@@ -3445,13 +3463,24 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                 status: GFStatus::InvalidProject,
                 message: "Load a Gyroflow project before rendering".into(),
             })?;
-            (Arc::clone(&project.manager), state.timing.clone())
+            let mut geometry = project
+                .host_geometry
+                .lock()
+                .map_err(|_| invalid("Host geometry state lock is poisoned".into()))?;
+            if geometry.is_none() {
+                let dimensions = project_geometry_from_manager(&project.manager)
+                    .map_err(|e| invalid(e.message))?;
+                *geometry = Some(host_geometry::HostGeometryState::new(
+                    &project.manager,
+                    dimensions,
+                ));
+            }
+            let geometry = geometry.as_mut().unwrap();
+            let mapping = host_geometry::build_mapping(request.source,request.destination,geometry.project,request.options)
+                .map_err(|e|invalid(format!("{e}; project={:?}; source={:?} tile={:?}; destination={:?} tile={:?}; options={:?}",geometry.project,request.source.image_rect,request.source.tile_rect,request.destination.image_rect,request.destination.tile_rect,request.options)))?;
+            geometry.apply(&project.manager, mapping.crop);
+            (Arc::clone(&project.manager), state.timing.clone(), mapping)
         };
-        let project = project_geometry_from_manager(&manager).map_err(|e| invalid(e.message))?;
-        let mapping = host_geometry::build_mapping(request.source,request.destination,project,request.options)
-            .map_err(|e|invalid(format!("{e}; project={:?}->{:?} rotation={}; source={:?} tile={:?}; destination={:?} tile={:?}; options={:?}",
-                project.input_dimensions,project.output_dimensions,project.video_rotation,request.source.image_rect,request.source.tile_rect,
-                request.destination.image_rect,request.destination.tile_rect,request.options)))?;
         let time = resolve_host_source_time(timing.as_ref(), &request)?;
         let timestamp = rational_seconds_to_microseconds(&time).map_err(invalid)?;
         let duration = manager.params.read().duration_ms;
@@ -3461,8 +3490,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                 timestamp, duration
             )));
         }
-        // The explicit matrices include the host image origins. Core remains in native orientation.
-        set_framebuffer_orientation(&manager, false);
+        set_framebuffer_orientation(&manager, mapping.framebuffer_inverted);
         let input = request.source.texture;
         let output = request.destination.texture;
         let mut buffers = Buffers {
@@ -3472,8 +3500,8 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                     input.height as usize,
                     input.width as usize * 8,
                 ),
-                rect: Some(mapping.source_rect),
-                sampling_transform: Some(mapping.input),
+                rect: Some(mapping.input_rect),
+                rotation: Some(mapping.input_rotation),
                 data: BufferSource::Metal {
                     texture: request.input_texture,
                     command_queue: request.command_queue,
@@ -3486,7 +3514,9 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                     output.height as usize,
                     output.width as usize * 8,
                 ),
-                sampling_transform: Some(mapping.output),
+                rect: Some(mapping.output_rect),
+                post_affine: mapping.output_affine,
+                flip_v: mapping.output_flip_v,
                 data: BufferSource::Metal {
                     texture: request.output_texture,
                     command_queue: request.command_queue,
@@ -3499,6 +3529,13 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
             .map_err(|e| PayloadError {
                 status: GFStatus::RenderFailed,
                 message: format!("Host stabilization render failed: {e}"),
+            })?;
+        #[cfg(target_os = "macos")]
+        metal_images
+            .finish(&frame_images)
+            .map_err(|message| PayloadError {
+                status: GFStatus::RenderFailed,
+                message,
             })?;
         Ok::<(), PayloadError>(())
     }));

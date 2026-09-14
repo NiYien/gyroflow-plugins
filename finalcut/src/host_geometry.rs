@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::{GFAffineTransform, GFDimensionsU32, GFProjectGeometry, GFTime, GFTimeRange};
-use gyroflow_plugin_base::gyroflow_core::gpu::SamplingTransform;
+use gyroflow_plugin_base::{PostAffine, StabilizationManager};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -45,147 +45,179 @@ const _: () = {
     assert!(std::mem::offset_of!(GFMetalRenderRequestV2, source) == 40);
     assert!(std::mem::offset_of!(GFMetalRenderRequestV2, source_time) == 360);
 };
-#[derive(Clone, Copy, Debug)]
-struct Affine([f64; 6]);
-impl Affine {
-    fn map(self, p: [f64; 2]) -> [f64; 2] {
-        let a = self.0;
-        [
-            a[0] * p[0] + a[1] * p[1] + a[2],
-            a[3] * p[0] + a[4] * p[1] + a[5],
-        ]
-    }
-    fn then(self, next: Self) -> Self {
-        let a = next.0;
-        let b = self.0;
-        Self([
-            a[0] * b[0] + a[1] * b[3],
-            a[0] * b[1] + a[1] * b[4],
-            a[0] * b[2] + a[1] * b[5] + a[2],
-            a[3] * b[0] + a[4] * b[3],
-            a[3] * b[1] + a[4] * b[4],
-            a[3] * b[2] + a[4] * b[5] + a[5],
-        ])
-    }
-    fn inverse(self) -> Result<Self, String> {
-        let a = self.0;
-        let d = a[0] * a[4] - a[1] * a[3];
-        if !a.iter().all(|v| v.is_finite()) || !d.is_finite() || d.abs() <= 1e-12 {
-            return Err("Host pixel transform is singular or non-finite".into());
-        }
-        Ok(Self([
-            a[4] / d,
-            -a[1] / d,
-            (a[1] * a[5] - a[4] * a[2]) / d,
-            -a[3] / d,
-            a[0] / d,
-            (a[3] * a[2] - a[0] * a[5]) / d,
-        ]))
-    }
-    fn sampling(self) -> Result<SamplingTransform, String> {
-        let a = self.0;
-        let value = SamplingTransform {
-            rows: [
-                [a[0] as f32, a[1] as f32, a[2] as f32, 0.0],
-                [a[3] as f32, a[4] as f32, a[5] as f32, 0.0],
-            ],
-        };
-        if value.is_valid() {
-            Ok(value)
-        } else {
-            Err("Host transform exceeds sampler range".into())
-        }
-    }
+
+pub type PixelRect = (usize, usize, usize, usize);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceCrop {
+    pub size: (usize, usize),
+    pub offset: (usize, usize),
+    pub output: (usize, usize),
 }
-fn rect(r: [f64; 4]) -> Result<[f64; 4], String> {
+
+#[derive(Debug)]
+pub struct HostMapping {
+    pub input_rect: PixelRect,
+    pub output_rect: PixelRect,
+    pub input_rotation: f32,
+    pub output_affine: Option<PostAffine>,
+    pub output_flip_v: bool,
+    pub framebuffer_inverted: bool,
+    pub crop: Option<SourceCrop>,
+}
+
+#[derive(Clone, Copy)]
+struct ImageSpace {
+    local_bounds: [f64; 4],
+    ideal_size: [f64; 2],
+    texture: [f64; 2],
+}
+
+fn positive_rect(r: [f64; 4]) -> Result<[f64; 4], String> {
     if r.iter().all(|v| v.is_finite()) && r[2] > r[0] && r[3] > r[1] {
         Ok(r)
     } else {
         Err("Host image bounds must be finite and non-empty".into())
     }
 }
-fn transformed_rect(r: [f64; 4], t: Affine) -> [f64; 4] {
-    let p = [[r[0], r[1]], [r[2], r[1]], [r[0], r[3]], [r[2], r[3]]].map(|p| t.map(p));
-    [
-        p.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min),
-        p.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min),
-        p.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max),
-        p.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max),
-    ]
-}
 fn dimensions(d: GFDimensionsU32) -> Result<[f64; 2], String> {
-    if d.width == 0 || d.height == 0 || d.width > i32::MAX as u32 || d.height > i32::MAX as u32 {
+    if d.width == 0 || d.height == 0 || d.width > i32::MAX as u32 / 16 || d.height > i32::MAX as u32
+    {
         return Err("Invalid image dimensions".into());
     }
     Ok([d.width as f64, d.height as f64])
 }
-fn rotation(degrees: i32, size: [f64; 2]) -> Result<(Affine, [f64; 2]), String> {
-    let [w, h] = size;
-    Ok(match degrees.rem_euclid(360) {
-        0 => (Affine([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]), size),
-        90 => (Affine([0.0, -1.0, h, 1.0, 0.0, 0.0]), [h, w]),
-        180 => (Affine([-1.0, 0.0, w, 0.0, -1.0, h]), size),
-        270 => (Affine([0.0, 1.0, 0.0, -1.0, 0.0, w]), [h, w]),
-        _ => return Err("Project rotation must be a quarter turn".into()),
-    })
-}
-fn placement(size: [f64; 2], target: [f64; 4], mode: u32) -> Affine {
-    let w = target[2] - target[0];
-    let h = target[3] - target[1];
-    let sx = w / size[0];
-    let sy = h / size[1];
-    let (sx, sy) = match mode {
-        2 => (sx.max(sy), sx.max(sy)),
-        3 => (sx, sy),
-        _ => (sx.min(sy), sx.min(sy)),
-    };
-    // Native pixels point downwards; ideal image coordinates point upwards.
-    Affine([
-        sx,
-        0.0,
-        target[0] + (w - size[0] * sx) * 0.5,
-        0.0,
-        -sy,
-        target[3] - (h - size[1] * sy) * 0.5,
-    ])
-}
-fn image_space(image: GFHostImageV2) -> Result<(Affine, Affine, [f64; 4]), String> {
-    let size = dimensions(image.texture)?;
-    let tile = rect(image.tile_rect)?;
-    let bounds = rect(image.image_rect)?;
+fn image_space(image: GFHostImageV2) -> Result<ImageSpace, String> {
+    let texture = dimensions(image.texture)?;
+    let tile = positive_rect(image.tile_rect)?;
+    let r = positive_rect(image.image_rect)?;
     if image.reserved != 0
         || !matches!(image.origin, 0 | 2)
-        || ((tile[2] - tile[0]) - size[0]).abs() > 1e-4
-        || ((tile[3] - tile[1]) - size[1]).abs() > 1e-4
+        || ((tile[2] - tile[0]) - texture[0]).abs() > 1e-4
+        || ((tile[3] - tile[1]) - texture[1]).abs() > 1e-4
     {
         return Err("Host tile bounds disagree with its texture or origin".into());
     }
     let m = image.pixel_to_ideal.values;
+    // The effect advertises FxPlug ScaleTranslate support. Rotation metadata is
+    // handled by the existing input-rotation parameter, independently of this matrix.
     if !m.iter().all(|v| v.is_finite())
-        || m[6].abs() > 1e-12
-        || m[7].abs() > 1e-12
-        || (m[8] - 1.0).abs() > 1e-12
+        || m[0] <= 0.0
+        || m[4] <= 0.0
+        || [m[1], m[3], m[6], m[7], m[8] - 1.0]
+            .iter()
+            .any(|v| v.abs() > 1e-9)
     {
-        return Err("Host pixel transform must be affine".into());
+        return Err("Host pixel transform is not a valid scale and translation".into());
     }
-    let pixel_to_ideal = Affine([m[0], m[1], m[2], m[3], m[4], m[5]]);
-    let local = if image.origin == 2 {
-        Affine([1.0, 0.0, -tile[0], 0.0, -1.0, tile[3]])
+    let local_bounds = if image.origin == 2 {
+        [
+            r[0] - tile[0],
+            tile[3] - r[3],
+            r[2] - tile[0],
+            tile[3] - r[1],
+        ]
     } else {
-        Affine([1.0, 0.0, -tile[0], 0.0, 1.0, -tile[1]])
+        [
+            r[0] - tile[0],
+            r[1] - tile[1],
+            r[2] - tile[0],
+            r[3] - tile[1],
+        ]
     };
-    Ok((
-        pixel_to_ideal.inverse()?.then(local),
-        local,
-        rect(transformed_rect(bounds, pixel_to_ideal))?,
-    ))
+    if local_bounds[0] < -1e-4
+        || local_bounds[1] < -1e-4
+        || local_bounds[2] > texture[0] + 1e-4
+        || local_bounds[3] > texture[1] + 1e-4
+    {
+        return Err("Stabilization requires the complete source/destination image tile".into());
+    }
+    Ok(ImageSpace {
+        local_bounds,
+        ideal_size: [(r[2] - r[0]) * m[0], (r[3] - r[1]) * m[4]],
+        texture,
+    })
 }
-#[derive(Debug)]
-pub struct HostMapping {
-    pub input: SamplingTransform,
-    pub output: SamplingTransform,
-    pub source_rect: (usize, usize, usize, usize),
+fn pixel_rect(r: [f64; 4], texture: [f64; 2]) -> Result<PixelRect, String> {
+    let x = r[0].round().clamp(0.0, texture[0]) as usize;
+    let y = r[1].round().clamp(0.0, texture[1]) as usize;
+    let right = r[2].round().clamp(0.0, texture[0]) as usize;
+    let bottom = r[3].round().clamp(0.0, texture[1]) as usize;
+    if right <= x || bottom <= y {
+        return Err("Host content region has no pixels".into());
+    }
+    Ok((x, y, right - x, bottom - y))
 }
+fn fit_rect(space: ImageSpace, size: [f64; 2]) -> Result<PixelRect, String> {
+    let scale = (space.ideal_size[0] / size[0]).min(space.ideal_size[1] / size[1]);
+    let ratio = [
+        size[0] * scale / space.ideal_size[0],
+        size[1] * scale / space.ideal_size[1],
+    ];
+    let r = space.local_bounds;
+    let margin = [
+        (r[2] - r[0]) * (1.0 - ratio[0]) * 0.5,
+        (r[3] - r[1]) * (1.0 - ratio[1]) * 0.5,
+    ];
+    pixel_rect(
+        [
+            r[0] + margin[0],
+            r[1] + margin[1],
+            r[2] - margin[0],
+            r[3] - margin[1],
+        ],
+        space.texture,
+    )
+}
+fn oriented(size: [f64; 2], rotation: i32) -> [f64; 2] {
+    if rotation.rem_euclid(180) == 90 {
+        [size[1], size[0]]
+    } else {
+        size
+    }
+}
+fn centered_extent(full: usize, requested: f64) -> usize {
+    let crop = (requested.round() as usize).clamp(1, full);
+    if (full - crop) % 2 == 1 {
+        crop.saturating_sub(1).max(1)
+    } else {
+        crop
+    }
+}
+fn source_crop(
+    native: [f64; 2],
+    orientation: i32,
+    project_rotation: i32,
+    aspect: f64,
+) -> Option<SourceCrop> {
+    let display = oriented(native, orientation);
+    let (w, h) = (display[0] as usize, display[1] as usize);
+    let crop = if display[0] / display[1] > aspect {
+        (centered_extent(w, display[1] * aspect), h)
+    } else {
+        (w, centered_extent(h, display[0] / aspect))
+    };
+    if crop == (w, h) {
+        return None;
+    }
+    let offset = ((w - crop.0) / 2, (h - crop.1) / 2);
+    let (size, offset) = if orientation.rem_euclid(180) == 90 {
+        ((crop.1, crop.0), (offset.1, offset.0))
+    } else {
+        (crop, offset)
+    };
+    let output = if project_rotation.rem_euclid(180) == 90 {
+        (size.1, size.0)
+    } else {
+        size
+    };
+    Some(SourceCrop {
+        size,
+        offset,
+        output,
+    })
+}
+
 pub fn build_mapping(
     source: GFHostImageV2,
     destination: GFHostImageV2,
@@ -196,136 +228,134 @@ pub fn build_mapping(
         return Err("Invalid host geometry options".into());
     }
     let native = dimensions(project.input_dimensions)?;
-    let output = dimensions(project.output_dimensions)?;
-    let (source_to_texture, pixel_to_local, source_bounds) = image_space(source)?;
-    let (output_to_texture, _, output_bounds) = image_space(destination)?;
+    let mut output = dimensions(project.output_dimensions)?;
+    let input_space = image_space(source)?;
+    let output_space = image_space(destination)?;
     let orientation = match options.input_orientation {
         0 => project.video_rotation,
         1 => 0,
         2 => 90,
         3 => 180,
         _ => 270,
-    };
-    let (rotate, oriented) = rotation(orientation, native)?;
-    let input = rotate
-        .then(placement(oriented, source_bounds, options.sizing))
-        .then(source_to_texture)
-        .sampling()?;
-    let output = placement(output, output_bounds, options.sizing)
-        .then(output_to_texture)
-        .inverse()?
-        .sampling()?;
-    let valid = transformed_rect(source.image_rect, pixel_to_local);
-    let w = source.texture.width as f64;
-    let h = source.texture.height as f64;
-    let x = valid[0].floor().clamp(0.0, w) as usize;
-    let y = valid[1].floor().clamp(0.0, h) as usize;
-    let right = valid[2].ceil().clamp(0.0, w) as usize;
-    let bottom = valid[3].ceil().clamp(0.0, h) as usize;
-    if right <= x || bottom <= y {
-        return Err("Host image has no pixels in the requested tile".into());
     }
+    .rem_euclid(360);
+    if orientation % 90 != 0 || project.video_rotation.rem_euclid(90) != 0 {
+        return Err("Project rotation must be a quarter turn".into());
+    }
+    let crop = if options.sizing == 2 {
+        source_crop(
+            native,
+            orientation,
+            project.video_rotation,
+            input_space.ideal_size[0] / input_space.ideal_size[1],
+        )
+    } else {
+        None
+    };
+    if let Some(c) = crop {
+        output = [c.output.0 as f64, c.output.1 as f64];
+    }
+    let input_rect = if options.sizing <= 1 {
+        fit_rect(input_space, oriented(native, orientation))?
+    } else {
+        pixel_rect(input_space.local_bounds, input_space.texture)?
+    };
+    let output_rect = if options.sizing <= 1 {
+        fit_rect(output_space, output)?
+    } else {
+        pixel_rect(output_space.local_bounds, output_space.texture)?
+    };
+    let output_affine = if options.sizing == 2 {
+        let scale =
+            (output_space.ideal_size[0] / output[0]).max(output_space.ideal_size[1] / output[1]);
+        Some(PostAffine {
+            scale_xy: [
+                (scale * output[0] / output_space.ideal_size[0]) as f32,
+                (scale * output[1] / output_space.ideal_size[1]) as f32,
+            ],
+            ..Default::default()
+        })
+    } else {
+        None
+    };
     Ok(HostMapping {
-        input,
-        output,
-        source_rect: (x, y, right - x, bottom - y),
+        input_rect,
+        output_rect,
+        input_rotation: if source.origin == 0 {
+            -(orientation as f32)
+        } else {
+            orientation as f32
+        },
+        output_affine,
+        output_flip_v: source.origin != destination.origin,
+        framebuffer_inverted: source.origin == 2,
+        crop,
     })
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn image(w: u32, h: u32) -> GFHostImageV2 {
-        GFHostImageV2 {
-            image_rect: [0.0, 0.0, w as f64, h as f64],
-            tile_rect: [0.0, 0.0, w as f64, h as f64],
-            pixel_to_ideal: GFAffineTransform {
-                values: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            },
-            texture: GFDimensionsU32 {
-                width: w,
-                height: h,
-            },
-            origin: 2,
-            reserved: 0,
+
+/// FCP owns this per-instance snapshot. It follows the existing Resolve crop
+/// adaptation: rebase the principal point in calibration coordinates and restore
+/// the original geometry when the host fitting mode changes.
+pub struct HostGeometryState {
+    pub project: GFProjectGeometry,
+    camera_matrix: Vec<[f64; 3]>,
+    calibration: (usize, usize),
+    applied: Option<SourceCrop>,
+}
+impl HostGeometryState {
+    pub fn new(manager: &StabilizationManager, project: GFProjectGeometry) -> Self {
+        let lens = manager.lens.read();
+        Self {
+            project,
+            camera_matrix: lens.fisheye_params.camera_matrix.clone(),
+            calibration: (lens.calib_dimension.w, lens.calib_dimension.h),
+            applied: None,
         }
     }
-    fn project(rotation: i32) -> GFProjectGeometry {
-        GFProjectGeometry {
-            input_dimensions: GFDimensionsU32 {
-                width: 1920,
-                height: 1080,
-            },
-            output_dimensions: GFDimensionsU32 {
-                width: 1080,
-                height: 1920,
-            },
-            video_rotation: rotation,
-            reserved: 0,
+    pub fn apply(&mut self, manager: &StabilizationManager, crop: Option<SourceCrop>) {
+        if self.applied == crop {
+            return;
         }
-    }
-    #[test]
-    fn rotation_scaling_and_aspect_matrix() {
-        for rotation in [0, 90, 180, 270] {
-            for (w, h) in [(1920, 1080), (1080, 1920), (1000, 1000), (1280, 960)] {
-                for sizing in 0..=3 {
-                    let m = build_mapping(
-                        image(w, h),
-                        image(1920, 1080),
-                        project(rotation),
-                        GFHostOptions {
-                            input_orientation: 0,
-                            sizing,
-                        },
-                    )
-                    .unwrap();
-                    assert!(m.input.is_valid() && m.output.is_valid());
-                }
-            }
+        let native = (
+            self.project.input_dimensions.width as usize,
+            self.project.input_dimensions.height as usize,
+        );
+        let output = (
+            self.project.output_dimensions.width as usize,
+            self.project.output_dimensions.height as usize,
+        );
+        let (size, output, offset) =
+            crop.map(|c| (c.size, c.output, c.offset))
+                .unwrap_or((native, output, (0, 0)));
+        let mut camera = self.camera_matrix.clone();
+        let sx = self.calibration.0.max(1) as f64 / native.0 as f64;
+        let sy = self.calibration.1.max(1) as f64 / native.1 as f64;
+        if camera.len() >= 2 {
+            camera[0][2] -= offset.0 as f64 * sx;
+            camera[1][2] -= offset.1 as f64 * sy;
         }
-    }
-    #[test]
-    fn clockwise_input_maps_marked_corners_without_double_rotation() {
-        let m = build_mapping(
-            image(1080, 1920),
-            image(1080, 1920),
-            project(90),
-            GFHostOptions::default(),
-        )
-        .unwrap();
-        assert_eq!(m.input.map_point([0.0, 0.0]), [1079.0, 0.0]);
-        assert_eq!(m.input.map_point([1919.0, 1079.0]), [0.0, 1919.0]);
-        assert_eq!(m.output.map_point([100.0, 200.0]), [100.0, 200.0]);
-        let raw = build_mapping(
-            image(1920, 1080),
-            image(1080, 1920),
-            project(90),
-            GFHostOptions {
-                input_orientation: 1,
-                sizing: 0,
-            },
-        )
-        .unwrap();
-        assert_eq!(raw.input.map_point([123.0, 456.0]), [123.0, 456.0]);
-    }
-    #[test]
-    fn source_padding_is_not_treated_as_image_content() {
-        let mut src = image(1920, 1080);
-        src.tile_rect = [-2.0, -4.0, 1924.0, 1082.0];
-        src.texture = GFDimensionsU32 {
-            width: 1926,
-            height: 1086,
-        };
-        let m = build_mapping(
-            src,
-            image(1080, 1920),
-            project(0),
-            GFHostOptions {
-                input_orientation: 1,
-                sizing: 0,
-            },
-        )
-        .unwrap();
-        assert_eq!(m.source_rect, (2, 2, 1920, 1080));
-        assert_eq!(m.input.map_point([0.0, 0.0]), [2.0, 2.0]);
+        {
+            let mut lens = manager.lens.write();
+            lens.fisheye_params.camera_matrix = camera;
+            let (w, h) = if crop.is_some() {
+                (
+                    ((size.0 as f64 * sx).round() as usize).max(1),
+                    ((size.1 as f64 * sy).round() as usize).max(1),
+                )
+            } else {
+                self.calibration
+            };
+            lens.calib_dimension =
+                gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions { w, h };
+        }
+        {
+            let mut p = manager.params.write();
+            p.size = size;
+            p.output_size = output;
+        }
+        manager.init_size();
+        manager.invalidate_smoothing();
+        manager.recompute_blocking();
+        self.applied = crop;
     }
 }

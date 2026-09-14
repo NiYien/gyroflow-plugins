@@ -658,7 +658,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         }
         return NO;
     }
-    *sourceTileRect = destinationTileRect;
+    *sourceTileRect = sourceImages[sourceImageIndex].imagePixelBounds;
     return YES;
 }
 

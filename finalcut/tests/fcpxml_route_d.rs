@@ -1508,11 +1508,20 @@ fn batch_accepts_conform_rate_without_interpreting_it_as_frame_by_frame_slow_mot
     let conformed = patch_fcpxml_project_batch(different_output_rate.as_bytes()).unwrap();
     assert_eq!(conformed.updated_project_count, 1);
     let encoded = encoded_timing_payloads(&conformed.xml).remove(0);
-    let json: serde_json::Value = serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap();
     assert_eq!(json["mapping"][1]["source"], "1002001/20000000");
-    let disabled = different_output_rate.replace("srcFrameRate=\"59.94\"", "srcFrameRate=\"59.94\" scaleEnabled=\"0\"");
+    let disabled = different_output_rate.replace(
+        "srcFrameRate=\"59.94\"",
+        "srcFrameRate=\"59.94\" scaleEnabled=\"0\"",
+    );
     let patched = patch_fcpxml_project_batch(disabled.as_bytes()).unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&STANDARD.decode(encoded_timing_payloads(&patched.xml).remove(0)).unwrap()).unwrap();
+    let json: serde_json::Value = serde_json::from_slice(
+        &STANDARD
+            .decode(encoded_timing_payloads(&patched.xml).remove(0))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(json["mapping"][1]["source"], "1001/20000");
 
     let wrong_label = input.replace("srcFrameRate=\"59.94\"", "srcFrameRate=\"30\"");
