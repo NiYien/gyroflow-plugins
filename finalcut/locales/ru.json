@@ -226,5 +226,16 @@
   "effect.zoom.static": "Статический зум",
   "app.subtitle": "Пакетная обработка проектов Final Cut Pro",
   "app.action.about": "О NiYien FCP",
-  "app.about.description": "Пакетная обработка проектов Final Cut Pro"
+  "app.about.description": "Пакетная обработка проектов Final Cut Pro",
+  "effect.group.host": "Дополнительная коррекция входа",
+  "effect.param.input_orientation": "Ориентация входа",
+  "effect.param.host_sizing": "Подгонка кадра",
+  "effect.host.auto": "Автоматически",
+  "effect.host.unrotated": "Без поворота",
+  "effect.host.fit": "Вписать",
+  "effect.host.fill": "Заполнить",
+  "effect.host.stretch": "Растянуть",
+  "effect.status.not_applied": "%@ загружен — стабилизация не применена",
+  "effect.host.auto_orientation": "Авто (поворот проекта)",
+  "effect.host.auto_sizing": "Авто (вписать)"
 }

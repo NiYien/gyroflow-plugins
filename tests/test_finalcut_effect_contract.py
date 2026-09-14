@@ -91,7 +91,7 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
             )
             self.assertEqual(run.returncode, 0, msg=run.stdout + run.stderr)
 
-    def test_effect_requests_linear_full_buffer_and_uses_effect_local_time(self):
+    def test_effect_requests_linear_full_buffer_and_preserves_sampled_media_time(self):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
 
         self.assertIn("kFxPropertyKey_NeedsFullBuffer : @YES", source)
@@ -104,28 +104,21 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
         )
         self.assertIn("self.metalResources.countLimit = 4", source)
         self.assertIn("recordCommandQueueCreation", source)
-        self.assertIn(".effect_local_time", source)
-        self.assertNotIn("sourceImage.mediaTime", source)
+        self.assertIn(".render_time", source)
+        self.assertIn("sourceImage.mediaTime", source)
+        self.assertIn(".source_time_valid", source)
 
-    def test_effect_builds_v1_geometry_from_every_render_callback(self):
+    def test_effect_builds_v2_geometry_from_both_live_tiles(self):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
         render = source.split("- (BOOL)renderDestinationImage:", 1)[1]
-
-        self.assertIn('#import "GFFrameGeometryAdapter.h"', source)
-        self.assertIn("gf_finalcut_instance_get_project_geometry(", render)
-        self.assertIn("GFFrameGeometryBuild(", render)
-        self.assertIn("sourceImage.pixelTransform", render)
-        self.assertIn("sourceImage.inversePixelTransform", render)
-        self.assertIn("destinationImage.pixelTransform", render)
-        self.assertIn("destinationImage.inversePixelTransform", render)
-        self.assertIn("sourceImage.imageOrigin", render)
-        self.assertIn("destinationImage.imageOrigin", render)
-        self.assertIn("sourceImage.imagePixelBounds", render)
-        self.assertIn("sourceImage.tilePixelBounds", render)
-        self.assertIn("destinationImage.imagePixelBounds", render)
-        self.assertIn("destinationImage.tilePixelBounds", render)
-        self.assertIn(".geometry = frameGeometry", render)
-        self.assertNotIn("GFFrameGeometry){0}", render)
+        snapshot = source.split("static GFHostImageV2 GFHostImageSnapshot", 1)[1].split("static NSString *GFRenderStateArchiveIdentity", 1)[0]
+        self.assertIn("GFHostImageSnapshot(sourceImage, sourceTexture)", render)
+        self.assertIn("GFHostImageSnapshot(destinationImage, destinationTexture)", render)
+        self.assertIn("gf_finalcut_instance_render_metal_v2", render)
+        for field in ("inversePixelTransform", "imageOrigin", "imagePixelBounds", "tilePixelBounds"):
+            self.assertIn("tile." + field, snapshot)
+        self.assertNotIn("sourceTexture.width != destinationTexture.width", render)
+        self.assertNotIn("sourceTexture.height != destinationTexture.height", render)
 
     def test_effect_requests_the_current_destination_tile_from_the_source(self):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
@@ -241,11 +234,11 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
     def test_project_inspector_is_compact_unfilled_and_has_one_action(self):
         source = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
 
-        self.assertIn("NSMakeRect(0, 0, 280, 116)", source)
+        self.assertIn("NSMakeRect(0, 0, 280, 56)", source)
         self.assertNotIn("layer.backgroundColor", source)
-        self.assertIn("self.layer.borderWidth = 0.5", source)
+        self.assertIn("self.layer.borderWidth = 0.0", source)
         self.assertIn('GFLocalized(@"effect.action.load_project"', source)
-        self.assertIn('GFLocalized(@"effect.drop.hint"', source)
+        self.assertIn("self.loadButton.accessibilityHelp", source)
         self.assertIn("registerForDraggedTypes", source)
         self.assertNotIn("openButton", source)
         self.assertNotIn("openProject:", source)

@@ -217,5 +217,16 @@
   "effect.zoom.static": "靜態縮放",
   "app.subtitle": "Final Cut Pro 批次專案處理",
   "app.action.about": "關於 NiYien FCP",
-  "app.about.description": "Final Cut Pro 批次專案處理"
+  "app.about.description": "Final Cut Pro 批次專案處理",
+  "effect.group.host": "進階輸入校正",
+  "effect.param.input_orientation": "輸入方向",
+  "effect.param.host_sizing": "畫面適配",
+  "effect.host.auto": "自動",
+  "effect.host.unrotated": "未旋轉",
+  "effect.host.fit": "符合",
+  "effect.host.fill": "填滿",
+  "effect.host.stretch": "拉伸",
+  "effect.status.not_applied": "%@ 已載入，未套用穩定",
+  "effect.host.auto_orientation": "自動（工程方向）",
+  "effect.host.auto_sizing": "自動（適合）"
 }

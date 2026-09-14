@@ -19,6 +19,7 @@ typedef NS_ENUM(NSInteger, GFRenderMode) {
 @property(nonatomic, readonly) NSString *timingPayload;
 @property(nonatomic, readonly) GFRenderMode mode;
 @property(nonatomic, readonly) GFRenderParameters parameters;
+@property(nonatomic, readonly) GFHostOptions hostOptions;
 @property(nonatomic, readonly) GFTimeRange effectBounds;
 @property(nonatomic, readonly) GFTimeRange inputBounds;
 
@@ -36,6 +37,7 @@ typedef NS_ENUM(NSInteger, GFRenderMode) {
                             parameters:(GFRenderParameters)parameters
                           effectBounds:(GFTimeRange)effectBounds
                            inputBounds:(GFTimeRange)inputBounds NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options;
 - (instancetype)init NS_UNAVAILABLE;
 
 @end

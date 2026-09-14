@@ -12,6 +12,7 @@
 #import "GFRenderPolicy.h"
 #import "GyroflowFinalCut.h"
 #import <Metal/Metal.h>
+#import <math.h>
 #import <os/log.h>
 
 static NSError *GFFxError(NSString *message) {
@@ -45,12 +46,43 @@ static GFTime GFTimeFromCMTime(CMTime time) {
     };
 }
 
+static GFHostImageV2 GFHostImageSnapshot(FxImageTile *tile, id<MTLTexture> texture) {
+    FxRect image = tile.imagePixelBounds;
+    FxRect bounds = tile.tilePixelBounds;
+    GFHostImageV2 result = {
+        .image_rect = {image.left, image.bottom, image.right, image.top},
+        .tile_rect = {bounds.left, bounds.bottom, bounds.right, bounds.top},
+        .texture = {(uint32_t)texture.width, (uint32_t)texture.height},
+        .origin = (uint32_t)tile.imageOrigin,
+    };
+    FxMatrix44 *matrix = tile.inversePixelTransform;
+    if (matrix == nil) { return result; }
+    FxPoint2D p = [matrix transform2DPoint:(FxPoint2D){0, 0}];
+    FxPoint2D x = [matrix transform2DPoint:(FxPoint2D){1, 0}];
+    FxPoint2D y = [matrix transform2DPoint:(FxPoint2D){0, 1}];
+    result.pixel_to_ideal = (GFAffineTransform){.values = {
+        x.x-p.x, y.x-p.x, p.x, x.y-p.y, y.y-p.y, p.y, 0, 0, 1,
+    }};
+    FxPoint2D corners[] = {{image.left,image.bottom},{image.right,image.bottom},
+                           {image.left,image.top},{image.right,image.top}};
+    for (NSUInteger i=0; i<4; i++) {
+        FxPoint2D actual = [matrix transform2DPoint:corners[i]];
+        double expectedX = (x.x-p.x)*corners[i].x + (y.x-p.x)*corners[i].y + p.x;
+        double expectedY = (x.y-p.y)*corners[i].x + (y.y-p.y)*corners[i].y + p.y;
+        if (!isfinite(actual.x) || !isfinite(actual.y) || fabs(actual.x-expectedX)>1e-4 || fabs(actual.y-expectedY)>1e-4) {
+            result.pixel_to_ideal.values[8] = 0;
+            break;
+        }
+    }
+    return result;
+}
+
 static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     GFRenderParameters parameters = state.parameters;
     NSData *parameterData = [NSData dataWithBytes:&parameters length:sizeof(parameters)];
     GFTimeRange effect = state.effectBounds;
     GFTimeRange input = state.inputBounds;
-    return [NSString stringWithFormat:
+    NSString *identity = [NSString stringWithFormat:
         @"%ld|%@|%@|%@|%@|%lld/%lld/%lld/%lld|%lld/%lld/%lld/%lld|%ld",
         (long)state.schemaVersion,
         state.projectContentHash,
@@ -66,6 +98,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         (long long)input.duration.numerator,
         (long long)input.duration.denominator,
         (long)state.mode];
+    return [NSString stringWithFormat:@"%@|%u|%u", identity, state.hostOptions.input_orientation, state.hostOptions.sizing];
 }
 
 @interface GFMetalDeviceResources : NSObject
@@ -87,6 +120,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 @property(nonatomic, copy) NSData *cachedPluginStateData;
 @property(nonatomic, weak) GFProjectDropView *projectView;
 @property(nonatomic) BOOL renderStateRestoreScheduled;
+@property(nonatomic, copy) NSString *lastRenderStatusIdentity;
 @end
 
 @implementation GyroflowFinalCutEffect
@@ -210,6 +244,22 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                                        defaultValue:NO
                                      parameterFlags:kFxParameterFlag_DEFAULT];
     ok = ok && [parameters endParameterSubGroup];
+    ok = ok && [parameters startParameterSubGroup:GFLocalized(@"effect.group.host", @"Advanced input correction")
+                                      parameterID:kGFHostOptionsGroup
+                                   parameterFlags:kFxParameterFlag_COLLAPSED];
+    ok = ok && [parameters addPopupMenuWithName:GFLocalized(@"effect.param.input_orientation", @"Input orientation")
+                                   parameterID:kGFInputOrientation defaultValue:0
+                                   menuEntries:@[GFLocalized(@"effect.host.auto_orientation", @"Automatic (project orientation)"),
+                                                 GFLocalized(@"effect.host.unrotated", @"Unrotated"), @"90°", @"180°", @"270°"]
+                                parameterFlags:kFxParameterFlag_NOT_ANIMATABLE];
+    ok = ok && [parameters addPopupMenuWithName:GFLocalized(@"effect.param.host_sizing", @"Frame fitting")
+                                   parameterID:kGFHostSizing defaultValue:0
+                                   menuEntries:@[GFLocalized(@"effect.host.auto_sizing", @"Automatic (fit)"),
+                                                 GFLocalized(@"effect.host.fit", @"Fit"),
+                                                 GFLocalized(@"effect.host.fill", @"Fill"),
+                                                 GFLocalized(@"effect.host.stretch", @"Stretch")]
+                                parameterFlags:kFxParameterFlag_NOT_ANIMATABLE];
+    ok = ok && [parameters endParameterSubGroup];
     ok = ok && [parameters addStringParameterWithName:@"Instance Identity"
                                             parameterID:kGFInstanceIdentity
                                            defaultValue:@""
@@ -308,7 +358,14 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 - (void)pluginInstanceAddedToDocument {
     // FxParameterRetrievalAPI is not available during this lifecycle callback.
     // Host-backed restoration happens when Final Cut asks for plugin state or
-    // creates the custom parameter view, where the retrieval API is valid.
+    // receives a parameter change, where the retrieval API is valid.
+}
+
+- (BOOL)parameterChanged:(UInt32)paramID atTime:(CMTime)time error:(NSError **)error {
+    (void)paramID; (void)time; (void)error;
+    [self restoreProjectStoreFromHostParameters];
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.projectView refreshStatus]; });
+    return YES;
 }
 
 - (NSView *)createViewForParameterID:(UInt32)parameterID {
@@ -329,7 +386,6 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                    return committed;
                }];
     self.projectView = view;
-    [self restoreProjectStoreFromHostParameters];
     [view refreshStatus];
     return view;
 }
@@ -371,6 +427,19 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             }
             [strongSelf.projectView refreshStatus];
         }
+    });
+}
+
+- (void)reportRenderStatus:(NSString *)message applied:(BOOL)applied snapshot:(GFRenderSnapshot *)snapshot {
+    NSString *payload = snapshot.state.projectPayload;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (![self.projectStore.currentProjectPayload isEqualToString:payload]) { return; }
+        NSString *identity = [NSString stringWithFormat:@"%@|%lu|%d|%@", snapshot.state.projectContentHash,
+            (unsigned long)self.projectStore.currentProjectGeneration, applied, message];
+        if ([self.lastRenderStatusIdentity isEqualToString:identity]) { return; }
+        self.lastRenderStatusIdentity = identity;
+        [self.projectStore recordRenderWarning:applied ? nil : message];
+        [self.projectView refreshStatus];
     });
 }
 
@@ -513,6 +582,11 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                   parameters:parameters
                 effectBounds:effectBounds
                  inputBounds:inputBounds];
+    int inputOrientation = 0, hostSizing = 0;
+    if (![retrieval getIntValue:&inputOrientation fromParameter:kGFInputOrientation atTime:renderTime]) { inputOrientation = 0; }
+    if (![retrieval getIntValue:&hostSizing fromParameter:kGFHostSizing atTime:renderTime]) { hostSizing = 0; }
+    GFHostOptions hostOptions = {.input_orientation = (uint32_t)inputOrientation, .sizing = (uint32_t)hostSizing};
+    state = [[GFRenderState alloc] initWithState:state hostOptions:hostOptions];
     NSString *archiveIdentity = GFRenderStateArchiveIdentity(state);
     [self.pluginStateCacheLock lock];
     NSData *archived = [self.cachedPluginStateIdentity isEqualToString:archiveIdentity]
@@ -738,9 +812,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         destinationTexture,
         renderTime
     );
-    if (sourceTexture.width != destinationTexture.width ||
-        sourceTexture.height != destinationTexture.height ||
-        sourceTexture.pixelFormat != destinationTexture.pixelFormat ||
+    if (sourceTexture.pixelFormat != destinationTexture.pixelFormat ||
         !GFColorSpacesEqual(sourceImage.colorSpace, destinationImage.colorSpace)) {
         if (outError != NULL) {
             *outError = GFFxError(GFLocalized(
@@ -750,7 +822,8 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         return NO;
     }
     if (!CMTIME_IS_NUMERIC(renderTime) || renderTime.timescale <= 0 ||
-        sourceTexture.width > (UINT32_MAX / 8) || sourceTexture.height > UINT32_MAX) {
+        sourceTexture.width > (UINT32_MAX / 8) || sourceTexture.height > UINT32_MAX ||
+        destinationTexture.width > (UINT32_MAX / 8) || destinationTexture.height > UINT32_MAX) {
         if (outError != NULL) {
             *outError = GFFxError(GFLocalized(
                 @"effect.error.render_input_invalid",
@@ -759,90 +832,36 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         return NO;
     }
 
-    GFFrameGeometry frameGeometry = {0};
     GFError *bridgeError = NULL;
     GFStatus status = snapshot.preparationStatus;
-    NSString *geometryErrorMessage = nil;
     [snapshot.renderLock lock];
     if (status == GF_STATUS_OK) {
         GFRenderParameters parameters = snapshot.state.parameters;
-        status = gf_finalcut_instance_set_render_parameters(
-            snapshot.instance,
-            &parameters,
-            &bridgeError
-        );
+        status = gf_finalcut_instance_set_render_parameters(snapshot.instance, &parameters, &bridgeError);
     }
     if (status == GF_STATUS_OK) {
-        GFProjectGeometry projectGeometry = {0};
-        status = gf_finalcut_instance_get_project_geometry(
-            snapshot.instance,
-            &projectGeometry,
-            &bridgeError
-        );
-        if (status == GF_STATUS_OK) {
-            GFFrameGeometryImageSnapshot sourceGeometry = {
-                .image_pixel_bounds = sourceImage.imagePixelBounds,
-                .tile_pixel_bounds = sourceImage.tilePixelBounds,
-                .pixel_transform = sourceImage.pixelTransform,
-                .inverse_pixel_transform = sourceImage.inversePixelTransform,
-                .image_origin = sourceImage.imageOrigin,
-                .texture_dimensions = {
-                    .width = (uint32_t)sourceTexture.width,
-                    .height = (uint32_t)sourceTexture.height,
-                },
-            };
-            GFFrameGeometryImageSnapshot destinationGeometry = {
-                .image_pixel_bounds = destinationImage.imagePixelBounds,
-                .tile_pixel_bounds = destinationImage.tilePixelBounds,
-                .pixel_transform = destinationImage.pixelTransform,
-                .inverse_pixel_transform = destinationImage.inversePixelTransform,
-                .image_origin = destinationImage.imageOrigin,
-                .texture_dimensions = {
-                    .width = (uint32_t)destinationTexture.width,
-                    .height = (uint32_t)destinationTexture.height,
-                },
-            };
-            NSError *geometryError = nil;
-            if (!GFFrameGeometryBuild(
-                    sourceGeometry,
-                    destinationGeometry,
-                    projectGeometry,
-                    &frameGeometry,
-                    &geometryError)) {
-                status = GF_STATUS_INVALID_ARGUMENT;
-                geometryErrorMessage = geometryError.localizedDescription
-                    ?: GFLocalized(@"effect.error.frame_geometry",
-                                   @"Final Cut frame geometry is unsupported");
-            }
-        }
-    }
-    GFMetalRenderRequest request = {
-        .input_texture = (__bridge void *)sourceTexture,
-        .output_texture = (__bridge void *)destinationTexture,
-        .command_queue = (__bridge void *)metalResources.commandQueue,
-        .device_registry_id = destinationImage.deviceRegistryID,
-        .width = (uint32_t)sourceTexture.width,
-        .height = (uint32_t)sourceTexture.height,
-        .input_row_bytes = (uint32_t)sourceTexture.width * 8,
-        .output_row_bytes = (uint32_t)destinationTexture.width * 8,
-        .pixel_format = (uint32_t)sourceTexture.pixelFormat,
-        .effect_local_time = {
-            .numerator = renderTime.value,
-            .denominator = renderTime.timescale,
-        },
-        .effect_bounds = snapshot.state.effectBounds,
-        .input_bounds = snapshot.state.inputBounds,
-        .geometry = frameGeometry,
-    };
-    if (status == GF_STATUS_OK) {
-        status = gf_finalcut_instance_render_metal(
-            snapshot.instance,
-            &request,
-            &bridgeError
-        );
+        CMTime mediaTime = [sourceImage respondsToSelector:@selector(mediaTime)] ? sourceImage.mediaTime : kCMTimeInvalid;
+        GFMetalRenderRequestV2 request = {
+            .version = 2, .struct_size = sizeof(GFMetalRenderRequestV2),
+            .input_texture = (__bridge void *)sourceTexture,
+            .output_texture = (__bridge void *)destinationTexture,
+            .command_queue = (__bridge void *)metalResources.commandQueue,
+            .device_registry_id = destinationImage.deviceRegistryID,
+            .source = GFHostImageSnapshot(sourceImage, sourceTexture),
+            .destination = GFHostImageSnapshot(destinationImage, destinationTexture),
+            .options = snapshot.state.hostOptions,
+            .pixel_format = (uint32_t)sourceTexture.pixelFormat,
+            .source_time_valid = CMTIME_IS_NUMERIC(mediaTime) && mediaTime.timescale > 0,
+            .source_time = GFTimeFromCMTime(mediaTime),
+            .render_time = GFTimeFromCMTime(renderTime),
+            .effect_bounds = snapshot.state.effectBounds,
+            .input_bounds = snapshot.state.inputBounds,
+        };
+        status = gf_finalcut_instance_render_metal_v2(snapshot.instance, &request, &bridgeError);
     }
     GFRenderDisposition disposition = GFRenderDispositionForStatus(status);
     if (disposition == GF_RENDER_DISPOSITION_PROCESSED) {
+        [self reportRenderStatus:@"" applied:YES snapshot:snapshot];
         [snapshot.renderLock unlock];
         [self.renderDiagnostics
             recordFrameSeconds:[NSDate timeIntervalSinceReferenceDate] - frameStarted
@@ -854,7 +873,8 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         ? GFBridgeErrorMessage(
               bridgeError,
               GFLocalized(@"effect.error.render_failed", @"Gyroflow Metal render failed"))
-        : geometryErrorMessage ?: snapshot.statusMessage;
+        : snapshot.statusMessage;
+    [self reportRenderStatus:message ?: @"" applied:NO snapshot:snapshot];
     if (disposition == GF_RENDER_DISPOSITION_PASSTHROUGH) {
         [snapshot.renderLock unlock];
         [self.renderDiagnostics recordPassthroughStatus:status reason:message ?: @""];

@@ -1,7 +1,7 @@
 #import "GFRenderState.h"
 #import <CommonCrypto/CommonDigest.h>
 
-static const NSInteger kGFRenderStateSchema = 2;
+static const NSInteger kGFRenderStateSchema = 3;
 
 static NSString *GFRenderStatePayloadHash(NSString *payload) {
     NSData *data = [payload dataUsingEncoding:NSASCIIStringEncoding] ?: [NSData data];
@@ -22,6 +22,7 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
 @property(nonatomic, readwrite) NSString *timingPayload;
 @property(nonatomic, readwrite) GFRenderMode mode;
 @property(nonatomic, readwrite) GFRenderParameters parameters;
+@property(nonatomic, readwrite) GFHostOptions hostOptions;
 @property(nonatomic, readwrite) GFTimeRange effectBounds;
 @property(nonatomic, readwrite) GFTimeRange inputBounds;
 @end
@@ -75,13 +76,26 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
     return self;
 }
 
+- (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options {
+    self = [self initWithProjectPayload:state.projectPayload
+                    projectDisplayName:state.projectDisplayName
+                    projectContentHash:state.projectContentHash
+                         timingPayload:state.timingPayload
+                                  mode:state.mode
+                            parameters:state.parameters
+                          effectBounds:state.effectBounds
+                           inputBounds:state.inputBounds];
+    if (self != nil) { self.hostOptions = options; }
+    return self;
+}
+
 - (instancetype)initWithCoder:(NSCoder *)coder {
     NSInteger schema = [coder decodeIntegerForKey:@"schema"];
     NSString *projectPayload = [coder decodeObjectOfClass:[NSString class]
                                                    forKey:@"projectPayload"];
     NSString *timingPayload = [coder decodeObjectOfClass:[NSString class]
                                                   forKey:@"timingPayload"];
-    if ((schema != 1 && schema != kGFRenderStateSchema) ||
+    if ((schema < 1 || schema > kGFRenderStateSchema) ||
         projectPayload == nil ||
         timingPayload == nil) {
         return nil;
@@ -140,10 +154,18 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
                                          effectBounds:effectBounds
                                           inputBounds:inputBounds];
     state.schemaVersion = schema;
+    GFHostOptions options = {
+        .input_orientation = schema >= 3 ? (uint32_t)[coder decodeInt32ForKey:@"inputOrientation"] : 0,
+        .sizing = schema >= 3 ? (uint32_t)[coder decodeInt32ForKey:@"hostSizing"] : 0,
+    };
+    if (options.input_orientation > 4 || options.sizing > 3) { return nil; }
+    state.hostOptions = options;
     return state;
 }
 
 - (void)encodeWithCoder:(NSCoder *)coder {
+    [coder encodeInt32:self.hostOptions.input_orientation forKey:@"inputOrientation"];
+    [coder encodeInt32:self.hostOptions.sizing forKey:@"hostSizing"];
     [coder encodeInteger:kGFRenderStateSchema forKey:@"schema"];
     [coder encodeObject:self.projectPayload forKey:@"projectPayload"];
     [coder encodeObject:self.projectDisplayName forKey:@"projectDisplayName"];

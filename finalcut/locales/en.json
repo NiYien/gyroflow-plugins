@@ -220,5 +220,16 @@
   "effect.zoom.static": "Static zoom",
   "app.subtitle": "Batch project processing for Final Cut Pro",
   "app.action.about": "About NiYien FCP",
-  "app.about.description": "Batch project processing for Final Cut Pro"
+  "app.about.description": "Batch project processing for Final Cut Pro",
+  "effect.group.host": "Advanced input correction",
+  "effect.param.input_orientation": "Input orientation",
+  "effect.param.host_sizing": "Frame fitting",
+  "effect.host.auto": "Automatic",
+  "effect.host.unrotated": "Unrotated",
+  "effect.host.fit": "Fit",
+  "effect.host.fill": "Fill",
+  "effect.host.stretch": "Stretch",
+  "effect.status.not_applied": "%@ loaded — stabilization not applied",
+  "effect.host.auto_orientation": "Automatic (project orientation)",
+  "effect.host.auto_sizing": "Automatic (fit)"
 }

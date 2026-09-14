@@ -217,5 +217,16 @@
   "effect.zoom.static": "固定ズーム",
   "app.subtitle": "Final Cut Pro のプロジェクトを一括処理",
   "app.action.about": "NiYien FCP について",
-  "app.about.description": "Final Cut Pro のプロジェクトを一括処理"
+  "app.about.description": "Final Cut Pro のプロジェクトを一括処理",
+  "effect.group.host": "入力の詳細補正",
+  "effect.param.input_orientation": "入力の向き",
+  "effect.param.host_sizing": "フレーム調整",
+  "effect.host.auto": "自動",
+  "effect.host.unrotated": "回転なし",
+  "effect.host.fit": "フィット",
+  "effect.host.fill": "塗りつぶし",
+  "effect.host.stretch": "引き伸ばし",
+  "effect.status.not_applied": "%@ 読み込み済み・手ぶれ補正未適用",
+  "effect.host.auto_orientation": "自動（プロジェクトの向き）",
+  "effect.host.auto_sizing": "自動（フィット）"
 }

@@ -1,7 +1,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod fcpxml;
+mod host_geometry;
 mod project_parameters;
+#[cfg(test)]
+mod sampling_tests;
+pub use host_geometry::{GFHostImageV2, GFHostOptions, GFMetalRenderRequestV2};
 
 pub use fcpxml::{
     BatchRouteDPatchResult, BatchSkipReason, BatchTargetAction, BatchTargetReport, RouteDError,
@@ -398,6 +402,10 @@ struct PayloadError {
 
 #[derive(Deserialize)]
 struct TimingEnvelope {
+    #[serde(default)]
+    source_frame_duration: Option<String>,
+    #[serde(default)]
+    frame_sampling: Option<String>,
     version: u32,
     fcpxml_version: String,
     structure_sha256: String,
@@ -420,8 +428,10 @@ struct TimingEnvelopeBounds {
     duration: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct LoadedTiming {
+    source_frame_duration: Option<Ratio<i128>>,
+    nearest: bool,
     mapping: Vec<(Ratio<i128>, Ratio<i128>)>,
 }
 
@@ -672,7 +682,6 @@ fn apply_render_parameters(
     validate_render_parameters(parameters)?;
 
     let manager = &project.manager;
-    manager.params.write().framebuffer_inverted = true;
     manager.set_fov(parameters.fov);
     manager.set_smoothing_param("smoothness", parameters.smoothness / 100.0);
     manager.set_lens_correction_amount(parameters.lens_correction / 100.0);
@@ -765,7 +774,7 @@ fn decode_timing_payload(
             status: GFStatus::MissingTiming,
             message: format!("Reprocess Project Required: timing envelope is invalid: {error}"),
         })?;
-    if envelope.version != 1 {
+    if !matches!(envelope.version, 1 | 2) {
         return Err(PayloadError {
             status: GFStatus::UnknownPayloadVersion,
             message: format!(
@@ -878,7 +887,33 @@ fn decode_timing_payload(
                 .to_string(),
         });
     }
-    Ok(LoadedTiming { mapping })
+    let source_frame_duration = envelope
+        .source_frame_duration
+        .as_deref()
+        .map(parse_ratio)
+        .transpose()
+        .map_err(|message| PayloadError {
+            status: GFStatus::MissingTiming,
+            message,
+        })?;
+    if source_frame_duration
+        .as_ref()
+        .is_some_and(|d| *d <= Ratio::from_integer(0))
+        || !matches!(
+            envelope.frame_sampling.as_deref(),
+            None | Some("floor" | "nearest-neighbor")
+        )
+    {
+        return Err(PayloadError {
+            status: GFStatus::MissingTiming,
+            message: "Invalid native frame sampling metadata".into(),
+        });
+    }
+    Ok(LoadedTiming {
+        mapping,
+        source_frame_duration,
+        nearest: envelope.frame_sampling.as_deref() == Some("nearest-neighbor"),
+    })
 }
 
 fn resolve_source_time(
@@ -2449,6 +2484,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
             })?;
             (Arc::clone(&project.manager), state.timing.clone())
         };
+        set_framebuffer_orientation(&manager, true);
         let geometry_mode =
             validate_frame_geometry(&request.geometry).map_err(|message| PayloadError {
                 status: GFStatus::InvalidArgument,
@@ -2493,6 +2529,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
             })?;
         let mut buffers = Buffers {
             input: BufferDescription {
+                sampling_transform: None,
                 size: (
                     mapped_geometry.input.dimensions.width as usize,
                     mapped_geometry.input.dimensions.height as usize,
@@ -2507,6 +2544,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
                 ..Default::default()
             },
             output: BufferDescription {
+                sampling_transform: None,
                 size: (
                     mapped_geometry.output.dimensions.width as usize,
                     mapped_geometry.output.dimensions.height as usize,
@@ -2867,7 +2905,7 @@ mod tests {
         assert_eq!(core.lens_correction_amount, 0.8);
         assert_eq!(core.adaptive_zoom_window, -1.0);
         assert!(core.fov_overview);
-        assert!(core.framebuffer_inverted);
+        assert!(!core.framebuffer_inverted);
         drop(core);
         let smoothing = project.manager.smoothing.read();
         assert_eq!(smoothing.current().get_parameter("smoothness"), 0.42);
@@ -3142,6 +3180,8 @@ mod tests {
     #[test]
     fn route_d_mapping_subtracts_nonzero_effect_start_exactly() {
         let timing = LoadedTiming {
+            source_frame_duration: None,
+            nearest: false,
             mapping: vec![
                 (Ratio::from_integer(0), Ratio::from_integer(5)),
                 (Ratio::from_integer(10), Ratio::from_integer(25)),
@@ -3255,6 +3295,8 @@ mod tests {
 
         let instance = Arc::new(GFFinalCutInstance::default());
         instance.state.write().unwrap().timing = Some(LoadedTiming {
+            source_frame_duration: None,
+            nearest: false,
             mapping: vec![
                 (Ratio::from_integer(0), Ratio::from_integer(10)),
                 (Ratio::from_integer(10), Ratio::from_integer(20)),
@@ -3278,5 +3320,298 @@ mod tests {
         for worker in workers {
             worker.join().expect("concurrent resolver");
         }
+    }
+}
+
+fn set_framebuffer_orientation(manager: &StabilizationManager, inverted: bool) {
+    let changed = {
+        let mut params = manager.params.write();
+        let changed = params.framebuffer_inverted != inverted;
+        params.framebuffer_inverted = inverted;
+        changed
+    };
+    if changed {
+        manager.recompute_undistortion();
+    }
+}
+
+fn sample_native_time(timing: &LoadedTiming, time: Ratio<i128>) -> Ratio<i128> {
+    if let Some(duration) = &timing.source_frame_duration {
+        let frame = time / duration;
+        let sampled = if timing.nearest {
+            frame.round()
+        } else {
+            frame.floor()
+        };
+        sampled * duration
+    } else {
+        time
+    }
+}
+
+fn resolve_host_source_time(
+    timing: Option<&LoadedTiming>,
+    request: &GFMetalRenderRequestV2,
+) -> Result<Ratio<i128>, PayloadError> {
+    let invalid = |message| PayloadError {
+        status: GFStatus::InvalidArgument,
+        message,
+    };
+    if timing.is_some() {
+        let mapped = resolve_render_source_time(
+            timing,
+            ratio_from_time(request.render_time).map_err(invalid)?,
+            request.effect_bounds,
+        )?;
+        return Ok(sample_native_time(timing.unwrap(), mapped));
+    }
+    if request.source_time_valid == 1 {
+        return ratio_from_time(request.source_time).map_err(invalid);
+    }
+    // Native input bounds preserve a trimmed head when no sampled media time is available.
+    let local = ratio_from_time(request.render_time).map_err(invalid)?
+        - ratio_from_time(request.effect_bounds.start).map_err(invalid)?;
+    let duration = ratio_from_time(request.effect_bounds.duration).map_err(invalid)?;
+    if local < Ratio::from_integer(0) || local > duration || duration <= Ratio::from_integer(0) {
+        return Err(invalid(
+            "Direct stabilization time is outside the effect".into(),
+        ));
+    }
+    Ok(local + ratio_from_time(request.input_bounds.start).map_err(invalid)?)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
+    instance: *mut GFFinalCutInstance,
+    request: *const GFMetalRenderRequestV2,
+    out_error: *mut *mut GFError,
+) -> GFStatus {
+    unsafe { clear_error_slot(out_error) };
+    if instance.is_null() || request.is_null() {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::NullPointer,
+                "Host render requires an instance and request",
+            )
+        };
+        return GFStatus::NullPointer;
+    }
+    if unsafe {
+        (*request).version != 2
+            || (*request).struct_size as usize != std::mem::size_of::<GFMetalRenderRequestV2>()
+    } {
+        unsafe {
+            set_error(
+                out_error,
+                GFStatus::InvalidArgument,
+                "Unsupported host render request version or size",
+            )
+        };
+        return GFStatus::InvalidArgument;
+    }
+    let request = unsafe { *request };
+    let instance = unsafe { &*instance };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let invalid = |message| PayloadError {
+            status: GFStatus::InvalidArgument,
+            message,
+        };
+        if request.version != 2
+            || request.struct_size as usize != std::mem::size_of::<GFMetalRenderRequestV2>()
+            || request.source_time_valid > 1
+            || request.device_registry_id == 0
+            || request.input_texture.is_null()
+            || request.output_texture.is_null()
+            || request.command_queue.is_null()
+        {
+            return Err(invalid("Invalid versioned host render request".into()));
+        }
+        if request.pixel_format != 115 {
+            return Err(PayloadError {
+                status: GFStatus::UnsupportedPixelFormat,
+                message: format!(
+                    "Unsupported Metal format {}; expected RGBA16Float",
+                    request.pixel_format
+                ),
+            });
+        }
+        let (manager, timing) = {
+            let state = instance
+                .state
+                .read()
+                .map_err(|_| invalid("Render state lock is poisoned".into()))?;
+            let project = state.project.as_ref().ok_or_else(|| PayloadError {
+                status: GFStatus::InvalidProject,
+                message: "Load a Gyroflow project before rendering".into(),
+            })?;
+            (Arc::clone(&project.manager), state.timing.clone())
+        };
+        let project = project_geometry_from_manager(&manager).map_err(|e| invalid(e.message))?;
+        let mapping = host_geometry::build_mapping(request.source,request.destination,project,request.options)
+            .map_err(|e|invalid(format!("{e}; project={:?}->{:?} rotation={}; source={:?} tile={:?}; destination={:?} tile={:?}; options={:?}",
+                project.input_dimensions,project.output_dimensions,project.video_rotation,request.source.image_rect,request.source.tile_rect,
+                request.destination.image_rect,request.destination.tile_rect,request.options)))?;
+        let time = resolve_host_source_time(timing.as_ref(), &request)?;
+        let timestamp = rational_seconds_to_microseconds(&time).map_err(invalid)?;
+        let duration = manager.params.read().duration_ms;
+        if timestamp < 0 || timestamp as f64 > duration * 1000.0 + 1.0 {
+            return Err(invalid(format!(
+                "Source media time {} us is outside project duration {} ms",
+                timestamp, duration
+            )));
+        }
+        // The explicit matrices include the host image origins. Core remains in native orientation.
+        set_framebuffer_orientation(&manager, false);
+        let input = request.source.texture;
+        let output = request.destination.texture;
+        let mut buffers = Buffers {
+            input: BufferDescription {
+                size: (
+                    input.width as usize,
+                    input.height as usize,
+                    input.width as usize * 8,
+                ),
+                rect: Some(mapping.source_rect),
+                sampling_transform: Some(mapping.input),
+                data: BufferSource::Metal {
+                    texture: request.input_texture,
+                    command_queue: request.command_queue,
+                },
+                ..Default::default()
+            },
+            output: BufferDescription {
+                size: (
+                    output.width as usize,
+                    output.height as usize,
+                    output.width as usize * 8,
+                ),
+                sampling_transform: Some(mapping.output),
+                data: BufferSource::Metal {
+                    texture: request.output_texture,
+                    command_queue: request.command_queue,
+                },
+                ..Default::default()
+            },
+        };
+        manager
+            .process_pixels::<RGBAf16>(timestamp, None, &mut buffers)
+            .map_err(|e| PayloadError {
+                status: GFStatus::RenderFailed,
+                message: format!("Host stabilization render failed: {e}"),
+            })?;
+        Ok::<(), PayloadError>(())
+    }));
+    match result {
+        Ok(Ok(())) => GFStatus::Ok,
+        Ok(Err(e)) => {
+            unsafe { set_error(out_error, e.status, &e.message) };
+            e.status
+        }
+        Err(_) => {
+            unsafe { set_error(out_error, GFStatus::Panic, "Host stabilization panicked") };
+            GFStatus::Panic
+        }
+    }
+}
+
+#[cfg(test)]
+mod host_time_tests {
+    use super::*;
+    fn request() -> GFMetalRenderRequestV2 {
+        // All fields are scalar C ABI values; zero is a valid representation.
+        let mut r: GFMetalRenderRequestV2 = unsafe { std::mem::zeroed() };
+        r.render_time = GFTime {
+            numerator: 125,
+            denominator: 30,
+        };
+        r.effect_bounds = GFTimeRange {
+            start: GFTime {
+                numerator: 4,
+                denominator: 1,
+            },
+            duration: GFTime {
+                numerator: 3,
+                denominator: 1,
+            },
+        };
+        r.input_bounds = GFTimeRange {
+            start: GFTime {
+                numerator: 10,
+                denominator: 1,
+            },
+            duration: GFTime {
+                numerator: 3,
+                denominator: 1,
+            },
+        };
+        r
+    }
+    #[test]
+    fn batch_native_sampling_uses_exact_floor_or_nearest_without_float_drift() {
+        let mut timing = LoadedTiming {
+            source_frame_duration: Some(Ratio::new(1001, 60000)),
+            ..Default::default()
+        };
+        assert_eq!(
+            sample_native_time(&timing, Ratio::new(1, 30)),
+            Ratio::new(1001, 60000)
+        );
+        timing.nearest = true;
+        assert_eq!(
+            sample_native_time(&timing, Ratio::new(1, 30)),
+            Ratio::new(1001, 30000)
+        );
+        timing.source_frame_duration = None;
+        assert_eq!(
+            sample_native_time(&timing, Ratio::new(1, 30)),
+            Ratio::new(1, 30)
+        );
+    }
+
+    #[test]
+    fn native_sample_time_is_independent_of_timeline_frame_rate() {
+        for source_rate in [24, 25, 30, 48, 50, 60] {
+            let mut r = request();
+            r.source_time_valid = 1;
+            r.source_time = GFTime {
+                numerator: source_rate * 10 + 5,
+                denominator: source_rate,
+            };
+            assert_eq!(
+                resolve_host_source_time(None, &r).unwrap(),
+                Ratio::new((source_rate * 10 + 5) as i128, source_rate as i128)
+            );
+        }
+        let mut r = request();
+        r.source_time_valid = 1;
+        r.source_time = GFTime {
+            numerator: 1001 * 601,
+            denominator: 60000,
+        };
+        assert_eq!(
+            resolve_host_source_time(None, &r).unwrap(),
+            Ratio::new(601601, 60000)
+        );
+    }
+    #[test]
+    fn fallback_preserves_trim_and_mapping_does_not_apply_it_twice() {
+        let r = request();
+        assert_eq!(
+            resolve_host_source_time(None, &r).unwrap(),
+            Ratio::new(61, 6)
+        );
+        let timing = LoadedTiming {
+            source_frame_duration: None,
+            nearest: false,
+            mapping: vec![
+                (Ratio::from_integer(0), Ratio::from_integer(20)),
+                (Ratio::from_integer(3), Ratio::from_integer(14)),
+            ],
+        };
+        assert_eq!(
+            resolve_host_source_time(Some(&timing), &r).unwrap(),
+            Ratio::new(59, 3)
+        );
     }
 }

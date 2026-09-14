@@ -75,6 +75,7 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
             *expected_bank_names,
             2000,
             2001,
+            2100,
             10001,
             10002,
             10003,
@@ -128,6 +129,7 @@ def verify(template: Path, xpc_info: Path, identity_path: Path) -> None:
         == {
             ("10036", "./1001", ""),
             ("10036", "./2000", "Stabilization"),
+            ("10036", "./2100", "Advanced input correction"),
         },
         "publishSettings mapping drifted",
     )

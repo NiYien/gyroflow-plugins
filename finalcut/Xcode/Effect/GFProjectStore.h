@@ -45,6 +45,8 @@ typedef GFProjectImportCandidate * _Nullable (^GFProjectImportCandidateBuilder)(
 );
 
 @interface GFProjectStore : NSObject
+@property(atomic, readonly, nullable) NSString *renderWarning;
+- (void)recordRenderWarning:(nullable NSString *)warning;
 
 @property(nonatomic, readonly, nullable) NSData *currentProjectData;
 @property(nonatomic, readonly, nullable) NSString *currentProjectPayload;

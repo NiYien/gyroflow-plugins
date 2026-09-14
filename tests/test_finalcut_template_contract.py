@@ -96,6 +96,7 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
                 {
                     ("./1001", ""),
                     ("./2000", "Stabilization"),
+                    ("./2100", "Advanced input correction"),
                 },
             )
             self.assertEqual(
@@ -112,13 +113,14 @@ class FinalCutProductionTemplateTests(unittest.TestCase):
                     *range(1910, 1920),
                     *range(1930, 1940),
                     2000,
+                    2100,
                     2001,
                     10001,
                     10002,
                     10003,
                 },
             )
-            self.assertEqual(len(direct_parameters), 33)
+            self.assertEqual(len(direct_parameters), 34)
             self.assertEqual(
                 next(
                     parameter

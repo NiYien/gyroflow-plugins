@@ -68,3 +68,7 @@ int main(void) {
     (void)request;
     return 0;
 }
+
+_Static_assert(sizeof(GFHostImageV2) == 152, "Host image ABI");
+_Static_assert(sizeof(GFMetalRenderRequestV2) == 456, "Versioned render ABI");
+_Static_assert(offsetof(GFMetalRenderRequestV2, source_time) == 360, "Native source time ABI");

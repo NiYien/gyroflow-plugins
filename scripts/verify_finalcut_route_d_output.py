@@ -254,7 +254,7 @@ def decode_timing(
     parameter = exactly_one_parameter(filter_video, 1903, context)
     timing = base64_json(parameter.get("value", ""), f"{context} timing payload")
     if (
-        timing.get("version") != 1
+        timing.get("version") not in (1, 2)
         or timing.get("fcpxml_version") != fcpxml_version
         or not positive_int(timing.get("occurrence"))
         or not lowercase_sha256(timing.get("structure_sha256"))

@@ -101,7 +101,7 @@ def main() -> int:
     )
     parser.add_argument("--cargo", default="cargo")
     parser.add_argument("--lipo")
-    parser.add_argument("--target-dir", type=Path, default=ROOT / "target")
+    parser.add_argument("--target-dir", type=Path, default=Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")))
     parser.add_argument(
         "--output",
         type=Path,

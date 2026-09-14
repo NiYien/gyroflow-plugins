@@ -2501,8 +2501,8 @@ impl Execute for GyroflowPlugin {
 
                 if let Some(buffers) = buffers {
                     let mut buffers = Buffers {
-                        input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2, post_affine: None,               flip_h: false,         flip_v: false         },
-                        output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine, flip_h: output_flip_h, flip_v: output_flip_v }
+                        input:  BufferDescription { sampling_transform: None, size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2, post_affine: None,               flip_h: false,         flip_v: false         },
+                        output: BufferDescription { sampling_transform: None, size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine, flip_h: output_flip_h, flip_v: output_flip_v }
                     };
 
                     // plugins-host-timeline-trim D7: out-of-window frames copy the
@@ -4223,8 +4223,8 @@ mod tests {
     fn passthrough_copy_cpu_requires_matching_geometry() {
         fn make_buffers<'a>(src: &'a mut [u8], dst: &'a mut [u8], src_size: (usize, usize, usize), dst_size: (usize, usize, usize)) -> Buffers<'a> {
             Buffers {
-                input:  BufferDescription { size: src_size, rect: None, data: BufferSource::Cpu { buffer: src }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
-                output: BufferDescription { size: dst_size, rect: None, data: BufferSource::Cpu { buffer: dst }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
+                input:  BufferDescription { sampling_transform: None, size: src_size, rect: None, data: BufferSource::Cpu { buffer: src }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
+                output: BufferDescription { sampling_transform: None, size: dst_size, rect: None, data: BufferSource::Cpu { buffer: dst }, rotation: None, texture_copy: false, post_affine: None, flip_h: false, flip_v: false },
             }
         }
         // Matching geometry: source bytes land in the output untouched.

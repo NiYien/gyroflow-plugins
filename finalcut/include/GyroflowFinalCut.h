@@ -184,6 +184,42 @@ typedef struct GFMetalRenderRequest {
     GFFrameGeometry geometry;
 } GFMetalRenderRequest;
 
+/* Version 2 keeps physical textures independent of logical project geometry. */
+typedef struct GFHostImageV2 {
+    double image_rect[4];
+    double tile_rect[4];
+    GFAffineTransform pixel_to_ideal;
+    GFDimensionsU32 texture;
+    uint32_t origin;
+    uint32_t reserved;
+} GFHostImageV2;
+typedef struct GFHostOptions {
+    uint32_t input_orientation;
+    uint32_t sizing;
+} GFHostOptions;
+typedef struct GFMetalRenderRequestV2 {
+    uint32_t version;
+    uint32_t struct_size;
+    void *input_texture;
+    void *output_texture;
+    void *command_queue;
+    uint64_t device_registry_id;
+    GFHostImageV2 source;
+    GFHostImageV2 destination;
+    GFHostOptions options;
+    uint32_t pixel_format;
+    uint32_t source_time_valid;
+    GFTime source_time;
+    GFTime render_time;
+    GFTimeRange effect_bounds;
+    GFTimeRange input_bounds;
+} GFMetalRenderRequestV2;
+GFStatus gf_finalcut_instance_render_metal_v2(
+    GFFinalCutInstance *instance,
+    const GFMetalRenderRequestV2 *request,
+    GFError **out_error
+);
+
 GFFinalCutInstance *gf_finalcut_instance_create(GFError **out_error);
 void gf_finalcut_instance_free(GFFinalCutInstance *instance);
 GFStatus gf_finalcut_instance_load_project(

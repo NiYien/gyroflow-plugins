@@ -104,10 +104,14 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.statusLabel.stringValue = [NSString stringWithFormat:loaded
         ? GFLocalized(@"effect.status.project_loaded", @"%@ loaded")
         : GFLocalized(@"effect.status.project_unloaded", @"%@ not loaded"), name];
+    if (loaded && self.projectStore.renderWarning != nil) {
+        self.statusLabel.stringValue = [NSString stringWithFormat:GFLocalized(@"effect.status.not_applied", @"%@ loaded — stabilization not applied"), name];
+    }
+    self.statusLabel.textColor = loaded && self.projectStore.renderWarning != nil ? NSColor.systemOrangeColor : NSColor.labelColor;
     self.loadButton.enabled = !self.importInFlight;
     self.statusLabel.accessibilityLabel = self.statusLabel.stringValue;
     self.accessibilityLabel = self.statusLabel.stringValue;
-    [self showStatusDetail:self.projectStore.status];
+    [self showStatusDetail:self.projectStore.renderWarning ?: self.projectStore.status];
 }
 
 - (void)showStatusDetail:(NSString *)detail {

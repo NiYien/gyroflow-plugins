@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 const EFFECT_UUID: &str = "ABAD71F5-23F5-46F6-AB08-C11603168AA4";
 const EFFECT_TEMPLATE_UID: &str = "~/Effects.localized/NiYien/Gyroflow/Gyroflow NiYien.moef";
-const TIMING_PAYLOAD_VERSION: u32 = 1;
+const TIMING_PAYLOAD_VERSION: u32 = 2;
 const PROJECT_BANK_MANIFEST_VERSION: u32 = 1;
 const PROJECT_BANK_CHUNK_BYTES: usize = 416 * 1024;
 const PROJECT_BANK_CHUNKS: usize = 10;
@@ -183,6 +183,8 @@ struct Bounds {
 
 #[derive(Serialize)]
 struct TimingPayload {
+    source_frame_duration: Option<String>,
+    frame_sampling: String,
     version: u32,
     fcpxml_version: String,
     occurrence: usize,
@@ -196,6 +198,8 @@ struct TimingPayload {
 
 #[derive(Serialize)]
 struct StructureFingerprint {
+    source_frame_duration: Option<String>,
+    frame_sampling: String,
     fcpxml_version: String,
     clip_tag: String,
     asset_ref: String,
@@ -216,6 +220,8 @@ struct CompoundFingerprint {
 }
 
 struct ResolvedClip {
+    source_frame_duration: Option<String>,
+    frame_sampling: String,
     asset_ref: String,
     mapping: Vec<MappingPoint>,
     bounds_start: Rational,
@@ -359,63 +365,83 @@ fn canonical_frame_rate_label(frame_duration: &Rational) -> Option<&'static str>
     })
 }
 
-fn validate_noop_conform_rate(
+/// Native seconds per conformed second, using Apple's progressive rate-conform chart.
+/// https://developer.apple.com/documentation/professional-video-applications/conform-rate
+fn native_rate_scale(source_duration: &Rational, output_duration: &Rational) -> Rational {
+    let source = canonical_frame_rate_label(source_duration);
+    let output = canonical_frame_rate_label(output_duration);
+    let effective_duration = match (source, output) {
+        (Some("23.98"), Some("24")) | (Some("25"), Some("24")) => Some(Ratio::new(1, 24)),
+        (Some("23.98" | "24"), Some("25" | "50")) => Some(Ratio::new(1, 25)),
+        (Some("24" | "25"), Some("23.98")) => Some(Ratio::new(1001, 24000)),
+        (Some("50"), Some("23.98")) => Some(Ratio::new(1001, 48000)),
+        (Some("50"), Some("24")) => Some(Ratio::new(1, 48)),
+        (Some("29.97"), Some("30" | "60")) => Some(Ratio::new(1, 30)),
+        (Some("59.94"), Some("30" | "60")) => Some(Ratio::new(1, 60)),
+        (Some("30"), Some("29.97" | "59.94")) => Some(Ratio::new(1001, 30000)),
+        (Some("60"), Some("29.97" | "59.94")) => Some(Ratio::new(1001, 60000)),
+        _ => None,
+    };
+    effective_duration.map_or_else(|| Ratio::from_integer(1), |d| source_duration / d)
+}
+
+fn conform_rate_scale(
     document: &Document<'_>,
     clip: Node<'_, '_>,
     asset: Node<'_, '_>,
-) -> Result<(), RouteDError> {
-    let conform_rates: Vec<_> = clip
+) -> Result<Rational, RouteDError> {
+    let nodes: Vec<_> = clip
         .children()
-        .filter(|node| node.has_tag_name("conform-rate"))
+        .filter(|n| n.has_tag_name("conform-rate"))
         .collect();
-    if conform_rates.is_empty() {
-        return Ok(());
+    if nodes.is_empty() {
+        return Ok(Ratio::from_integer(1));
     }
-    if conform_rates.len() != 1 {
+    if nodes.len() != 1 {
         return Err(RouteDError::new(
             "asset-clip must contain at most one conform-rate",
         ));
     }
-    let conform_rate = conform_rates[0];
-    if conform_rate
-        .attributes()
-        .any(|attribute| attribute.name() != "srcFrameRate")
-    {
+    let node = nodes[0];
+    validate_attributes(
+        node,
+        &["srcFrameRate", "scaleEnabled", "frameSampling"],
+        "conform-rate",
+    )?;
+    if !matches!(
+        node.attribute("frameSampling").unwrap_or("floor"),
+        "floor" | "nearest-neighbor"
+    ) {
         return Err(RouteDError::new(
-            "conform-rate with additional behavior is unsupported",
+            "Conform-rate frame blending and optical flow require multi-frame stabilization",
         ));
     }
     let source_format = asset
         .attribute("format")
-        .ok_or_else(|| RouteDError::new("conformed asset has no format"))?;
-    let sequence = clip
-        .ancestors()
-        .find(|node| node.has_tag_name("sequence"))
-        .ok_or_else(|| RouteDError::new("conformed asset-clip has no sequence"))?;
-    let output_format = sequence
-        .attribute("format")
-        .ok_or_else(|| RouteDError::new("conformed sequence has no format"))?;
-    let source_frame_duration =
+        .ok_or_else(|| RouteDError::new("Conformed asset has no format"))?;
+    let source_duration =
         frame_duration_for_format(document, source_format, "conform-rate source")?;
-    let output_frame_duration =
-        frame_duration_for_format(document, output_format, "conform-rate output")?;
-    if source_frame_duration != output_frame_duration {
-        return Err(RouteDError::new(
-            "conform-rate changes frame duration and requires an explicit verified expansion",
-        ));
+    if let Some(declared) = node.attribute("srcFrameRate") {
+        if canonical_frame_rate_label(&source_duration) != Some(declared) {
+            return Err(RouteDError::new(
+                "conform-rate srcFrameRate does not match the exact source frame duration",
+            ));
+        }
     }
-    let declared_rate = conform_rate
-        .attribute("srcFrameRate")
-        .ok_or_else(|| RouteDError::new("conform-rate is missing srcFrameRate"))?;
-    let expected_rate = canonical_frame_rate_label(&source_frame_duration).ok_or_else(|| {
-        RouteDError::new("conform-rate uses an unsupported exact source frame duration")
-    })?;
-    if declared_rate != expected_rate {
-        return Err(RouteDError::new(
-            "conform-rate srcFrameRate does not match the exact source frame duration",
-        ));
+    match node.attribute("scaleEnabled").unwrap_or("1") {
+        "0" => return Ok(Ratio::from_integer(1)),
+        "1" => (),
+        _ => return Err(RouteDError::new("conform-rate scaleEnabled must be 0 or 1")),
     }
-    Ok(())
+    let output_format = clip
+        .ancestors()
+        .find(|n| n.has_tag_name("sequence"))
+        .and_then(|n| n.attribute("format"))
+        .ok_or_else(|| RouteDError::new("Conformed sequence has no format"))?;
+    Ok(native_rate_scale(
+        &source_duration,
+        &frame_duration_for_format(document, output_format, "conform-rate output")?,
+    ))
 }
 
 fn rational_to_big(value: &Rational) -> Ratio<BigInt> {
@@ -566,6 +592,7 @@ fn smooth2_mapping(
     asset_start: &Rational,
     clip_duration: &Rational,
     fcpxml_version: &str,
+    conform_scale: &Rational,
 ) -> Result<Vec<MappingPoint>, RouteDError> {
     if fcpxml_version != "1.14" {
         return Err(RouteDError::new(
@@ -589,7 +616,8 @@ fn smooth2_mapping(
     let asset_format_id = asset
         .attribute("format")
         .ok_or_else(|| RouteDError::new("smooth2 asset has no format reference"))?;
-    let source_frame_duration = frame_duration_for_format(document, asset_format_id, "source")?;
+    let native_frame_duration = frame_duration_for_format(document, asset_format_id, "source")?;
+    let source_frame_duration = &native_frame_duration / conform_scale;
 
     let mut points = Vec::with_capacity(time_points.len());
     let mut handles = Vec::with_capacity(time_points.len());
@@ -732,7 +760,7 @@ fn smooth2_mapping(
             &big_asset_start,
             &big_source_frame_duration,
         )?;
-        let source = &big_source_frame_duration * Ratio::from_integer(source_frame);
+        let source = rational_to_big(&native_frame_duration) * Ratio::from_integer(source_frame);
         let source_numerator = source
             .numer()
             .to_i128()
@@ -863,7 +891,7 @@ fn resolve_clip(
     let _geometry = geometry_preflight(document, clip)?;
     let asset_ref = clip_asset_ref(clip)?;
     let asset = resource_by_id(document, "asset", asset_ref)?;
-    validate_noop_conform_rate(document, clip, asset)?;
+    let conform_scale = conform_rate_scale(document, clip, asset)?;
     let asset_start = optional_time(asset, "start")?;
     let clip_start = required_time(clip, "start")?;
     let clip_duration = required_time(clip, "duration")?;
@@ -942,7 +970,8 @@ fn resolve_clip(
                 .iter()
                 .map(|point| {
                     let local = required_time(*point, "time")? - clip_start.clone();
-                    let source = required_time(*point, "value")? - asset_start.clone();
+                    let source = (required_time(*point, "value")? - asset_start.clone())
+                        * conform_scale.clone();
                     Ok(MappingPoint {
                         local: rational_string(&local),
                         source: rational_string(&source),
@@ -960,6 +989,7 @@ fn resolve_clip(
                 &asset_start,
                 &clip_duration,
                 fcpxml_version,
+                &conform_scale,
             )?
         } else {
             return Err(RouteDError::new(
@@ -984,7 +1014,7 @@ fn resolve_clip(
         }
         points
     } else {
-        let source_start = clip_start.clone() - asset_start.clone();
+        let source_start = (clip_start.clone() - asset_start.clone()) * conform_scale.clone();
         vec![
             MappingPoint {
                 local: "0/1".to_string(),
@@ -992,13 +1022,35 @@ fn resolve_clip(
             },
             MappingPoint {
                 local: rational_string(&clip_duration),
-                source: rational_string(&(source_start + clip_duration.clone())),
+                source: rational_string(
+                    &(source_start + clip_duration.clone() * conform_scale.clone()),
+                ),
             },
         ]
     };
 
+    let source_frame_duration = asset
+        .attribute("format")
+        .map(|id| {
+            frame_duration_for_format(document, id, "native source").map(|d| rational_string(&d))
+        })
+        .transpose()?;
+    let frame_sampling = clip
+        .children()
+        .find(|n| n.has_tag_name("timeMap"))
+        .or_else(|| clip.children().find(|n| n.has_tag_name("conform-rate")))
+        .and_then(|n| n.attribute("frameSampling"))
+        .unwrap_or("floor")
+        .to_string();
+    if !matches!(frame_sampling.as_str(), "floor" | "nearest-neighbor") {
+        return Err(RouteDError::new(
+            "Frame blending and optical flow require multi-frame stabilization",
+        ));
+    }
     let compound_ref = compound_context(project, filter)?;
     let fingerprint = StructureFingerprint {
+        source_frame_duration: source_frame_duration.clone(),
+        frame_sampling: frame_sampling.clone(),
         fcpxml_version: fcpxml_version.to_string(),
         clip_tag: clip.tag_name().name().to_string(),
         asset_ref: asset_ref.to_string(),
@@ -1012,6 +1064,8 @@ fn resolve_clip(
     let fingerprint_bytes = serde_json::to_vec(&fingerprint)
         .map_err(|error| RouteDError::new(format!("structure hash encoding failed: {error}")))?;
     Ok(ResolvedClip {
+        source_frame_duration,
+        frame_sampling,
         asset_ref: asset_ref.to_string(),
         mapping,
         bounds_start: clip_start,
@@ -3011,6 +3065,8 @@ fn timing_replacements(
     };
     let payload = TimingPayload {
         version: TIMING_PAYLOAD_VERSION,
+        source_frame_duration: resolved.source_frame_duration.clone(),
+        frame_sampling: resolved.frame_sampling.clone(),
         fcpxml_version: version.to_string(),
         occurrence,
         structure_sha256: resolved.structure_sha256,
@@ -3720,6 +3776,8 @@ pub fn patch_fcpxml_project(
         };
         let payload = TimingPayload {
             version: TIMING_PAYLOAD_VERSION,
+            source_frame_duration: resolved.source_frame_duration.clone(),
+            frame_sampling: resolved.frame_sampling.clone(),
             fcpxml_version: version.to_string(),
             occurrence: reachable_occurrences,
             structure_sha256: resolved.structure_sha256.clone(),
@@ -3800,4 +3858,30 @@ pub fn patch_fcpxml_project(
         import_token,
         occurrence_count: reachable_occurrences,
     })
+}
+
+#[cfg(test)]
+mod conform_tests {
+    use super::*;
+    #[test]
+    fn rate_conform_chart_preserves_duration_unless_apple_specifies_a_speed_change() {
+        for (source, output, expected) in [
+            ((1, 60), (1, 24), (1, 1)),
+            ((1001, 60000), (1, 30), (1001, 1000)),
+            ((1, 50), (1, 24), (24, 25)),
+            ((1, 25), (1001, 24000), (960, 1001)),
+            ((1001, 24000), (1, 25), (1001, 960)),
+            ((1, 24), (1, 25), (25, 24)),
+            ((1, 48), (1, 30), (1, 1)),
+            ((1, 120), (1, 24), (1, 1)),
+        ] {
+            assert_eq!(
+                native_rate_scale(
+                    &Ratio::new(source.0, source.1),
+                    &Ratio::new(output.0, output.1)
+                ),
+                Ratio::new(expected.0, expected.1)
+            );
+        }
+    }
 }

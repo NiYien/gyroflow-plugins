@@ -49,6 +49,12 @@ def production_parameters(body: str) -> str:
         '\n\t\t\t\t\t<parameter name="Stabilization Overview" id="2007" flags="12884901904" default="0" value="0"/>'
         '\n\t\t\t\t</parameter>'
     )
+    host_group = (
+        '\n\t\t\t\t<parameter name="Advanced input correction" id="2100" flags="8589938704">'
+        '\n\t\t\t\t\t<parameter name="Input orientation" id="2101" flags="12889161744" default="0" value="0"/>'
+        '\n\t\t\t\t\t<parameter name="Input sizing" id="2102" flags="12889161744" default="0" value="0"/>'
+        '\n\t\t\t\t</parameter>'
+    )
     bank_parameters = [
         (1904, "Project Payload Manifest A"),
         (1905, "Project Payload Manifest B"),
@@ -75,6 +81,7 @@ def production_parameters(body: str) -> str:
         + project_control
         + hidden_fov
         + adjustment_group
+        + host_group
         + hidden_and_builtin
     )
 
@@ -115,6 +122,7 @@ def render_template() -> str:
         "\t\t<version>2</version>\n"
         '\t\t<target object="10036" channel="./1001" name=""/>\n'
         '\t\t<target object="10036" channel="./2000" name="Stabilization"/>\n'
+        '\t\t<target object="10036" channel="./2100" name="Advanced input correction"/>\n'
         "\t</publishSettings>"
     )
     rendered, count = re.subn(

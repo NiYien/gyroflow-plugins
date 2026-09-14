@@ -811,7 +811,8 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         )[0]
         render = effect.split("- (BOOL)renderDestinationImage:", 1)[1]
 
-        self.assertIn("GFFrameGeometryBuild(", render)
+        self.assertIn("GFHostImageSnapshot(", render)
+        self.assertIn("gf_finalcut_instance_render_metal_v2", render)
         self.assertNotIn("GFFrameGeometry", plugin_state)
         self.assertNotIn("geometry", (state_header + state_source).lower())
         self.assertNotIn("GFFrameGeometry", cache_header + cache_source)
@@ -840,6 +841,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
             state = json.loads(result.stdout)
             self.assertTrue(state["secureRoundTrip"])
+            self.assertTrue(state["legacyV2DefaultsToAutomatic"])
             self.assertTrue(state["sameSnapshot"])
             self.assertTrue(state["hashConflictRejected"])
             self.assertTrue(state["keyframesReusePreparedProject"])
@@ -886,8 +888,8 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertIn("projectContentHash", state_header)
         self.assertIn("schemaVersion", state_header)
         self.assertIn("GFRenderMode", state_header)
-        self.assertIn("kGFRenderStateSchema = 2", state_source)
-        self.assertIn("schema != 1", state_source)
+        self.assertIn("kGFRenderStateSchema = 3", state_source)
+        self.assertIn("schema < 1", state_source)
         self.assertIn("snapshot.state.projectDisplayName", effect)
         self.assertIn("state.schemaVersion", effect)
         self.assertNotIn('restoreValidatedRenderProjectPayloadIfEmpty:projectPayload\n                                                displayName:@""', effect)
@@ -958,7 +960,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
     def test_document_added_callback_does_not_query_unavailable_parameter_apis(self):
         effect = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
         callback = effect.split("- (void)pluginInstanceAddedToDocument", 1)[1].split(
-            "- (NSView *)createViewForParameterID:", 1
+            "- (BOOL)parameterChanged:", 1
         )[0]
 
         self.assertNotIn("restoreProjectStoreFromHostParameters", callback)

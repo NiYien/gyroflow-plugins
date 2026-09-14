@@ -103,6 +103,8 @@ int main(void) {
                                              parameters:parameters
                                            effectBounds:effectBounds
                                             inputBounds:inputBounds];
+        state = [[GFRenderState alloc] initWithState:state
+            hostOptions:(GFHostOptions){.input_orientation = 2, .sizing = 3}];
         NSError *error = nil;
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:state
                                             requiringSecureCoding:YES
@@ -264,9 +266,14 @@ int main(void) {
             [cache snapshotForPluginStateData:[@"not-an-archive"
                 dataUsingEncoding:NSUTF8StringEncoding]
                                        error:&error];
+        NSData *legacyData = [NSData dataWithContentsOfFile:@"tests/fixtures/finalcut-state-v2.archive"];
+        GFRenderState *legacyState = [NSKeyedUnarchiver unarchivedObjectOfClass:[GFRenderState class] fromData:legacyData error:&error];
         NSDictionary *result = @{
+            @"legacyV2DefaultsToAutomatic" : @(legacyState.schemaVersion == 2 && legacyState.hostOptions.input_orientation == 0 && legacyState.hostOptions.sizing == 0 && legacyState.parameters.fov == 1.25),
             @"secureRoundTrip" : @(
-                roundTrip.schemaVersion == 2 &&
+                roundTrip.schemaVersion == 3 &&
+                roundTrip.hostOptions.input_orientation == 2 &&
+                roundTrip.hostOptions.sizing == 3 &&
                 [roundTrip.projectPayload isEqualToString:@"project-payload"] &&
                 [roundTrip.projectDisplayName isEqualToString:@"A001.gyroflow"] &&
                 [roundTrip.projectContentHash isEqualToString:@"fixture-hash"] &&

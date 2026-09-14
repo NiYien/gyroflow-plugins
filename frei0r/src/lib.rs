@@ -228,7 +228,7 @@ extern "C" fn f0r_update(instance: f0r_instance_t, time: f64, inframe: *const u3
     let outframe = unsafe { std::slice::from_raw_parts_mut(outframe as *mut u8, inst.width * inst.height * 4) };
 
     let mut buffers = Buffers {
-        input: BufferDescription {
+        input: BufferDescription { sampling_transform: None,
             size: src_size,
             rect: Some(src_rect),
             data: BufferSource::Cpu { buffer: inframe },
@@ -238,7 +238,7 @@ extern "C" fn f0r_update(instance: f0r_instance_t, time: f64, inframe: *const u3
             flip_h: false,
             flip_v: false,
         },
-        output: BufferDescription {
+        output: BufferDescription { sampling_transform: None,
             size: src_size,
             rect: None,
             data: BufferSource::Cpu { buffer: outframe },

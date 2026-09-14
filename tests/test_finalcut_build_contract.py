@@ -393,6 +393,13 @@ class FinalCutIdentityAndEntitlementTests(unittest.TestCase):
                 "com.apple.security.app-sandbox": True,
                 "com.apple.security.files.bookmarks.app-scope": True,
                 "com.apple.security.files.user-selected.read-only": True,
+                "com.apple.security.temporary-exception.files.home-relative-path.read-only": [
+                    "/Library/Containers/com.apple.FinalCut/Data/Library/Preferences/com.apple.FinalCut.plist",
+                    "/Library/Containers/com.apple.FinalCutApp/Data/Library/Preferences/com.apple.FinalCutApp.plist",
+                ],
+                "com.apple.security.temporary-exception.shared-preference.read-only": [
+                    "com.apple.FinalCut", "com.apple.FinalCutApp",
+                ],
             },
         )
         self.assertNotIn("com.apple.security.application-groups", app_entitlements)

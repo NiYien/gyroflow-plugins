@@ -207,6 +207,7 @@ static GFProjectImportCandidate *GFBuildProjectImportCandidate(
 }
 
 @interface GFProjectStore ()
+@property(atomic, readwrite, copy, nullable) NSString *renderWarning;
 @property(nonatomic, copy) GFProjectImportCandidateBuilder importCandidateBuilder;
 @property(nonatomic, readwrite, nullable) NSData *currentProjectData;
 @property(nonatomic, readwrite, nullable) NSString *currentProjectPayload;
@@ -233,6 +234,11 @@ static GFProjectImportCandidate *GFBuildProjectImportCandidate(
 @end
 
 @implementation GFProjectStore
+
+- (void)recordRenderWarning:(NSString *)warning {
+    @synchronized(self) { self.renderWarning = [warning copy]; }
+}
+
 
 - (instancetype)init {
     return [self initWithImportCandidateBuilder:^GFProjectImportCandidate *(
@@ -438,6 +444,7 @@ static GFProjectImportCandidate *GFBuildProjectImportCandidate(
             self.currentProjectName = candidate.projectDisplayName;
             self.currentProjectFilename = candidate.projectDisplayName;
             self.currentProjectGeneration = self.nextProjectGeneration++;
+            self.renderWarning = nil;
             self.status = [NSString stringWithFormat:GFLocalized(
                                @"effect.status.loaded", @"Loaded %@ (%lu bytes)"),
                            self.currentProjectName,
@@ -638,6 +645,7 @@ static GFProjectImportCandidate *GFBuildProjectImportCandidate(
         self.currentProjectName = GFStoredProjectName(displayName);
         self.currentProjectFilename = GFStoredProjectFilename(displayName);
         self.currentProjectGeneration = self.nextProjectGeneration++;
+        self.renderWarning = nil;
         self.status = [NSString stringWithFormat:GFLocalized(
                            @"effect.status.ready", @"%@ ready"),
                        self.currentProjectName];
@@ -679,6 +687,7 @@ static GFProjectImportCandidate *GFBuildProjectImportCandidate(
         self.currentProjectName = GFStoredProjectName(displayName);
         self.currentProjectFilename = GFStoredProjectFilename(displayName);
         self.currentProjectGeneration = self.nextProjectGeneration++;
+        self.renderWarning = nil;
         self.status = timingPayload.length == 0
             ? [NSString stringWithFormat:GFLocalized(
                   @"effect.status.ready_direct", @"%@ ready (direct mode)"),
