@@ -252,7 +252,7 @@ fn padding_and_fractional_host_scale_are_fcp_rectangles() {
     source.pixel_to_ideal.values = [0.5, 0.0, 25.0, 0.0, 0.5, -10.0, 0.0, 0.0, 1.0];
     let mapping =
         build_mapping(source, image(128, 96), project(0), GFHostOptions::default()).unwrap();
-    assert_eq!(mapping.input_rect, (2, 2, 64, 48));
+    assert_eq!(mapping.input_rect, (2, 4, 64, 48));
     assert_eq!(mapping.output_rect, (0, 0, 128, 96));
 }
 #[test]
@@ -464,6 +464,18 @@ fn versioned_bridge_processes_half_float_at_different_source_and_output_sizes() 
 #[test]
 #[ignore = "Requires Metal; validates actual project rotation and image origins"]
 fn production_rotation_and_origins_preserve_the_displayed_image() {
+    check_production_rotation_and_origins(false);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "Requires Metal; compares moving-gyro output to a top-down CPU reference"]
+fn production_motion_matches_top_down_reference_for_rotations_and_origins() {
+    check_production_rotation_and_origins(true);
+}
+
+#[cfg(target_os = "macos")]
+fn check_production_rotation_and_origins(with_motion: bool) {
     use super::*;
     use gyroflow_plugin_base::RGBAf16;
     use gyroflow_plugin_base::gyroflow_core::lens_profile::Dimensions;
@@ -544,6 +556,18 @@ fn production_rotation_and_origins_preserve_the_displayed_image() {
                     vec![[64.0, 0.0, 28.0], [0.0, 64.0, 18.0], [0.0, 0.0, 1.0]];
                 lens.fisheye_params.distortion_coeffs = vec![0.05, 0.0, 0.0, 0.0];
             }
+            if with_motion {
+                let mut gyro = project.manager.gyro.write();
+                gyro.duration_ms = 1000.0;
+                for i in 0..1001 {
+                    let t = i as f64 / 1000.0;
+                    gyro.quaternions.insert(i * 1000,
+                        gyroflow_plugin_base::gyroflow_core::gyro_source::Quat64::from_euler_angles(
+                            0.12 * (t * 15.0).sin(),
+                            0.10 * (t * 18.0).sin(),
+                            0.08 * (t * 20.0).sin()));
+                }
+            }
             instance.state.write().unwrap().project = Some(project);
             let mut error = std::ptr::null_mut();
             let params = GFRenderParameters {
@@ -618,6 +642,60 @@ fn production_rotation_and_origins_preserve_the_displayed_image() {
             let read = |x: usize, y: usize| {
                 pixels[(if destination_origin == 0 { 95 - y } else { y }) * 96 + x]
             };
+            if with_motion {
+                let state = instance.state.read().unwrap();
+                let manager = &state.project.as_ref().unwrap().manager;
+                // The reference reads ordinary top-down, unrotated camera pixels.
+                // It does not use FCP's origin or input-rotation mapping.
+                {
+                    let mut params = manager.params.write();
+                    params.framebuffer_inverted = false;
+                    params.video_rotation = 0.0;
+                    params.output_size = (64, 48);
+                }
+                manager.init_size();
+                manager.recompute_blocking();
+                let mut raw = rgba_bytes((0..64 * 48).map(|n| {
+                    [(n % 64) as f32 / 64.0, (n / 64) as f32 / 48.0, 0.25, 1.0]
+                }));
+                let mut expected = vec![0; 96 * 96 * 16];
+                let rect = (0, 12, 96, 72);
+                let mut buffers = Buffers {
+                    input: BufferDescription { size: (64, 48, 64 * 16),
+                        data: BufferSource::Cpu { buffer: &mut raw }, ..Default::default() },
+                    output: BufferDescription { size: (96, 96, 96 * 16), rect: Some(rect),
+                        data: BufferSource::Cpu { buffer: &mut expected }, ..Default::default() },
+                };
+                let transform = manager.stabilization.read()
+                    .get_frame_transform_at::<RGBAf>(500_000, None, &buffers);
+                assert!(manager.gyro.read().smoothed_quat_at_timestamp(500.0).angle() > 0.01,
+                    "motion fixture must produce nonidentity correction");
+                assert!(Stabilization::undistort_image_cpu::<8, RGBAf>(
+                    &mut buffers, &transform.kernel_params, &DistortionModel::default(),
+                    None, &transform.matrices, &[], &[]));
+                let expected: Vec<[f32; 4]> = expected.chunks_exact(16)
+                    .map(|p| RGBAf::to_float_glam(p).to_array()).collect();
+                let mut error = 0.0f32;
+                for y in 32..64 {
+                    for x in 32..64 {
+                        let (rx, ry) = match rotation {
+                            90 => (y, 95 - x),
+                            180 => (95 - x, 95 - y),
+                            270 => (95 - y, x),
+                            _ => (x, y),
+                        };
+                        for (a, b) in read(x, y)[..2].iter().zip(&expected[ry * 96 + rx][..2]) {
+                            error += (a - b).abs();
+                        }
+                    }
+                }
+                let mean_error = error / (32 * 32 * 2) as f32;
+                // Core input rotation uses boundary coordinates, while this
+                // reference rotates texel centers. Allow the established one-pixel
+                // rotation phase plus half-float/GPU sampling error at this tiny size.
+                assert!(mean_error < 0.03,
+                    "motion direction differs from top-down reference: rotation={rotation} origins={source_origin}/{destination_origin} mean_error={mean_error}");
+            }
             if let Some(expected) = &reference {
                 let expected: &Vec<[f32; 4]> = expected;
                 for y in 32..64 {

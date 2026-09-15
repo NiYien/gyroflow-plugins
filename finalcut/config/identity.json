@@ -1,7 +1,7 @@
 {
   "app_bundle_id": "com.niyien.gyroflow.finalcut",
   "app_name": "NiYien FCP",
-  "build_version": "53",
+  "build_version": "54",
   "effect_bundle_id": "com.niyien.gyroflow.finalcut.effect",
   "effect_name": "Gyroflow NiYien",
   "effect_uuid": "ABAD71F5-23F5-46F6-AB08-C11603168AA4",

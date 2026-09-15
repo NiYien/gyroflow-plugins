@@ -690,8 +690,8 @@ fn apply_render_parameters(
     validate_render_parameters(parameters)?;
 
     let manager = &project.manager;
-    // FCP normalizes host textures before entering the existing stabilizer.
-    manager.params.write().framebuffer_inverted = true;
+    // FCP normalizes host textures to top-down rows before entering the stabilizer.
+    manager.params.write().framebuffer_inverted = false;
     manager.set_fov(parameters.fov);
     manager.set_smoothing_param("smoothness", parameters.smoothness / 100.0);
     manager.set_lens_correction_amount(parameters.lens_correction / 100.0);
@@ -2936,7 +2936,7 @@ mod tests {
         assert_eq!(core.lens_correction_amount, 0.8);
         assert_eq!(core.adaptive_zoom_window, -1.0);
         assert!(core.fov_overview);
-        assert!(core.framebuffer_inverted);
+        assert!(!core.framebuffer_inverted);
         drop(core);
         let smoothing = project.manager.smoothing.read();
         assert_eq!(smoothing.current().get_parameter("smoothness"), 0.42);

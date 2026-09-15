@@ -9,6 +9,15 @@ use std::ffi::c_void;
 type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 type Queue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 
+fn normalize_top_left(image: &mut crate::host_geometry::GFHostImageV2) {
+    // Reflect asymmetric content bounds with the rows, preserving the tile extent.
+    let sum = image.tile_rect[1] + image.tile_rect[3];
+    let bounds = image.image_rect;
+    image.image_rect[1] = sum - bounds[3];
+    image.image_rect[3] = sum - bounds[1];
+    image.origin = 2;
+}
+
 #[derive(Default)]
 pub struct MetalImages {
     device_id: u64,
@@ -162,7 +171,7 @@ impl MetalImages {
             let texture = Self::temporary(&mut self.source, &device, request.source.texture)?;
             self.flip(&queue, &source, &texture)?;
             normalized.input_texture = Retained::as_ptr(&texture) as *mut c_void;
-            normalized.source.origin = 2;
+            normalize_top_left(&mut normalized.source);
             texture
         } else {
             source
@@ -171,7 +180,7 @@ impl MetalImages {
             let texture =
                 Self::temporary(&mut self.destination, &device, request.destination.texture)?;
             normalized.output_texture = Retained::as_ptr(&texture) as *mut c_void;
-            normalized.destination.origin = 2;
+            normalize_top_left(&mut normalized.destination);
             texture
         } else {
             output.clone()
@@ -191,5 +200,24 @@ impl MetalImages {
         // Retain the source until the stabilizer and any final copy have completed.
         let _ = &frame.source;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_down_normalization_reflects_asymmetric_content_bounds_with_rows() {
+        let mut image = crate::host_geometry::GFHostImageV2 {
+            image_rect: [12.0, 24.0, 76.0, 72.0],
+            tile_rect: [10.0, 20.0, 80.0, 74.0],
+            origin: 0,
+            ..Default::default()
+        };
+        normalize_top_left(&mut image);
+        assert_eq!(image.origin, 2);
+        assert_eq!(image.image_rect, [12.0, 22.0, 76.0, 70.0]);
+        assert_eq!(image.tile_rect, [10.0, 20.0, 80.0, 74.0]);
     }
 }

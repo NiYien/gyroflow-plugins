@@ -9,6 +9,7 @@ pub struct GFHostImageV2 {
     pub tile_rect: [f64; 4],
     pub pixel_to_ideal: GFAffineTransform,
     pub texture: GFDimensionsU32,
+    /// FxPlug: bottom-left = 0, top-left = 2.
     pub origin: u32,
     pub reserved: u32,
 }
@@ -110,7 +111,7 @@ fn image_space(image: GFHostImageV2) -> Result<ImageSpace, String> {
     {
         return Err("Host pixel transform is not a valid scale and translation".into());
     }
-    let local_bounds = if image.origin == 2 {
+    let local_bounds = if image.origin == 0 {
         [
             r[0] - tile[0],
             tile[3] - r[3],
@@ -288,7 +289,7 @@ pub fn build_mapping(
         },
         output_affine,
         output_flip_v: source.origin != destination.origin,
-        framebuffer_inverted: source.origin == 2,
+        framebuffer_inverted: source.origin == 0,
         crop,
     })
 }
@@ -301,6 +302,7 @@ pub struct HostGeometryState {
     camera_matrix: Vec<[f64; 3]>,
     calibration: (usize, usize),
     applied: Option<SourceCrop>,
+    initialized: bool,
 }
 impl HostGeometryState {
     pub fn new(manager: &StabilizationManager, project: GFProjectGeometry) -> Self {
@@ -310,10 +312,11 @@ impl HostGeometryState {
             camera_matrix: lens.fisheye_params.camera_matrix.clone(),
             calibration: (lens.calib_dimension.w, lens.calib_dimension.h),
             applied: None,
+            initialized: false,
         }
     }
     pub fn apply(&mut self, manager: &StabilizationManager, crop: Option<SourceCrop>) {
-        if self.applied == crop {
+        if self.initialized && self.applied == crop {
             return;
         }
         let native = (
@@ -352,10 +355,14 @@ impl HostGeometryState {
             let mut p = manager.params.write();
             p.size = size;
             p.output_size = output;
+            // FxPlug presents the already-oriented image clockwise in top-down
+            // coordinates; the core's top-down video rotation uses the opposite sign.
+            p.video_rotation = -(self.project.video_rotation as f64);
         }
         manager.init_size();
         manager.invalidate_smoothing();
         manager.recompute_blocking();
         self.applied = crop;
+        self.initialized = true;
     }
 }
