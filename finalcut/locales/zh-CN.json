@@ -208,7 +208,7 @@
   "effect.status.no_project": "未加载项目",
   "effect.status.none_loaded": "未加载项目",
   "effect.status.ready": "%@ 已就绪",
-  "effect.status.ready_direct": "%@ 已就绪（直接模式）",
+  "effect.status.ready_direct": "%@ 已就绪（直接模式：使用未裁片头的原片；已裁剪或变速请批处理）",
   "effect.status.ready_route_d": "%@ 已就绪（Route D）",
   "effect.status.rejected": "已拒绝 %@：%@；%@",
   "effect.status.reprocess_required": "%@；当前时间设置需要重新处理项目",

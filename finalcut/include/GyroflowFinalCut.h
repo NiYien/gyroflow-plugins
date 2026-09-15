@@ -313,6 +313,8 @@ GFStatus gf_finalcut_instance_render_metal(
     GFError **out_error
 );
 void gf_finalcut_error_free(GFError *error);
+// Returns native seconds per conformed host second, or 0/0 for invalid rates.
+GFTime gf_finalcut_native_rate_scale(GFTime source_frame_duration, GFTime timeline_frame_duration);
 void gf_finalcut_owned_bytes_free(GFOwnedBytes *bytes);
 
 #ifdef __cplusplus

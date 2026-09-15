@@ -98,7 +98,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         (long long)input.duration.numerator,
         (long long)input.duration.denominator,
         (long)state.mode];
-    return [NSString stringWithFormat:@"%@|%u|%u", identity, state.hostOptions.input_orientation, state.hostOptions.sizing];
+    return [NSString stringWithFormat:@"%@|%u|%u|%lld/%lld", identity, state.hostOptions.input_orientation, state.hostOptions.sizing, (long long)state.sourceTimeScale.numerator, (long long)state.sourceTimeScale.denominator];
 }
 
 @interface GFMetalDeviceResources : NSObject
@@ -586,7 +586,18 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     if (![retrieval getIntValue:&inputOrientation fromParameter:kGFInputOrientation atTime:renderTime]) { inputOrientation = 0; }
     if (![retrieval getIntValue:&hostSizing fromParameter:kGFHostSizing atTime:renderTime]) { hostSizing = 0; }
     GFHostOptions hostOptions = {.input_orientation = (uint32_t)inputOrientation, .sizing = (uint32_t)hostSizing};
-    state = [[GFRenderState alloc] initWithState:state hostOptions:hostOptions];
+    CMTime nativeFrameDuration = kCMTimeInvalid;
+    GFTime sourceTimeScale = {.numerator = 1, .denominator = 1};
+    if (timing != nil && mode == GFRenderModeDirect) {
+        [timing frameDuration:&nativeFrameDuration];
+        GFTime timelineFrameDuration = {
+            .numerator = (int64_t)[timing timelineFpsDenominatorForEffect:self],
+            .denominator = (int64_t)[timing timelineFpsNumeratorForEffect:self],
+        };
+        sourceTimeScale = gf_finalcut_native_rate_scale(
+            GFTimeFromCMTime(nativeFrameDuration), timelineFrameDuration);
+    }
+    state = [[GFRenderState alloc] initWithState:state hostOptions:hostOptions sourceTimeScale:sourceTimeScale];
     NSString *archiveIdentity = GFRenderStateArchiveIdentity(state);
     [self.pluginStateCacheLock lock];
     NSData *archived = [self.cachedPluginStateIdentity isEqualToString:archiveIdentity]
@@ -841,6 +852,15 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     }
     if (status == GF_STATUS_OK) {
         CMTime mediaTime = [sourceImage respondsToSelector:@selector(mediaTime)] ? sourceImage.mediaTime : kCMTimeInvalid;
+        if (snapshot.state.mode == GFRenderModeDirect) {
+            // FxPlug reports the conformed source clock, including camera timecode.
+            // Direct mode covers untrimmed source clips; Route D supplies exact
+            // original-media mappings for trimmed or retimed occurrences.
+            GFTime origin = snapshot.state.inputBounds.start;
+            GFTime scale = snapshot.state.sourceTimeScale;
+            CMTime hostTime = CMTIME_IS_NUMERIC(mediaTime) ? mediaTime : renderTime;
+            mediaTime = GFDirectSourceTime(hostTime, origin, scale);
+        }
         GFMetalRenderRequestV2 request = {
             .version = 2, .struct_size = sizeof(GFMetalRenderRequestV2),
             .input_texture = (__bridge void *)sourceTexture,
@@ -851,7 +871,8 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             .destination = GFHostImageSnapshot(destinationImage, destinationTexture),
             .options = snapshot.state.hostOptions,
             .pixel_format = (uint32_t)sourceTexture.pixelFormat,
-            .source_time_valid = CMTIME_IS_NUMERIC(mediaTime) && mediaTime.timescale > 0,
+            .source_time_valid = snapshot.state.mode == GFRenderModeDirect ||
+                (CMTIME_IS_NUMERIC(mediaTime) && mediaTime.timescale > 0),
             .source_time = GFTimeFromCMTime(mediaTime),
             .render_time = GFTimeFromCMTime(renderTime),
             .effect_bounds = snapshot.state.effectBounds,

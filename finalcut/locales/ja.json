@@ -208,7 +208,7 @@
   "effect.status.no_project": "プロジェクトが読み込まれていません",
   "effect.status.none_loaded": "プロジェクトは読み込まれていません",
   "effect.status.ready": "%@ の準備ができました",
-  "effect.status.ready_direct": "%@ の準備ができました（ダイレクトモード）",
+  "effect.status.ready_direct": "%@ 準備完了（直接モード：先頭をトリムしていない素材を使用。トリム・速度変更したクリップは一括処理）",
   "effect.status.ready_route_d": "%@ の準備ができました（Route D）",
   "effect.status.rejected": "%@ を拒否しました：%@；%@",
   "effect.status.reprocess_required": "%@；現在のタイミングにはプロジェクトの再処理が必要です",

@@ -46,6 +46,8 @@ def compile_helper(
                 "PluginManager",
             ]
         )
+    if EFFECT / "GFRenderState.m" in sources:
+        command.extend(["-framework", "CoreMedia"])
     if appkit:
         command.extend(["-framework", "AppKit"])
     localized_sources = {
@@ -841,6 +843,8 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
             state = json.loads(result.stdout)
             self.assertTrue(state["secureRoundTrip"])
+            self.assertTrue(state["directClockNormalized"])
+            self.assertTrue(state["invalidClockRejected"])
             self.assertTrue(state["legacyV2DefaultsToAutomatic"])
             self.assertTrue(state["sameSnapshot"])
             self.assertTrue(state["hashConflictRejected"])
@@ -888,7 +892,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertIn("projectContentHash", state_header)
         self.assertIn("schemaVersion", state_header)
         self.assertIn("GFRenderMode", state_header)
-        self.assertIn("kGFRenderStateSchema = 3", state_source)
+        self.assertIn("kGFRenderStateSchema = 4", state_source)
         self.assertIn("schema < 1", state_source)
         self.assertIn("snapshot.state.projectDisplayName", effect)
         self.assertIn("state.schemaVersion", effect)

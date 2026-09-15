@@ -208,7 +208,7 @@
   "effect.status.no_project": "불러온 프로젝트 없음",
   "effect.status.none_loaded": "불러온 프로젝트 없음",
   "effect.status.ready": "%@ 준비됨",
-  "effect.status.ready_direct": "%@ 준비됨(직접 모드)",
+  "effect.status.ready_direct": "%@ 준비 완료 (직접 모드: 앞부분을 자르지 않은 원본 사용. 자르거나 속도를 변경한 클립은 일괄 처리)",
   "effect.status.ready_route_d": "%@ 준비됨(Route D)",
   "effect.status.rejected": "%@ 거부됨: %@; %@",
   "effect.status.reprocess_required": "%@; 현재 타이밍에는 프로젝트 재처리가 필요합니다",

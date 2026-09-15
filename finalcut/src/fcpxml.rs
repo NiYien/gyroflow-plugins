@@ -367,7 +367,10 @@ fn canonical_frame_rate_label(frame_duration: &Rational) -> Option<&'static str>
 
 /// Native seconds per conformed second, using Apple's progressive rate-conform chart.
 /// https://developer.apple.com/documentation/professional-video-applications/conform-rate
-fn native_rate_scale(source_duration: &Rational, output_duration: &Rational) -> Rational {
+pub(crate) fn native_rate_scale(
+    source_duration: &Rational,
+    output_duration: &Rational,
+) -> Rational {
     let source = canonical_frame_rate_label(source_duration);
     let output = canonical_frame_rate_label(output_duration);
     let effective_duration = match (source, output) {
@@ -737,7 +740,7 @@ fn smooth2_mapping(
         .numer()
         .to_usize()
         .ok_or_else(|| RouteDError::new("smooth2 output-frame count exceeds capacity"))?;
-    let big_asset_start = rational_to_big(asset_start);
+    let big_asset_start = rational_to_big(&(asset_start / conform_scale));
     let big_source_frame_duration = rational_to_big(&source_frame_duration);
     let mut mapping = Vec::with_capacity(frame_count + 1);
     let mut segment_index = 0usize;
@@ -893,7 +896,8 @@ fn resolve_clip(
     let asset = resource_by_id(document, "asset", asset_ref)?;
     let conform_scale = conform_rate_scale(document, clip, asset)?;
     let asset_start = optional_time(asset, "start")?;
-    let clip_start = required_time(clip, "start")?;
+    // FCP omits a zero start on ordinary media clips.
+    let clip_start = optional_time(clip, "start")?;
     let clip_duration = required_time(clip, "duration")?;
     if clip_duration <= Ratio::from_integer(0) {
         return Err(RouteDError::new("asset-clip duration must be positive"));
@@ -970,8 +974,8 @@ fn resolve_clip(
                 .iter()
                 .map(|point| {
                     let local = required_time(*point, "time")? - clip_start.clone();
-                    let source = (required_time(*point, "value")? - asset_start.clone())
-                        * conform_scale.clone();
+                    let source = required_time(*point, "value")? * conform_scale.clone()
+                        - asset_start.clone();
                     Ok(MappingPoint {
                         local: rational_string(&local),
                         source: rational_string(&source),
@@ -1014,7 +1018,7 @@ fn resolve_clip(
         }
         points
     } else {
-        let source_start = (clip_start.clone() - asset_start.clone()) * conform_scale.clone();
+        let source_start = clip_start.clone() * conform_scale.clone() - asset_start.clone();
         vec![
             MappingPoint {
                 local: "0/1".to_string(),

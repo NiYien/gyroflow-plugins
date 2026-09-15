@@ -211,7 +211,7 @@
   "effect.status.no_project": "No project loaded",
   "effect.status.none_loaded": "no project loaded",
   "effect.status.ready": "%@ ready",
-  "effect.status.ready_direct": "%@ ready (direct mode)",
+  "effect.status.ready_direct": "%@ ready (direct mode: use an untrimmed source; batch-process trimmed or retimed clips)",
   "effect.status.ready_route_d": "%@ ready (Route D)",
   "effect.status.rejected": "Rejected %@: %@; %@",
   "effect.status.reprocess_required": "%@; Reprocess Project Required for current timing",

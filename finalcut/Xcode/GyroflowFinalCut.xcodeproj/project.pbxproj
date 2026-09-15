@@ -219,7 +219,7 @@
             buildSettings = {
                 CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
                 CODE_SIGN_STYLE = Manual;
-                CURRENT_PROJECT_VERSION = 50;
+                CURRENT_PROJECT_VERSION = 53;
                 DEVELOPMENT_TEAM = H59FJRN2AM;
                 ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
                 ENABLE_HARDENED_RUNTIME = YES;
@@ -242,7 +242,7 @@
             buildSettings = {
                 CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
                 CODE_SIGN_STYLE = Manual;
-                CURRENT_PROJECT_VERSION = 50;
+                CURRENT_PROJECT_VERSION = 53;
                 DEVELOPMENT_TEAM = H59FJRN2AM;
                 ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
                 ENABLE_HARDENED_RUNTIME = YES;
@@ -266,7 +266,7 @@
                 CODE_SIGN_ENTITLEMENTS = Effect/Effect.entitlements;
                 CODE_SIGN_STYLE = Manual;
                 CLANG_ENABLE_OBJC_ARC = YES;
-                CURRENT_PROJECT_VERSION = 50;
+                CURRENT_PROJECT_VERSION = 53;
                 DEVELOPMENT_TEAM = H59FJRN2AM;
                 ENABLE_HARDENED_RUNTIME = YES;
                 EXECUTABLE_PREFIX = "";
@@ -291,7 +291,7 @@
                 CODE_SIGN_ENTITLEMENTS = Effect/Effect.entitlements;
                 CODE_SIGN_STYLE = Manual;
                 CLANG_ENABLE_OBJC_ARC = YES;
-                CURRENT_PROJECT_VERSION = 50;
+                CURRENT_PROJECT_VERSION = 53;
                 DEVELOPMENT_TEAM = H59FJRN2AM;
                 ENABLE_HARDENED_RUNTIME = YES;
                 EXECUTABLE_PREFIX = "";

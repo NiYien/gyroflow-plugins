@@ -758,6 +758,29 @@ fn time_from_ratio(value: &Ratio<i128>) -> Result<GFTime, String> {
     })
 }
 
+/// Native seconds per conformed host second. Invalid rates return 0/0.
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_finalcut_native_rate_scale(source: GFTime, timeline: GFTime) -> GFTime {
+    std::panic::catch_unwind(|| {
+        let source = ratio_from_time(source).ok()?;
+        let timeline = ratio_from_time(timeline).ok()?;
+        if source <= Ratio::from_integer(0)
+            || source > Ratio::from_integer(1)
+            || timeline <= Ratio::from_integer(0)
+            || timeline > Ratio::from_integer(1)
+        {
+            return None;
+        }
+        time_from_ratio(&fcpxml::native_rate_scale(&source, &timeline)).ok()
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(GFTime {
+        numerator: 0,
+        denominator: 0,
+    })
+}
+
 fn ratio_string(value: &Ratio<i128>) -> String {
     format!("{}/{}", value.numer(), value.denom())
 }
@@ -3555,6 +3578,57 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
 #[cfg(test)]
 mod host_time_tests {
     use super::*;
+    #[test]
+    fn host_rate_scale_ffi_preserves_exact_rates_and_rejects_invalid_metadata() {
+        let scale = gf_finalcut_native_rate_scale(
+            GFTime {
+                numerator: 1001,
+                denominator: 60000,
+            },
+            GFTime {
+                numerator: 1,
+                denominator: 30,
+            },
+        );
+        assert_eq!((scale.numerator, scale.denominator), (1001, 1000));
+        let unchanged = gf_finalcut_native_rate_scale(
+            GFTime {
+                numerator: 1,
+                denominator: 60,
+            },
+            GFTime {
+                numerator: 1,
+                denominator: 24,
+            },
+        );
+        assert_eq!((unchanged.numerator, unchanged.denominator), (1, 1));
+        for invalid in [
+            GFTime {
+                numerator: 1,
+                denominator: 0,
+            },
+            GFTime {
+                numerator: 0,
+                denominator: 1,
+            },
+            GFTime {
+                numerator: -1,
+                denominator: 30,
+            },
+        ] {
+            assert_eq!(
+                gf_finalcut_native_rate_scale(
+                    invalid,
+                    GFTime {
+                        numerator: 1,
+                        denominator: 30
+                    }
+                )
+                .denominator,
+                0
+            );
+        }
+    }
     fn request() -> GFMetalRenderRequestV2 {
         // All fields are scalar C ABI values; zero is a valid representation.
         let mut r: GFMetalRenderRequestV2 = unsafe { std::mem::zeroed() };

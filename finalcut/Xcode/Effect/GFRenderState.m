@@ -1,7 +1,18 @@
 #import "GFRenderState.h"
 #import <CommonCrypto/CommonDigest.h>
 
-static const NSInteger kGFRenderStateSchema = 3;
+static const NSInteger kGFRenderStateSchema = 4;
+
+CMTime GFDirectSourceTime(CMTime hostTime, GFTime origin, GFTime scale) {
+    if (!CMTIME_IS_NUMERIC(hostTime) || origin.denominator <= 0 || origin.denominator > INT32_MAX ||
+        scale.numerator <= 0 || scale.numerator > INT32_MAX ||
+        scale.denominator <= 0 || scale.denominator > INT32_MAX) {
+        return kCMTimeInvalid;
+    }
+    return CMTimeMultiplyByRatio(
+        CMTimeSubtract(hostTime, CMTimeMake(origin.numerator, (int32_t)origin.denominator)),
+        (int32_t)scale.numerator, (int32_t)scale.denominator);
+}
 
 static NSString *GFRenderStatePayloadHash(NSString *payload) {
     NSData *data = [payload dataUsingEncoding:NSASCIIStringEncoding] ?: [NSData data];
@@ -23,6 +34,7 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
 @property(nonatomic, readwrite) GFRenderMode mode;
 @property(nonatomic, readwrite) GFRenderParameters parameters;
 @property(nonatomic, readwrite) GFHostOptions hostOptions;
+@property(nonatomic, readwrite) GFTime sourceTimeScale;
 @property(nonatomic, readwrite) GFTimeRange effectBounds;
 @property(nonatomic, readwrite) GFTimeRange inputBounds;
 @end
@@ -72,11 +84,16 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
         self.parameters = parameters;
         self.effectBounds = effectBounds;
         self.inputBounds = inputBounds;
+        self.sourceTimeScale = (GFTime){.numerator = 1, .denominator = 1};
     }
     return self;
 }
 
 - (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options {
+    return [self initWithState:state hostOptions:options sourceTimeScale:state.sourceTimeScale];
+}
+
+- (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options sourceTimeScale:(GFTime)scale {
     self = [self initWithProjectPayload:state.projectPayload
                     projectDisplayName:state.projectDisplayName
                     projectContentHash:state.projectContentHash
@@ -85,7 +102,10 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
                             parameters:state.parameters
                           effectBounds:state.effectBounds
                            inputBounds:state.inputBounds];
-    if (self != nil) { self.hostOptions = options; }
+    if (self != nil) {
+        self.hostOptions = options;
+        self.sourceTimeScale = scale;
+    }
     return self;
 }
 
@@ -160,10 +180,19 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
     };
     if (options.input_orientation > 4 || options.sizing > 3) { return nil; }
     state.hostOptions = options;
+    GFTime scale = {
+        .numerator = schema >= 4 ? [coder decodeInt64ForKey:@"sourceTimeScaleNumerator"] : 1,
+        .denominator = schema >= 4 ? [coder decodeInt64ForKey:@"sourceTimeScaleDenominator"] : 1,
+    };
+    if (scale.numerator <= 0 || scale.numerator > INT32_MAX ||
+        scale.denominator <= 0 || scale.denominator > INT32_MAX) { return nil; }
+    state.sourceTimeScale = scale;
     return state;
 }
 
 - (void)encodeWithCoder:(NSCoder *)coder {
+    [coder encodeInt64:self.sourceTimeScale.numerator forKey:@"sourceTimeScaleNumerator"];
+    [coder encodeInt64:self.sourceTimeScale.denominator forKey:@"sourceTimeScaleDenominator"];
     [coder encodeInt32:self.hostOptions.input_orientation forKey:@"inputOrientation"];
     [coder encodeInt32:self.hostOptions.sizing forKey:@"hostSizing"];
     [coder encodeInteger:kGFRenderStateSchema forKey:@"schema"];

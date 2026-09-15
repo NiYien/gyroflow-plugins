@@ -9576,37 +9576,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ ready (direct mode)"
+            "value": "%@ ready (direct mode: use an untrimmed source; batch-process trimmed or retimed clips)"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ の準備ができました（ダイレクトモード）"
+            "value": "%@ 準備完了（直接モード：先頭をトリムしていない素材を使用。トリム・速度変更したクリップは一括処理）"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 준비됨(직접 모드)"
+            "value": "%@ 준비 완료 (직접 모드: 앞부분을 자르지 않은 원본 사용. 자르거나 속도를 변경한 클립은 일괄 처리)"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ готов (прямой режим)"
+            "value": "%@ готов (прямой режим: исходный клип без обрезки начала; для обрезки и изменения скорости используйте пакетную обработку)"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 已就绪（直接模式）"
+            "value": "%@ 已就绪（直接模式：使用未裁片头的原片；已裁剪或变速请批处理）"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ 已就緒（直接模式）"
+            "value": "%@ 已就緒（直接模式：使用未裁片頭的原片；已裁剪或變速請批次處理）"
           }
         }
       }

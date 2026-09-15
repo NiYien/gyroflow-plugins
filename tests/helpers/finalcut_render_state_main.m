@@ -104,7 +104,8 @@ int main(void) {
                                            effectBounds:effectBounds
                                             inputBounds:inputBounds];
         state = [[GFRenderState alloc] initWithState:state
-            hostOptions:(GFHostOptions){.input_orientation = 2, .sizing = 3}];
+            hostOptions:(GFHostOptions){.input_orientation = 2, .sizing = 3}
+            sourceTimeScale:(GFTime){.numerator = 1001, .denominator = 1000}];
         NSError *error = nil;
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:state
                                             requiringSecureCoding:YES
@@ -268,10 +269,20 @@ int main(void) {
                                        error:&error];
         NSData *legacyData = [NSData dataWithContentsOfFile:@"tests/fixtures/finalcut-state-v2.archive"];
         GFRenderState *legacyState = [NSKeyedUnarchiver unarchivedObjectOfClass:[GFRenderState class] fromData:legacyData error:&error];
+        CMTime normalized = GFDirectSourceTime(CMTimeMake(185845, 3),
+            (GFTime){.numerator = 61946, .denominator = 1},
+            (GFTime){.numerator = 1001, .denominator = 1000});
+        CMTime invalidClock = GFDirectSourceTime(kCMTimeInvalid,
+            (GFTime){.numerator = 0, .denominator = 1},
+            (GFTime){.numerator = 1, .denominator = 1});
         NSDictionary *result = @{
-            @"legacyV2DefaultsToAutomatic" : @(legacyState.schemaVersion == 2 && legacyState.hostOptions.input_orientation == 0 && legacyState.hostOptions.sizing == 0 && legacyState.parameters.fov == 1.25),
+            @"directClockNormalized" : @(CMTimeCompare(normalized, CMTimeMake(7007, 3000)) == 0),
+            @"invalidClockRejected" : @(!CMTIME_IS_VALID(invalidClock)),
+            @"legacyV2DefaultsToAutomatic" : @(legacyState.schemaVersion == 2 && legacyState.hostOptions.input_orientation == 0 && legacyState.hostOptions.sizing == 0 && legacyState.parameters.fov == 1.25 && legacyState.sourceTimeScale.numerator == 1 && legacyState.sourceTimeScale.denominator == 1),
             @"secureRoundTrip" : @(
-                roundTrip.schemaVersion == 3 &&
+                roundTrip.schemaVersion == 4 &&
+                roundTrip.sourceTimeScale.numerator == 1001 &&
+                roundTrip.sourceTimeScale.denominator == 1000 &&
                 roundTrip.hostOptions.input_orientation == 2 &&
                 roundTrip.hostOptions.sizing == 3 &&
                 [roundTrip.projectPayload isEqualToString:@"project-payload"] &&

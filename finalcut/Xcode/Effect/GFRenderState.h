@@ -1,7 +1,10 @@
 #import "GyroflowFinalCut.h"
 #import <Foundation/Foundation.h>
+#import <CoreMedia/CoreMedia.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+CMTime GFDirectSourceTime(CMTime hostTime, GFTime sourceOrigin, GFTime sourceTimeScale);
 
 typedef NS_ENUM(NSInteger, GFRenderMode) {
     GFRenderModeEmpty = 0,
@@ -20,6 +23,7 @@ typedef NS_ENUM(NSInteger, GFRenderMode) {
 @property(nonatomic, readonly) GFRenderMode mode;
 @property(nonatomic, readonly) GFRenderParameters parameters;
 @property(nonatomic, readonly) GFHostOptions hostOptions;
+@property(nonatomic, readonly) GFTime sourceTimeScale;
 @property(nonatomic, readonly) GFTimeRange effectBounds;
 @property(nonatomic, readonly) GFTimeRange inputBounds;
 
@@ -38,6 +42,7 @@ typedef NS_ENUM(NSInteger, GFRenderMode) {
                           effectBounds:(GFTimeRange)effectBounds
                            inputBounds:(GFTimeRange)inputBounds NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options;
+- (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options sourceTimeScale:(GFTime)scale;
 - (instancetype)init NS_UNAVAILABLE;
 
 @end

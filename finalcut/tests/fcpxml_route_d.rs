@@ -717,6 +717,11 @@ fn exact_sibling_binds_from_media_directory_when_project_media_path_differs() {
 
     let patched = patch_fcpxml_project_batch(input.as_bytes()).unwrap();
     assert_eq!(patched.updated_project_count, 1);
+
+    let omitted_zero_start = input.replace(" start=\"0s\"", "");
+    let omitted = patch_fcpxml_project_batch(omitted_zero_start.as_bytes()).unwrap();
+    assert_eq!(omitted.updated_project_count, 1);
+    assert_eq!(omitted.skipped_count, 0);
     assert_eq!(patched.skipped_count, 0);
     assert_eq!(
         selected_banked_payloads(&patched.xml, "fx"),
@@ -1511,6 +1516,35 @@ fn batch_accepts_conform_rate_without_interpreting_it_as_frame_by_frame_slow_mot
     let json: serde_json::Value =
         serde_json::from_slice(&STANDARD.decode(encoded).unwrap()).unwrap();
     assert_eq!(json["mapping"][1]["source"], "1002001/20000000");
+    // FCP stores the asset origin in native time but clip values in conformed time.
+    let absolute = different_output_rate
+        .replace(
+            "start=\"0s\" duration=\"1001/10000s\"",
+            "start=\"36036s\" duration=\"10s\"",
+        )
+        .replace(
+            "start=\"0s\" duration=\"1001/20000s\"",
+            "start=\"36002s\" duration=\"1s\"",
+        );
+    let patched_absolute = patch_fcpxml_project_batch(absolute.as_bytes()).unwrap();
+    let absolute_timing: serde_json::Value = serde_json::from_slice(
+        &STANDARD
+            .decode(encoded_timing_payloads(&patched_absolute.xml).remove(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(absolute_timing["mapping"][0]["source"], "1001/500");
+    assert_eq!(absolute_timing["mapping"][1]["source"], "3003/1000");
+    let linear = absolute.replace("<conform-rate", "<timeMap><timept time=\"36002s\" value=\"36002s\" interp=\"linear\"/><timept time=\"36003s\" value=\"36004s\" interp=\"linear\"/></timeMap><conform-rate");
+    let patched_linear = patch_fcpxml_project_batch(linear.as_bytes()).unwrap();
+    let linear_timing: serde_json::Value = serde_json::from_slice(
+        &STANDARD
+            .decode(encoded_timing_payloads(&patched_linear.xml).remove(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(linear_timing["mapping"][0]["source"], "1001/500");
+    assert_eq!(linear_timing["mapping"][1]["source"], "1001/250");
     let disabled = different_output_rate.replace(
         "srcFrameRate=\"59.94\"",
         "srcFrameRate=\"59.94\" scaleEnabled=\"0\"",

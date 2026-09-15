@@ -217,7 +217,7 @@
   "effect.status.no_project": "Проект не загружен",
   "effect.status.none_loaded": "проект не загружен",
   "effect.status.ready": "%@ готов",
-  "effect.status.ready_direct": "%@ готов (прямой режим)",
+  "effect.status.ready_direct": "%@ готов (прямой режим: исходный клип без обрезки начала; для обрезки и изменения скорости используйте пакетную обработку)",
   "effect.status.ready_route_d": "%@ готов (Route D)",
   "effect.status.rejected": "Отклонён %@: %@; %@",
   "effect.status.reprocess_required": "%@; для текущего тайминга требуется повторная обработка проекта",
