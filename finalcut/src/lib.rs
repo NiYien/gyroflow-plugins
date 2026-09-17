@@ -2485,6 +2485,25 @@ pub unsafe extern "C" fn gf_finalcut_instance_resolve_source_time(
     }
 }
 
+fn metal_buffer_source(
+    texture: *mut c_void,
+    command_queue: *mut c_void,
+) -> Result<BufferSource<'static>, PayloadError> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(BufferSource::Metal { texture, command_queue })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Keep the host geometry and timing APIs testable without a Metal backend.
+        let _ = (texture, command_queue);
+        Err(PayloadError {
+            status: GFStatus::RenderFailed,
+            message: "Final Cut Metal rendering requires macOS".into(),
+        })
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
     instance: *mut GFFinalCutInstance,
@@ -2569,10 +2588,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
                 ),
                 rect: mapped_geometry.input.rect,
                 rotation: mapped_geometry.input.rotation,
-                data: BufferSource::Metal {
-                    texture: request.input_texture,
-                    command_queue: request.command_queue,
-                },
+                data: metal_buffer_source(request.input_texture, request.command_queue)?,
                 ..Default::default()
             },
             output: BufferDescription {
@@ -2584,10 +2600,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal(
                 rect: mapped_geometry.output.rect,
                 rotation: mapped_geometry.output.rotation,
                 post_affine: mapped_geometry.output.post_affine,
-                data: BufferSource::Metal {
-                    texture: request.output_texture,
-                    command_queue: request.command_queue,
-                },
+                data: metal_buffer_source(request.output_texture, request.command_queue)?,
                 ..Default::default()
             },
         };
@@ -2821,6 +2834,26 @@ pub unsafe extern "C" fn gf_finalcut_owned_bytes_free(bytes: *mut GFOwnedBytes) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_cut_import_preserves_old_and_new_embedded_lens_formats() {
+        for (data, focal) in [
+            (include_bytes!("../../common/tests/fixtures/embedded-gyro-scalar.gyroflow").as_slice(), (500.0, 500.0)),
+            (include_bytes!("../../common/tests/fixtures/embedded-gyro-dual-axis.gyroflow").as_slice(), (500.0, 550.0)),
+        ] {
+            let project = parse_project(data).unwrap();
+            let gyro = project.manager.gyro.read();
+            let metadata = gyro.file_metadata.read();
+            assert_eq!(metadata.raw_imu.len(), 65);
+            assert_eq!(metadata.raw_imu.first().unwrap().timestamp_ms, 0.0);
+            assert_eq!(metadata.raw_imu.last().unwrap().timestamp_ms, 640.0);
+            assert_eq!(metadata.lens_params[&0].pixel_focal_length, Some(focal));
+            assert_eq!(gyro.get_offsets().get(&200_000), Some(&-100.0));
+            assert_eq!(gyro.quaternions.len(), 65);
+            assert!(gyro.file_url.is_empty());
+            assert!(project.manager.input_file.read().url.is_empty());
+        }
+    }
 
     #[test]
     fn final_cut_project_parser_denies_external_video_and_gyro_io() {
@@ -3525,10 +3558,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                 ),
                 rect: Some(mapping.input_rect),
                 rotation: Some(mapping.input_rotation),
-                data: BufferSource::Metal {
-                    texture: request.input_texture,
-                    command_queue: request.command_queue,
-                },
+                data: metal_buffer_source(request.input_texture, request.command_queue)?,
                 ..Default::default()
             },
             output: BufferDescription {
@@ -3540,10 +3570,7 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
                 rect: Some(mapping.output_rect),
                 post_affine: mapping.output_affine,
                 flip_v: mapping.output_flip_v,
-                data: BufferSource::Metal {
-                    texture: request.output_texture,
-                    command_queue: request.command_queue,
-                },
+                data: metal_buffer_source(request.output_texture, request.command_queue)?,
                 ..Default::default()
             },
         };

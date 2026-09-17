@@ -194,8 +194,16 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       PYTHONPATH: scripts
+      NIYIEN_LENS_DATA_TAG: data-v20260830.1
     steps:
       - uses: actions/checkout@v4
+      - name: Install Rust for host compatibility tests
+        uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: finalcut-macos-26-rust-1.95.0
+      - name: Check project compatibility and Final Cut host adaptation
+        run: cargo test --locked -p gyroflow-plugin-base -p gyroflow-finalcut --no-default-features
       - name: Check branding, SDK, signing and delivery contracts
         run: python3 -m unittest discover -s tests -p test_finalcut_distribution_contract.py
       - name: Check compilation and release stage boundaries

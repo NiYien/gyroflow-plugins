@@ -2349,6 +2349,7 @@ impl ToString for Params {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    mod project_compat;
 
     // --- imported project trim isolation (plugins-ignore-project-trim) ---
 
@@ -3155,8 +3156,8 @@ mod tests {
     fn snapshot_dynamic_lens_related_mutation_routes_to_smoothing() {
         let stab = manager_for_snapshot_stretch((1.0, 1.0));
         stab.gyro.write().file_metadata.write().lens_params = BTreeMap::from([
-            (0, gyroflow_core::gyro_source::LensParams { pixel_focal_length: Some(3500.0), ..Default::default() }),
-            (100_000, gyroflow_core::gyro_source::LensParams { pixel_focal_length: Some(3600.0), ..Default::default() }),
+            (0, gyroflow_core::gyro_source::LensParams { pixel_focal_length: Some((3500.0, 3500.0)), ..Default::default() }),
+            (100_000, gyroflow_core::gyro_source::LensParams { pixel_focal_length: Some((3600.0, 3600.0)), ..Default::default() }),
         ]);
         let pre = snapshot_compute_inputs(&stab);
 

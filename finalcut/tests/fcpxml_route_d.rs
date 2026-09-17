@@ -201,7 +201,7 @@ fn run_route_d_output_verifier(
         .parent()
         .unwrap()
         .join("scripts/verify_finalcut_route_d_output.py");
-    let mut command = std::process::Command::new("python3");
+    let mut command = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" });
     command
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(script)
@@ -781,6 +781,7 @@ fn exact_sibling_path_uses_media_parent_plus_full_stem() {
 }
 
 #[test]
+#[cfg(unix)]
 fn media_roots_gate_every_exact_sibling_open_and_reject_symlink_escapes() {
     use std::os::unix::fs::symlink;
 
@@ -999,11 +1000,12 @@ fn batch_updates_existing_effects_only_and_preserves_project_identity() {
 
 #[test]
 fn project_snapshot_abi_updates_without_opening_the_filesystem() {
-    let project_path = "/Media/A.gyroflow";
+    let project_path = if cfg!(windows) { "C:/Media/A.gyroflow" } else { "/Media/A.gyroflow" };
     let project = include_bytes!("fixtures/phase0-valid.gyroflow");
-    let assets = "<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file:///Media/A.mov\"/></asset>";
+    let media = url::Url::from_file_path(std::path::Path::new(project_path).with_extension("mov")).unwrap();
+    let assets = format!("<asset id=\"a\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"{media}\"/></asset>");
     let clips = "<asset-clip name=\"A\" ref=\"a\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>";
-    let input = exact_sibling_batch_input(assets, clips);
+    let input = exact_sibling_batch_input(&assets, clips);
     let project_input = GFRouteDProjectInput {
         path_bytes: project_path.as_ptr(),
         path_len: project_path.len(),
@@ -1976,9 +1978,11 @@ fn batch_all_skipped_returns_no_updateable_targets() {
 
 #[test]
 fn project_snapshot_batch_reports_all_skipped_targets_without_output_changes() {
-    let assets = "<asset id=\"missing\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"file:///Media/Missing.mov\"/></asset>";
+    let media_path = if cfg!(windows) { "C:/Media/Missing.mov" } else { "/Media/Missing.mov" };
+    let media = url::Url::from_file_path(media_path).unwrap();
+    let assets = format!("<asset id=\"missing\" start=\"0s\" duration=\"1s\" format=\"r1\"><media-rep kind=\"original-media\" src=\"{media}\"/></asset>");
     let input = exact_sibling_batch_input(
-        assets,
+        &assets,
         "<asset-clip name=\"Missing\" ref=\"missing\" offset=\"0s\" start=\"0s\" duration=\"1s\"><filter-video ref=\"fx\"/></asset-clip>",
     );
     let reader = |_path: &std::path::Path| {

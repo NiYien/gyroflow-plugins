@@ -1,0 +1,61 @@
+{
+  "title": "Synthetic embedded gyro compatibility fixture",
+  "version": 4,
+  "videofile": "fixture.mp4",
+  "video_info": {
+    "width": 640,
+    "height": 360,
+    "fps": 30.0,
+    "num_frames": 15,
+    "duration_ms": 500.0
+  },
+  "calibration_data": {
+    "calib_dimension": {
+      "w": 640,
+      "h": 360
+    },
+    "orig_dimension": {
+      "w": 640,
+      "h": 360
+    },
+    "fisheye_params": {
+      "camera_matrix": [
+        [
+          500.0,
+          0.0,
+          320.0
+        ],
+        [
+          0.0,
+          550.0,
+          180.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion_coeffs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "gyro_source": {
+    "filepath": "recording.bin",
+    "imu_orientation": "XYZ",
+    "integration_method": 2,
+    "file_metadata": "q:~Ptrc$1I0I\"]}Clxr//IZLP/g\"([NF1Ibfc6wwcOpTCa`0r,|PN0`cFQ:|fm#C&ykfx(kGbfvMFZCy]K/I]o=0oAWx>8:x/SG5O&IU//mzA1#Z_O6Boltx]a6re[nMET>83s.&k*CM4;xP%Y.[7$LpaxQOhoT+At=y?Cz9*C0Q]_Pn7p>xfDP0L/vw5qn{3>w3U*t{Y+]T?[f$*_Ipm|8T>&sT=sivmW*2n(&X8$9NVL(;js~m#~9Et&mT>~AER8E!Zp?DR8()20[\"1H~uIe6H$8C$vjsbvj,K&8^d+!%([fGVF0fCic+w~WEPF$ca$WEP,0;!94+S\"u208CQP)DgeIW$8C!wBC.wjHKhei1+!zFY8=Y24+S?BR8Nsjf)(Rn#iUOSbg4+S3GgeYlwj.Xbc6Uxp$(2|+!vRtrdKIFR8<FjfsjPOmfY8U^%47j[gnn@e+!dH3M=aDER8iVjf[0E,ESmy4c:ER8AW$8Q>D,Z(:{ltXENSU9%D:dfQLo1K8_%dA[s\"Z&ty[cBWVGL&1R&*EYTMLRP&X*5N&?|)(7O.bHI5;k*4iw(q.<nE&iS}RMw~Z(yyuk1#,1e8X~i9,N(>puNm;=B\"M{eA7^r/#"
+  },
+  "stabilization": {
+    "fov": 1.0,
+    "method": "Default",
+    "adaptive_zoom_window": 1.0
+  },
+  "offsets": {
+    "200000": -100.0
+  }
+}
