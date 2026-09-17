@@ -68,6 +68,10 @@ jobs:
           just install-deps
           just deploy
 
+      - name: Check macOS signing retries
+        if: ${{ matrix.targets.type == 'macos' }}
+        run: python3 -m unittest discover -s tests -p test_codesign_with_retry.py
+
       - name: Build plugins (macOS)
         if: ${{ matrix.targets.type == 'macos' }}
         env:

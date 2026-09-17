@@ -67,10 +67,10 @@ deploy:
     /usr/libexec/PlistBuddy -c "add CFBundleVersion string $version_short" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/Info.plist
     /usr/libexec/PlistBuddy -c "add CFBundleShortVersionString string $version" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/Info.plist
 
-    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.dylib
+    python3 "{{justfile_directory()}}/../scripts/codesign_with_retry.py" -vvvv --strict --options=runtime --timestamp --force -s "${SIGNING_FINGERPRINT}" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.dylib
     mv gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.dylib gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.ofx
 
-    codesign -vvvv --deep --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle
+    python3 "{{justfile_directory()}}/../scripts/codesign_with_retry.py" -vvvv --deep --strict --options=runtime --timestamp --force -s "${SIGNING_FINGERPRINT}" gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle
     codesign -vvvv --deep --verify gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle
 
     pushd gyroflow-niyien-ofx-macos
@@ -80,7 +80,7 @@ deploy:
     ln -sf /Library/OFX/Plugins "gyroflow-niyien-ofx-macos/"
     hdiutil create "GyroflowNiyien-OpenFX-macos.dmg" -volname "Gyroflow(Niyien) OpenFX plugin" -fs HFS+ -srcfolder "gyroflow-niyien-ofx-macos/" -ov -format UDZO -imagekey zlib-level=9
 
-    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} "GyroflowNiyien-OpenFX-macos.dmg"
+    python3 "{{justfile_directory()}}/../scripts/codesign_with_retry.py" -vvvv --strict --options=runtime --timestamp --force -s "${SIGNING_FINGERPRINT}" "GyroflowNiyien-OpenFX-macos.dmg"
     codesign -vvvv --deep --verify "GyroflowNiyien-OpenFX-macos.dmg"
 
 [linux]

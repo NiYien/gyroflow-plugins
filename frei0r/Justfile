@@ -24,7 +24,7 @@ deploy:
     cd "{{TargetDir}}"
 
     lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_frei0r.dylib -create -output libgyroflow_niyien_frei0r.dylib
-    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} libgyroflow_niyien_frei0r.dylib
+    python3 "{{justfile_directory()}}/../scripts/codesign_with_retry.py" -vvvv --strict --options=runtime --timestamp --force -s "${SIGNING_FINGERPRINT}" libgyroflow_niyien_frei0r.dylib
 
 [linux]
 deploy:

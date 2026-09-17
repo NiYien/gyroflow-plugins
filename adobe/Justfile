@@ -68,7 +68,7 @@ deploy:
     lipo {x86_64,aarch64}-apple-darwin/deploy/libgyroflow_adobe.dylib -create -output gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS/GyroflowNiyien.dylib
     mv gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS/GyroflowNiyien.dylib gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS/GyroflowNiyien
 
-    codesign -vvvv --deep --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin
+    python3 "{{justfile_directory()}}/../scripts/codesign_with_retry.py" -vvvv --deep --strict --options=runtime --timestamp --force -s "${SIGNING_FINGERPRINT}" gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin
     codesign -vvvv --deep --verify gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin
 
     pushd gyroflow-niyien-adobe-macos
@@ -78,7 +78,7 @@ deploy:
     ln -sf "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/" "gyroflow-niyien-adobe-macos/"
     hdiutil create "GyroflowNiyien-Adobe-macos.dmg" -volname "Gyroflow(Niyien) Adobe plugin" -fs HFS+ -srcfolder "gyroflow-niyien-adobe-macos/" -ov -format UDZO -imagekey zlib-level=9
 
-    codesign -vvvv --strict --options=runtime --timestamp --force -s ${SIGNING_FINGERPRINT} "GyroflowNiyien-Adobe-macos.dmg"
+    python3 "{{justfile_directory()}}/../scripts/codesign_with_retry.py" -vvvv --strict --options=runtime --timestamp --force -s "${SIGNING_FINGERPRINT}" "GyroflowNiyien-Adobe-macos.dmg"
     codesign -vvvv --deep --verify "GyroflowNiyien-Adobe-macos.dmg"
 
 [linux]
