@@ -1309,11 +1309,18 @@ impl GyroflowPluginBaseInstance {
         if !*disable_stretch {
             return Ok(false);
         }
-        let has_lens_positions = {
+        let (has_lens_positions, has_fixed_lens_metadata) = {
             let gyro = stab.gyro.read();
-            !gyro.file_metadata.read().lens_positions.is_empty()
+            let metadata = gyro.file_metadata.read();
+            (
+                !metadata.lens_positions.is_empty(),
+                metadata.lens_positions.len() == 1 && metadata.lens_params.len() <= 1,
+            )
         };
-        if has_lens_positions {
+        // A fixed focal-length tag alone does not select an interpolated calibration.
+        // Keep the existing guard for multiple samples or any interpolation configuration.
+        let can_bake_fixed_lens = has_fixed_lens_metadata && stab.lens.read().interpolations.is_none();
+        if has_lens_positions && !can_bake_fixed_lens {
             *disable_stretch = false;
             params.set_bool(Params::DisableStretch, false)?;
             log::warn!(target: "stab.load", "DisableStretch ignored: lens_positions requires timestamp-selected stretch");
@@ -3196,6 +3203,135 @@ mod tests {
             post_mutation_invalidation(&pre, &zoom_mode_only),
             Some(PostMutationInvalidation::Zoom),
         );
+    }
+
+    #[test]
+    fn static_lens_position_allows_requested_stretch_bake() {
+        for adjust_size in [true, false] {
+            for stretch in [(1.5, 1.0), (1.0, 1.5), (1.0, 1.0)] {
+                let stab = manager_for_snapshot_stretch(stretch);
+                {
+                    let gyro = stab.gyro.write();
+                    let mut metadata = gyro.file_metadata.write();
+                    metadata.lens_positions = BTreeMap::from([(0, 45.0)]);
+                    metadata.lens_params = BTreeMap::from([(0, gyroflow_core::gyro_source::LensParams {
+                        focal_length: Some(45.0), ..Default::default()
+                    })]);
+                }
+                let mut host_params = TestParams::default();
+                host_params.set_bool(Params::DisableStretch, true).unwrap();
+                let mut disable_stretch = true;
+                let instance = GyroflowPluginBaseInstance { anamorphic_adjust_size: adjust_size, ..Default::default() };
+
+                assert!(instance.maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab).unwrap());
+                assert!(disable_stretch);
+                assert!(host_params.get_bool(Params::DisableStretch).unwrap());
+                let expected_size = if adjust_size {
+                    ((1920.0 * stretch.0).round() as usize, (1080.0 * stretch.1).round() as usize)
+                } else { (1920, 1080) };
+                assert_eq!(stab.params.read().size, expected_size);
+                assert_eq!(stab.lens.read().input_horizontal_stretch, 1.0);
+                assert_eq!(stab.lens.read().input_vertical_stretch, 1.0);
+                assert_eq!(stab.gyro.read().file_metadata.read().lens_positions, BTreeMap::from([(0, 45.0)]));
+            }
+        }
+    }
+
+    #[test]
+    fn static_lens_position_preserves_explicit_stretch_opt_out() {
+        let stab = manager_for_snapshot_stretch((1.5, 1.0));
+        stab.gyro.write().file_metadata.write().lens_positions = BTreeMap::from([(0, 45.0)]);
+        let mut host_params = TestParams::default();
+        let mut disable_stretch = false;
+        let instance = GyroflowPluginBaseInstance { anamorphic_adjust_size: true, ..Default::default() };
+
+        assert!(!instance.maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab).unwrap());
+        assert!(!disable_stretch);
+        assert!(!host_params.get_bool(Params::DisableStretch).unwrap());
+        assert_eq!(stab.params.read().size, (1920, 1080));
+        assert_eq!(stab.lens.read().input_horizontal_stretch, 1.5);
+    }
+
+    #[test]
+    fn dynamic_lens_metadata_keeps_stretch_bake_protection() {
+        // Keep the conservative guard for every case outside the fixed-lens exception.
+        for (positions, dynamic_params, interpolations) in [
+            (vec![(0, 45.0)], false, Some(serde_json::json!({"45.0": {"focal_length": 45.0}}))),
+            (vec![(0, 45.0), (100_000, 50.0)], false, None),
+            (vec![(0, 45.0)], true, None),
+        ] {
+            let stab = manager_for_snapshot_stretch((1.5, 1.0));
+            stab.gyro.write().file_metadata.write().lens_positions = positions.into_iter().collect();
+            if dynamic_params {
+                stab.gyro.write().file_metadata.write().lens_params = BTreeMap::from([
+                    (0, gyroflow_core::gyro_source::LensParams { focal_length: Some(45.0), ..Default::default() }),
+                    (100_000, gyroflow_core::gyro_source::LensParams { focal_length: Some(50.0), ..Default::default() }),
+                ]);
+            }
+            stab.lens.write().interpolations = interpolations;
+            let mut host_params = TestParams::default();
+            host_params.set_bool(Params::DisableStretch, true).unwrap();
+            let mut disable_stretch = true;
+            let instance = GyroflowPluginBaseInstance { anamorphic_adjust_size: true, ..Default::default() };
+
+            assert!(!instance.maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab).unwrap());
+            assert!(!disable_stretch);
+            assert!(!host_params.get_bool(Params::DisableStretch).unwrap());
+            assert_eq!(stab.params.read().size, (1920, 1080));
+            assert_eq!(stab.lens.read().input_horizontal_stretch, 1.5);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GYROFLOW_DSC5472_FIXTURE pointing to the original project"]
+    fn manual_dsc5472_stretch_bake_preserves_stabilization() {
+        let path = std::env::var("GYROFLOW_DSC5472_FIXTURE").unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let stab = StabilizationManager::default();
+        let mut is_preset = false;
+        stab.import_gyroflow_data(&data, true, Some(&path), |_| (), Arc::new(AtomicBool::new(false)), &mut is_preset, false).unwrap();
+        assert!(!is_preset);
+        assert_eq!(stab.params.read().size, (1920, 1080));
+        assert_eq!(stab.params.read().output_size, (2880, 1080));
+        assert_eq!(stab.gyro.read().file_metadata.read().lens_positions, BTreeMap::from([(0, 45.0)]));
+        assert_eq!(stab.gyro.read().file_metadata.read().lens_params.len(), 1);
+        assert!(stab.lens.read().interpolations.is_none());
+        let original_fovs = stab.params.read().fovs.clone();
+        let original_quats = stab.gyro.read().smoothed_quaternions.clone();
+        let original_camera_fovs = camera_fov_bits(&stab);
+        let pre = snapshot_compute_inputs(&stab);
+        let mut host_params = TestParams::default();
+        host_params.set_bool(Params::DisableStretch, true).unwrap();
+        let mut disable_stretch = true;
+        let instance = GyroflowPluginBaseInstance { anamorphic_adjust_size: true, ..Default::default() };
+        assert!(instance.maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab).unwrap());
+        let post = snapshot_compute_inputs(&stab);
+        match post_mutation_invalidation(&pre, &post).unwrap() {
+            PostMutationInvalidation::Smoothing => stab.invalidate_smoothing(),
+            PostMutationInvalidation::Zoom => stab.invalidate_zooming(),
+        }
+        stab.recompute_blocking();
+        assert_eq!(stab.params.read().size, (2880, 1080));
+        assert_eq!(stab.lens.read().input_horizontal_stretch, 1.0);
+        assert_eq!(camera_fov_bits(&stab), original_camera_fovs);
+        let ratio = stab.params.read().size.0 as f64 / stab.params.read().size.1 as f64;
+        assert_eq!(GyroflowPluginBase::get_center_rect(4023, 2268, ratio), (0, 379, 4023, 1509));
+        let params = stab.params.read();
+        assert_eq!(params.fovs.len(), original_fovs.len());
+        assert!(!params.fovs.is_empty());
+        let max_fov_delta = params.fovs.iter().zip(&original_fovs)
+            .map(|(a, b)| (a - b).abs()).fold(0.0_f64, f64::max);
+        assert!(params.fovs.iter().all(|v| v.is_finite() && *v > 0.0));
+        drop(params);
+        let gyro = stab.gyro.read();
+        assert_eq!(gyro.smoothed_quaternions.len(), original_quats.len());
+        assert!(!original_quats.is_empty());
+        let max_rotation_delta = original_quats.iter().map(|(t, q)| {
+            (q.inverse() * gyro.smoothed_quaternions.get(t).unwrap()).angle().to_degrees()
+        }).fold(0.0_f64, f64::max);
+        eprintln!("DSC_5472: input_rect=(0,379,4023,1509) max_fov_delta={max_fov_delta} max_rotation_delta_deg={max_rotation_delta}");
+        assert!(max_fov_delta < 1e-4, "{max_fov_delta}");
+        assert!(max_rotation_delta < 1e-9, "{max_rotation_delta}");
     }
 
     #[test]
