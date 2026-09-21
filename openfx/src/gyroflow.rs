@@ -360,7 +360,7 @@ fn lens_baked_stretch(stab: &StabilizationManager) -> (f64, f64) {
     }
     let lens = stab.lens.read();
     let guard = |s: f64| if s > 0.01 { s } else { 1.0 };
-    let live = (guard(lens.input_horizontal_stretch), guard(lens.input_vertical_stretch));
+    let live = (lens.horizontal_stretch_normalized(), lens.vertical_stretch_normalized());
     let raw = (
         guard(lens.input_horizontal_stretch_raw().unwrap_or(live.0)),
         guard(lens.input_vertical_stretch_raw().unwrap_or(live.1)),
@@ -2178,7 +2178,7 @@ impl Execute for GyroflowPlugin {
                 let anamorphic_band_enabled = ofx_anamorphic_band_enabled();
                 let (live_stretch, raw_stretch) = {
                     let lens = stab.lens.read();
-                    let live = (guard_stretch(lens.input_horizontal_stretch), guard_stretch(lens.input_vertical_stretch));
+                    let live = (lens.horizontal_stretch_normalized(), lens.vertical_stretch_normalized());
                     let raw = (
                         guard_stretch(lens.input_horizontal_stretch_raw().unwrap_or(live.0)),
                         guard_stretch(lens.input_vertical_stretch_raw().unwrap_or(live.1)),
@@ -3295,6 +3295,49 @@ mod tests {
         // phantom 1.5× horizontal crop here (pillarboxed render).
         let crop = compute_fillcrop_geometry_desqueezed((1920, 1620), (1.0, 1.5), 1080.0 / 1920.0, 270.0);
         assert_eq!(crop, None);
+    }
+
+    #[test]
+    fn feedback_85mm_input_geometry_does_not_apply_desqueeze_twice() {
+        for samples in [0, 1, 404] {
+            for host_desqueezed in [false, true] {
+                let stab = StabilizationManager::default();
+                {
+                    let mut p = stab.params.write();
+                    p.size = (3536, 2656);
+                    p.output_size = (6364, 2656);
+                }
+                {
+                    let mut lens = stab.lens.write();
+                    lens.input_horizontal_stretch = 1.8;
+                    lens.input_vertical_stretch = 1.0;
+                    lens.init();
+                }
+                for i in 0..samples {
+                    stab.gyro.write().file_metadata.write().lens_positions.insert(i * 20000, 85.0);
+                }
+                if host_desqueezed {
+                    stab.disable_lens_stretch(true);
+                }
+                let lens = stab.lens.read();
+                let live = (lens.horizontal_stretch_normalized(), lens.vertical_stretch_normalized());
+                let raw = (1.8, 1.0);
+                let p = stab.params.read();
+                let logical = physical_band_aspects(p.size, p.output_size, false, (1.0, 1.0), (1.0, 1.0));
+                let physical = physical_band_aspects(p.size, p.output_size, false, live, raw);
+                let band = select_anamorphic_band_aspects(true, Some("DaVinciResolve"), true, false, false, false, raw, logical, physical, (1920, 1080));
+                let source = GyroflowPluginBase::get_center_rect(1920, 1080, band.org_ratio);
+                let output = GyroflowPluginBase::get_center_rect(1920, 1080, band.output_aspect);
+                assert_eq!(output, (0, 139, 1920, 801));
+                assert_eq!(source, if host_desqueezed { output } else { (241, 0, 1438, 1080) });
+                // Compose the same source/output rectangle maps and stretch division
+                // as the GPU kernel. A correctly restored circle must stay circular.
+                let dx = (p.output_size.0 as f64 / output.2 as f64) / live.0 * source.2 as f64 / p.size.0 as f64;
+                let dy = (p.output_size.1 as f64 / output.3 as f64) / live.1 * source.3 as f64 / p.size.1 as f64;
+                let input_circle_aspect = if host_desqueezed { 1.0 } else { 1.0 / 1.8 };
+                assert!((input_circle_aspect * dy / dx - 1.0).abs() < 0.001);
+            }
+        }
     }
 
     #[test]
