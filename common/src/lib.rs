@@ -143,8 +143,8 @@ fn snapshot_compute_inputs(stab: &StabilizationManager) -> ComputeInputsSnapshot
         video_rotation: p.video_rotation,
         adaptive_zoom_window: p.adaptive_zoom_window,
         adaptive_zoom_method: p.adaptive_zoom_method,
-        input_horizontal_stretch: lens.input_horizontal_stretch,
-        input_vertical_stretch: lens.input_vertical_stretch,
+        input_horizontal_stretch: lens.horizontal_stretch_normalized(),
+        input_vertical_stretch: lens.vertical_stretch_normalized(),
         input_horizontal_stretch_raw: lens.input_horizontal_stretch_raw(),
         input_vertical_stretch_raw: lens.input_vertical_stretch_raw(),
         lens_params_len,
@@ -1302,32 +1302,22 @@ impl GyroflowPluginBaseInstance {
 
     fn maybe_disable_lens_stretch_on_load(
         &self,
-        params: &mut dyn GyroflowPluginParams,
+        _params: &mut dyn GyroflowPluginParams,
         disable_stretch: &mut bool,
         stab: &StabilizationManager,
     ) -> PluginResult<bool> {
         if !*disable_stretch {
             return Ok(false);
         }
-        let (has_lens_positions, has_fixed_lens_metadata) = {
-            let gyro = stab.gyro.read();
-            let metadata = gyro.file_metadata.read();
-            (
-                !metadata.lens_positions.is_empty(),
-                metadata.lens_positions.len() == 1 && metadata.lens_params.len() <= 1,
-            )
-        };
-        // A fixed focal-length tag alone does not select an interpolated calibration.
-        // Keep the existing guard for multiple samples or any interpolation configuration.
-        let can_bake_fixed_lens = has_fixed_lens_metadata && stab.lens.read().interpolations.is_none();
-        if has_lens_positions && !can_bake_fixed_lens {
-            *disable_stretch = false;
-            params.set_bool(Params::DisableStretch, false)?;
-            log::warn!(target: "stab.load", "DisableStretch ignored: lens_positions requires timestamp-selected stretch");
-            return Ok(false);
-        }
-
+        // The core records the host's coordinate scale independently of the
+        // optical lens. Every timestamp-selected calibration uses the same
+        // conversion, so metadata sample counts must not change this decision.
         stab.disable_lens_stretch(self.anamorphic_adjust_size);
+        let lens = stab.lens.read();
+        log::debug!(target: "stab.load",
+            "input stretch applied: host={:?} residual=({:.6},{:.6}) adjust_size={}",
+            lens.applied_input_stretch(), lens.horizontal_stretch_normalized(),
+            lens.vertical_stretch_normalized(), self.anamorphic_adjust_size);
         Ok(true)
     }
 
@@ -1636,7 +1626,7 @@ impl GyroflowPluginBaseInstance {
                     // so the user can manually un-check afterwards without it being re-applied each frame.
                     let (xs, ys) = {
                         let lens = stab.lens.read();
-                        (lens.input_horizontal_stretch, lens.input_vertical_stretch)
+                        (lens.horizontal_stretch_normalized(), lens.vertical_stretch_normalized())
                     };
                     self.maybe_auto_disable_stretch_for_lens(params, &mut disable_stretch, xs, ys)?;
 
@@ -3230,8 +3220,8 @@ mod tests {
                     ((1920.0 * stretch.0).round() as usize, (1080.0 * stretch.1).round() as usize)
                 } else { (1920, 1080) };
                 assert_eq!(stab.params.read().size, expected_size);
-                assert_eq!(stab.lens.read().input_horizontal_stretch, 1.0);
-                assert_eq!(stab.lens.read().input_vertical_stretch, 1.0);
+                assert_eq!(stab.lens.read().horizontal_stretch_normalized(), 1.0);
+                assert_eq!(stab.lens.read().vertical_stretch_normalized(), 1.0);
                 assert_eq!(stab.gyro.read().file_metadata.read().lens_positions, BTreeMap::from([(0, 45.0)]));
             }
         }
@@ -3249,12 +3239,13 @@ mod tests {
         assert!(!disable_stretch);
         assert!(!host_params.get_bool(Params::DisableStretch).unwrap());
         assert_eq!(stab.params.read().size, (1920, 1080));
-        assert_eq!(stab.lens.read().input_horizontal_stretch, 1.5);
+        assert_eq!(stab.lens.read().horizontal_stretch_normalized(), 1.5);
     }
 
     #[test]
-    fn dynamic_lens_metadata_keeps_stretch_bake_protection() {
-        // Keep the conservative guard for every case outside the fixed-lens exception.
+    fn input_stretch_is_independent_of_metadata_sampling() {
+        // The caller's input coordinate system cannot depend on the number of
+        // focal samples or on whether a calibration is selected per frame.
         for (positions, dynamic_params, interpolations) in [
             (vec![(0, 45.0)], false, Some(serde_json::json!({"45.0": {"focal_length": 45.0}}))),
             (vec![(0, 45.0), (100_000, 50.0)], false, None),
@@ -3274,11 +3265,11 @@ mod tests {
             let mut disable_stretch = true;
             let instance = GyroflowPluginBaseInstance { anamorphic_adjust_size: true, ..Default::default() };
 
-            assert!(!instance.maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab).unwrap());
-            assert!(!disable_stretch);
-            assert!(!host_params.get_bool(Params::DisableStretch).unwrap());
-            assert_eq!(stab.params.read().size, (1920, 1080));
-            assert_eq!(stab.lens.read().input_horizontal_stretch, 1.5);
+            assert!(instance.maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab).unwrap());
+            assert!(disable_stretch);
+            assert!(host_params.get_bool(Params::DisableStretch).unwrap());
+            assert_eq!(stab.params.read().size, (2880, 1080));
+            assert_eq!(stab.lens.read().horizontal_stretch_normalized(), 1.0);
         }
     }
 
@@ -3312,7 +3303,7 @@ mod tests {
         }
         stab.recompute_blocking();
         assert_eq!(stab.params.read().size, (2880, 1080));
-        assert_eq!(stab.lens.read().input_horizontal_stretch, 1.0);
+        assert_eq!(stab.lens.read().horizontal_stretch_normalized(), 1.0);
         assert_eq!(camera_fov_bits(&stab), original_camera_fovs);
         let ratio = stab.params.read().size.0 as f64 / stab.params.read().size.1 as f64;
         assert_eq!(GyroflowPluginBase::get_center_rect(4023, 2268, ratio), (0, 379, 4023, 1509));
@@ -3335,7 +3326,7 @@ mod tests {
     }
 
     #[test]
-    fn lens_positions_reject_disable_stretch_for_both_adjust_policies() {
+    fn lens_positions_preserve_optical_calibration_for_both_adjust_policies() {
         for anamorphic_adjust_size in [true, false] {
             let stab = manager_for_snapshot_stretch((1.5, 1.0));
             stab.gyro.write().file_metadata.write().lens_positions =
@@ -3359,16 +3350,18 @@ mod tests {
                 .maybe_disable_lens_stretch_on_load(&mut host_params, &mut disable_stretch, &stab)
                 .unwrap();
 
-            assert!(!applied);
-            assert!(!disable_stretch);
-            assert!(!host_params.get_bool(Params::DisableStretch).unwrap());
-            assert_eq!(stab.params.read().size, pre_size);
+            assert!(applied);
+            assert!(disable_stretch);
+            assert!(host_params.get_bool(Params::DisableStretch).unwrap());
+            assert_eq!(stab.params.read().size, if anamorphic_adjust_size { (2880, 1080) } else { pre_size });
             let post_lens = stab.lens.read();
             assert_eq!(post_lens.input_horizontal_stretch, pre_lens.input_horizontal_stretch);
             assert_eq!(post_lens.input_vertical_stretch, pre_lens.input_vertical_stretch);
             assert_eq!(post_lens.interpolations, pre_lens.interpolations);
             drop(post_lens);
-            assert_eq!(camera_fov_bits(&stab), pre_fovs);
+            if anamorphic_adjust_size {
+                assert_eq!(camera_fov_bits(&stab), pre_fovs);
+            }
         }
     }
 
