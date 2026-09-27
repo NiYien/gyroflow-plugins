@@ -143,6 +143,9 @@ class CompilationStagesTests(unittest.TestCase):
         (self.root / "distribution-status.json").write_text(json.dumps({"channel": "release"}))
         report = release.summarize(self.root)
         self.assertEqual(report["distribution"], {"channel": "release"})
+        revision = report["core_revision"]
+        self.assertIn(f'source = "git+https://github.com/NiYien/gyroflow.git?rev={revision}#{revision}"',
+                      (ROOT / "Cargo.lock").read_text())
 
     def test_reused_app_still_requires_signing(self):
         self.args.compiled_app = self.root / builder.APP_NAME

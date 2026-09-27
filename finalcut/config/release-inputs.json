@@ -4,6 +4,5 @@
   "xcode_version": "26.6",
   "xcode_path": "/Applications/Xcode_26.6.app/Contents/Developer",
   "rust_toolchain": "1.95.0",
-  "lens_data_tag": "data-v20260830.1",
-  "core_revision": "8ea84df44054185dfa351f3244da81ab5ee7bf55"
+  "lens_data_tag": "data-v20260830.1"
 }

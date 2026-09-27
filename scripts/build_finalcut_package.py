@@ -241,7 +241,7 @@ def build(arguments: argparse.Namespace) -> tuple[Path, Path]:
         if not arguments.signing_identity:
             raise RuntimeError("production package requires --signing-identity")
         from finalcut_release import validate_core
-        validate_core(ROOT, json.loads((ROOT / "finalcut/config/release-inputs.json").read_text()))
+        validate_core(ROOT)
     output_dir = arguments.output_dir.resolve()
     output_app = output_dir / APP_NAME
     output_zip = output_dir / ZIP_NAME

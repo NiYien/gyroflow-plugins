@@ -52,31 +52,33 @@ def version(base: str, event: str, ref: str, run_number: str) -> tuple[str, str]
     return base, str(int(run_number))
 
 
-def validate_core(root: Path, inputs: dict) -> None:
+def validate_core(root: Path) -> str:
     manifest = (root / "common/Cargo.toml").read_text()
     active = "\n".join(line for line in manifest.splitlines() if not line.lstrip().startswith("#"))
     match = re.search(r"^gyroflow-core\s*=\s*\{([^}]+)\}", active, re.MULTILINE)
     if not match or re.search(r"\bpath\s*=", match[1]):
         raise ValueError("Production gyroflow-core must use the published pinned Git revision, not a local path")
-    if not re.search(r'\brev\s*=\s*"' + re.escape(inputs["core_revision"]) + '"', match[1]):
-        raise ValueError("gyroflow-core revision does not match release-inputs.json")
+    revision = re.search(r'\brev\s*=\s*"([a-f0-9]{40})"', match[1])
+    if not revision:
+        raise ValueError("Production gyroflow-core must use a full pinned Git revision")
     if not re.search(r'\bgit\s*=\s*"https://github.com/NiYien/gyroflow.git"', match[1]):
         raise ValueError("gyroflow-core must use the NiYien Git repository")
     lock = (root / "Cargo.lock").read_text()
     blocks = re.split(r"\[\[package\]\]", lock)
     core = [block for block in blocks if re.search(r'^name = "gyroflow-core"$', block, re.MULTILINE)]
-    expected = f'git+https://github.com/NiYien/gyroflow.git?rev={inputs["core_revision"]}#{inputs["core_revision"]}'
+    expected = f'git+https://github.com/NiYien/gyroflow.git?rev={revision[1]}#{revision[1]}'
     if len(core) != 1 or f'source = "{expected}"' not in core[0]:
         raise ValueError("Cargo.lock must resolve gyroflow-core to the pinned Git revision")
     for name in (".cargo/config", ".cargo/config.toml"):
         config = root / name
         if config.exists() and "gyroflow-core" in config.read_text():
             raise ValueError("Production checkout must not override gyroflow-core locally")
+    return revision[1]
 
 
 def prepare(root: Path = ROOT) -> dict:
     inputs = json.loads((root / "finalcut/config/release-inputs.json").read_text())
-    validate_core(root, inputs)
+    inputs["core_revision"] = validate_core(root)
     cargo = (root / "Cargo.toml").read_text()
     base = re.search(r'\[workspace.package\]\s*version\s*=\s*"([^"]+)"', cargo)[1]
     marketing, build = version(base, os.environ.get("GITHUB_EVENT_NAME", ""),
@@ -135,6 +137,7 @@ def check_signing() -> dict:
 def summarize(directory: Path) -> dict:
     artifact = directory / ZIP_NAME
     inputs = json.loads(INPUTS.read_text())
+    inputs["core_revision"] = validate_core(ROOT)
     identity = json.loads(IDENTITY.read_text())
     sdk = json.loads((ROOT / "finalcut/config/sdk.json").read_text())
     notary = json.loads((directory / "notary-result.json").read_text())

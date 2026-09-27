@@ -151,7 +151,27 @@ class ReleaseContractTests(unittest.TestCase):
             (root / "common").mkdir()
             (root / "common/Cargo.toml").write_text('gyroflow-core = { path = "../core" }')
             with self.assertRaisesRegex(ValueError, "local path"):
-                release.validate_core(root, {"core_revision": "a" * 40})
+                release.validate_core(root)
+
+    def test_core_revision_follows_cargo_and_rejects_a_stale_lock_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "common").mkdir()
+            manifest = root / "common/Cargo.toml"
+            repository = "https://github.com/NiYien/gyroflow.git"
+            for revision in ("a" * 40, "b" * 40):
+                with self.subTest(revision=revision):
+                    manifest.write_text(f'gyroflow-core = {{ git = "{repository}", rev = "{revision}" }}')
+                    (root / "Cargo.lock").write_text(
+                        f'[[package]]\nname = "gyroflow-core"\n'
+                        f'source = "git+{repository}?rev={revision}#{revision}"\n')
+                    self.assertEqual(release.validate_core(root), revision)
+            manifest.write_text(f'gyroflow-core = {{ git = "{repository}", rev = "{"c" * 40}" }}')
+            with self.assertRaisesRegex(ValueError, "Cargo.lock"):
+                release.validate_core(root)
+            manifest.write_text(f'gyroflow-core = {{ git = "{repository}", branch = "main" }}')
+            with self.assertRaisesRegex(ValueError, "pinned Git revision"):
+                release.validate_core(root)
 
     def test_notary_failure_does_not_reveal_password(self):
         password = "private-notary-password"
