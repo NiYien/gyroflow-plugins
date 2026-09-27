@@ -1725,6 +1725,145 @@ fn batch_matrix_preserves_banks_and_ignores_effectless_complex_clips() {
 }
 
 #[test]
+fn batch_updates_clips_connected_to_gaps_without_changing_source_timing_or_layout() {
+    let media_path = std::env::temp_dir().join("GapSource.mov");
+    let media_url = url::Url::from_file_path(&media_path).unwrap().to_string();
+    let project_path = media_path.with_extension("gyroflow");
+    let reader = |path: &std::path::Path| {
+        assert_eq!(path, project_path);
+        Ok(include_bytes!("fixtures/phase0-valid.gyroflow").to_vec())
+    };
+    let cases = [
+        (
+            r#"<asset-clip name="Trimmed" ref="a" lane="1" offset="103s" start="3605s" duration="2s"><filter-video ref="fx"/></asset-clip>"#,
+            "3605/1",
+            "5/1",
+            "7/1",
+        ),
+        (
+            r#"<asset-clip name="Fast" ref="a" lane="1" offset="103s" start="7200s" duration="2s"><timeMap>
+            <timept time="7200s" value="3605s" interp="linear"/><timept time="7202s" value="3609s" interp="linear"/>
+            </timeMap><filter-video ref="fx"/></asset-clip>"#,
+            "7200/1",
+            "5/1",
+            "9/1",
+        ),
+        (
+            r#"<clip name="Reverse" lane="1" offset="103s" start="7200s" duration="2s"><timeMap>
+            <timept time="7200s" value="3609s" interp="linear"/><timept time="7202s" value="3605s" interp="linear"/>
+            </timeMap><video ref="a" offset="0s" start="3600s" duration="30s"/><filter-video ref="fx"/></clip>"#,
+            "7200/1",
+            "9/1",
+            "5/1",
+        ),
+    ];
+    for (clip, bounds_start, source_start, source_end) in cases {
+        for secondary_storyline in [false, true] {
+            let connected = if secondary_storyline {
+                format!(
+                    r#"<spine lane="1" offset="102s">{}</spine>"#,
+                    clip.replace(" lane=\"1\"", "")
+                        .replace("offset=\"103s\"", "offset=\"1s\"")
+                )
+            } else {
+                clip.to_string()
+            };
+            let input = format!(
+                r#"<fcpxml version="1.14"><resources>
+                <format id="r1" frameDuration="1/30s"/>
+                <asset id="a" start="3600s" duration="30s" format="r1"><media-rep kind="original-media" src="{media_url}"/></asset>
+                <effect id="fx" uid="{EFFECT_UUID}"/></resources>
+                <project name="Gap Test" uid="11111111-1111-4111-8111-111111111111"><sequence format="r1" tcStart="36000s" duration="40s"><spine>
+                <gap name="Gap" offset="7s" start="100s" duration="20s">{connected}</gap>
+                </spine></sequence></project></fcpxml>"#
+            );
+            let patched = patch_fcpxml_project_batch_with_project_reader(input.as_bytes(), &reader)
+                .unwrap();
+            assert_eq!(patched.occurrence_count, 1);
+            assert_eq!(patched.updated_project_count, 1);
+            assert_eq!(patched.skipped_count, 0);
+            assert_eq!(
+                patched.targets[0].media_url.as_deref(),
+                Some(media_url.as_str())
+            );
+            assert_eq!(
+                patched.targets[0].project_display_name.as_deref(),
+                Some("GapSource.gyroflow")
+            );
+            let timing = &payloads(&patched.xml)[0];
+            assert_eq!(
+                timing["mapping"],
+                serde_json::json!([
+                    {"local": "0/1", "source": source_start},
+                    {"local": "2/1", "source": source_end},
+                ])
+            );
+            assert_eq!(
+                timing["effect_bounds"],
+                serde_json::json!({"start": bounds_start, "duration": "2/1"})
+            );
+            assert_eq!(timing["input_bounds"], timing["effect_bounds"]);
+
+            // Updating the effect must leave the gap, connections, edits and project identity intact.
+            let output = std::str::from_utf8(&patched.xml).unwrap();
+            let document = roxmltree::Document::parse(output).unwrap();
+            let filter = document
+                .descendants()
+                .find(|node| node.has_tag_name("filter-video"))
+                .unwrap();
+            let mut restored = output.to_string();
+            restored.replace_range(filter.range(), "<filter-video ref=\"fx\"/>");
+            assert_eq!(restored, input);
+
+            let moved = output
+                .replace("offset=\"103s\"", "offset=\"104s\"")
+                .replace("offset=\"1s\"", "offset=\"2s\"");
+            let refreshed = patch_fcpxml_project_batch_with_project_reader(moved.as_bytes(), &reader)
+                .unwrap();
+            assert_eq!(refreshed.updated_project_count, 0);
+            assert_eq!(refreshed.timing_only_count, 1);
+            assert_eq!(refreshed.skipped_count, 0);
+            let refreshed_timing = &payloads(&refreshed.xml)[0];
+            assert_eq!(refreshed_timing["mapping"], timing["mapping"]);
+            assert_eq!(refreshed_timing["effect_bounds"], timing["effect_bounds"]);
+            assert_ne!(refreshed_timing["structure_sha256"], timing["structure_sha256"]);
+            assert_eq!(
+                selected_banked_payloads(&refreshed.xml, "fx"),
+                selected_banked_payloads(&patched.xml, "fx")
+            );
+        }
+    }
+}
+
+#[test]
+fn gap_support_does_not_bypass_unsupported_ancestor_checks() {
+    for container in ["sync-clip", "mc-clip", "ref-clip", "audition", "project-wrapper"] {
+        for gap_inside in [false, true] {
+            let clip = r#"<asset-clip name="Nested" ref="a" lane="1" offset="103s" start="3605s" duration="2s"><filter-video ref="fx"/></asset-clip>"#;
+            let gap = r#"<gap name="Gap" offset="7s" start="100s" duration="20s">"#;
+            let clips = if gap_inside {
+                format!("<{container}>{gap}{clip}</gap></{container}>")
+            } else {
+                format!("{gap}<{container}>{clip}</{container}></gap>")
+            };
+            let input = exact_sibling_batch_input("", &clips);
+            let result = patch_fcpxml_project_batch_with_project_reader_report_all_skipped(
+                input.as_bytes(),
+                &|_| panic!("unsupported ancestors must be rejected before reading a project"),
+            )
+            .unwrap();
+            assert_eq!(result.updated_project_count, 0);
+            assert_eq!(result.skipped_count, 1);
+            assert_eq!(
+                result.targets[0].skip_reason,
+                Some(gyroflow_finalcut::BatchSkipReason::UnsupportedStructure)
+            );
+            assert_eq!(result.xml, input.as_bytes());
+        }
+    }
+}
+
+#[test]
 fn batch_skips_existing_effects_below_unproved_complex_ancestors_without_mutating_them() {
     let root = std::env::temp_dir().join(format!(
         "gyroflow-complex-existing-effects-{}-{}",

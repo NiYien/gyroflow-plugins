@@ -3174,7 +3174,14 @@ fn unproved_project_ancestor(clip: Node<'_, '_>, project: Node<'_, '_>) -> Optio
         .iter()
         .map(|ancestor| ancestor.tag_name().name())
         .collect();
-    if path == ["spine", "sequence"] {
+    // A gap only anchors connected clips; it does not retime their source media.
+    // Preserve effect-local timing for clips attached directly or in a connected storyline.
+    if matches!(
+        path.as_slice(),
+        ["spine", "sequence"]
+            | ["gap", "spine", "sequence"]
+            | ["spine", "gap", "spine", "sequence"]
+    ) {
         None
     } else {
         Some(
