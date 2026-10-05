@@ -26,10 +26,16 @@ pub const DRT_RESIDUE_MAX_AGE: Duration = Duration::from_secs(3600);
 pub const DRT_FILE_PREFIX: &str = "gyroflow-ofx-sizing-";
 const DRT_FILE_SUFFIX: &str = ".drt";
 
-/// Minimum time between two interval-driven exports: the query TTL, or `DRT_COST_FACTOR` times
-/// the last export duration when that is longer.
+/// Minimum time between two interval-driven exports: the query TTL, or the cost floor when that
+/// is longer.
 pub fn drt_export_interval_ms(ttl_ms: u64, last_export_ms: Option<u64>) -> u64 {
-    ttl_ms.max(DRT_COST_FACTOR.saturating_mul(last_export_ms.unwrap_or(0)))
+    ttl_ms.max(drt_cost_floor_ms(last_export_ms))
+}
+
+/// Minimum time between two exports of any kind, forced or requested ones included:
+/// `DRT_COST_FACTOR` times the last export duration (0 when no cost is recorded).
+fn drt_cost_floor_ms(last_export_ms: Option<u64>) -> u64 {
+    DRT_COST_FACTOR.saturating_mul(last_export_ms.unwrap_or(0))
 }
 
 /// `<dir>/gyroflow-ofx-sizing-<pid>-<seq>.drt`
@@ -232,6 +238,8 @@ impl DrtSharedState {
     /// Claims the export slot for one refresh query. Returns `None` when exports are unsupported,
     /// another export is in flight, or the last attempt timed out and its interval has not passed.
     /// The explicit-path want is consumed on every call, including the ones that return `None`.
+    /// The request asks Lua to export when the interval has passed, or when it is forced or
+    /// carries the explicit-path want and the cost floor has passed.
     pub fn begin_request(self: &Arc<Self>, now: Instant, ttl_ms: u64, forced: bool, temp_dir: &Path, pid: u32) -> Option<DrtRequest> {
         let (want, last_key) = {
             let mut inner = self.inner.lock();
@@ -239,15 +247,22 @@ impl DrtSharedState {
             if inner.support == Support::No {
                 return None;
             }
+            let since_last = inner.last_export_at.map(|at| now.saturating_duration_since(at));
             let interval = Duration::from_millis(drt_export_interval_ms(ttl_ms, inner.last_export_ms));
-            let interval_elapsed = inner.last_export_at.is_none_or(|at| now.saturating_duration_since(at) >= interval);
+            let interval_elapsed = since_last.is_none_or(|since| since >= interval);
             if inner.timed_out && !interval_elapsed {
                 return None;
             }
             if self.export_in_flight.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
                 return None;
             }
-            (forced || consumed_want || interval_elapsed, inner.last_key.clone().unwrap_or_default())
+            // A forced refresh or an explicit-path request skips the TTL part of the interval,
+            // but not the cost floor: bursts of forced arms (one per CreateInstance) must not
+            // export a long timeline back to back.
+            let cost_floor = Duration::from_millis(drt_cost_floor_ms(inner.last_export_ms));
+            let floor_elapsed = since_last.is_none_or(|since| since >= cost_floor);
+            let want = ((forced || consumed_want) && floor_elapsed) || interval_elapsed;
+            (want, inner.last_key.clone().unwrap_or_default())
         };
         let claim = ExportClaim(Arc::clone(self));
 
@@ -538,11 +553,46 @@ mod tests {
         assert!(!paced.params.want);
         assert_eq!(paced.params.last_key, timeline_key(&hex, 1080, 1920, "scaleToFit"));
         drop(paced);
-        let forced = begin(&state, t0 + Duration::from_secs(5), true, &dir).expect("forced request");
+        // Inside the 10 s interval, once the 8 s cost floor has passed.
+        let forced = begin(&state, t0 + Duration::from_secs(8), true, &dir).expect("forced request");
         assert!(forced.params.want);
         drop(forced);
         let due = begin(&state, t0 + Duration::from_secs(10), false, &dir).expect("request at interval");
         assert!(due.params.want);
+    }
+
+    #[test]
+    fn forced_bypasses_ttl_but_not_cost_floor() {
+        let dir = TestDir::new();
+        let hex = name_hex();
+        let vertical = ctx(&hex, 1080, 1920);
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let want = |state: &Arc<DrtSharedState>, now: Instant, forced: bool| {
+            begin(state, now, forced, &dir).expect("request").params.want
+        };
+
+        // 80 ms export: cost floor 8 s, interval max(10 s TTL, 8 s) = 10 s.
+        let state = Arc::new(DrtSharedState::default());
+        state.finish(t0, begin(&state, t0, false, &dir), exported(80.0), &vertical);
+        assert!(!want(&state, at(5), true));
+        assert!(want(&state, at(8), true));
+        assert!(!want(&state, at(8), false));
+
+        // 2 s export: cost floor and interval are both 200 s.
+        let state = Arc::new(DrtSharedState::default());
+        state.finish(t0, begin(&state, t0, false, &dir), exported(2000.0), &vertical);
+        assert!(!want(&state, at(100), true));
+        assert!(want(&state, at(200), true));
+
+        // An explicit-path want inside the cost floor is consumed without an export.
+        let state = Arc::new(DrtSharedState::default());
+        state.finish(t0, begin(&state, t0, false, &dir), failed("x", Some(2000.0)), &vertical);
+        state.finish(at(1), None, DrtOutcome::NotRequested, &vertical);
+        assert!(state.want_pending());
+        assert!(!want(&state, at(100), false));
+        assert!(!state.want_pending());
+        assert!(want(&state, at(200), false));
     }
 
     #[test]
@@ -895,15 +945,16 @@ mod tests {
         let t0 = Instant::now();
         let hex = name_hex();
         let vertical = ctx(&hex, 1080, 1920);
-        state.finish(t0, begin(&state, t0, false, &dir), failed("x", None), &vertical);
+        // An 80 ms failed export: cost floor 8 s, interval 10 s.
+        state.finish(t0, begin(&state, t0, false, &dir), failed("x", Some(80.0)), &vertical);
         state.finish(t0 + Duration::from_secs(1), None, DrtOutcome::NotRequested, &vertical);
         assert!(state.want_pending());
 
-        let first = begin(&state, t0 + Duration::from_secs(2), false, &dir).expect("request");
+        let first = begin(&state, t0 + Duration::from_secs(8), false, &dir).expect("request");
         assert!(first.params.want);
         assert!(!state.want_pending());
         drop(first);
-        let second = begin(&state, t0 + Duration::from_secs(3), false, &dir).expect("request");
+        let second = begin(&state, t0 + Duration::from_secs(9), false, &dir).expect("request");
         assert!(!second.params.want);
     }
 
