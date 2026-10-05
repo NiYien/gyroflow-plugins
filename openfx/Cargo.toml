@@ -16,6 +16,9 @@ ofx = "0.3"
 log = "0.4"
 regex = "1.12"
 libloading = "0.8"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+flate2 = "1"
+roxmltree = "0.21"
 
 [build-dependencies]
 winres = "0.1"
