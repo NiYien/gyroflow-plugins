@@ -387,16 +387,9 @@ impl CurrentFileInfo {
                     let source_end_frame   = lines[11].trim().parse::<f64>().ok();
                     let drt_lines = parse_drt_lines(&lines[12..]);
                     let outcome = drt_outcome(allow_export, request.as_ref().map(|req| req.path.as_path()), &drt_lines, |path| std::fs::read(path));
-                    // Per-export details, logged at debug once the export is settled. Never the
-                    // bytes or the outcome itself: a DRT carries the user's media paths. The temp
+                    // Per-export details, logged at debug once the export is settled. The temp
                     // file's deletion is logged by its guard.
-                    let export_details = match (&request, &outcome) {
-                        (Some(req), DrtOutcome::Exported { export_ms, bytes }) => Some(match bytes {
-                            Ok(bytes) => format!("DRT export took {export_ms:.1}ms, read {} bytes from {}", bytes.len(), req.path.display()),
-                            Err(e) => format!("DRT export took {export_ms:.1}ms, could not read {}: {e}", req.path.display()),
-                        }),
-                        _ => None,
-                    };
+                    let export_log = export_details(request.as_ref().map(|req| req.path.as_path()), drt_lines.export_ms, &outcome);
                     let drt_ctx = QueryContext {
                         name_hex: drt_lines.timeline_name_hex.as_deref(),
                         width: timeline_w,
@@ -412,7 +405,7 @@ impl CurrentFileInfo {
                                 let decision = state.finish(std::time::Instant::now(), request, outcome, &drt_ctx);
                                 // The info line below appears only when the decision changes;
                                 // this one tells whether every single export validated.
-                                if let Some(details) = &export_details {
+                                if let Some(details) = &export_log {
                                     let source = match &decision.source {
                                         SizingSource::ApiFallback(reason) => format!("api-fallback reason={reason}"),
                                         source => source.label().to_string(),
@@ -609,7 +602,7 @@ impl CurrentFileInfo {
                         // path): nothing is published, exactly as before, but an export that ran
                         // is still accounted for in the pacing and the validated value.
                         state.finish_unpublished(std::time::Instant::now(), request, outcome, &drt_ctx);
-                        if let Some(details) = &export_details {
+                        if let Some(details) = &export_log {
                             log::debug!(target: "host_input_sizing", "host_input_sizing: {details}; not published (no usable clip under the playhead)");
                         }
                     }
@@ -705,10 +698,13 @@ pub fn parse_drt_lines(extra: &[&str]) -> DrtLines {
 ///
 /// Explicit queries (`allow_export = false`) never export: their script carries
 /// `GF_ALLOW_DRT = 0`, so whatever the Lua block printed they report `NotRequested`, which lets
-/// the state request an export from the next refresh. On the refresh path a skip is a skip
-/// whether or not this query claimed the export slot, and only a claimed export is trusted as an
-/// export: `read` loads the requested file and is called for nothing else. A missing duration
-/// is passed on as NaN, which the state records as the worst-case cost.
+/// the state request an export from the next refresh. On the refresh path only a query that
+/// claimed the export slot can have attempted an export, so only its status is trusted as an
+/// export attempt (`Exported`, `Unsupported`, `Failed`). Without a request every status is a
+/// skip: a request-less `Failed` (e.g. `GetName` raising inside the block) must not touch the
+/// pacing state, where it would end a timeout block early. `read` loads the requested file and
+/// is called for nothing else. A missing duration is passed on as NaN, which the state records
+/// as the worst-case cost.
 fn drt_outcome(
     allow_export: bool,
     request_path: Option<&std::path::Path>,
@@ -718,15 +714,27 @@ fn drt_outcome(
     if !allow_export {
         return DrtOutcome::NotRequested;
     }
+    let Some(path) = request_path else { return DrtOutcome::Skipped };
     match &lines.status {
-        DrtLineStatus::Exported => match request_path {
-            Some(path) => DrtOutcome::Exported { export_ms: lines.export_ms.unwrap_or(f64::NAN), bytes: read(path) },
-            // Lua only exports to the path of a request, so this cannot happen.
-            None => DrtOutcome::Skipped,
-        },
+        DrtLineStatus::Exported => DrtOutcome::Exported { export_ms: lines.export_ms.unwrap_or(f64::NAN), bytes: read(path) },
         DrtLineStatus::Skipped | DrtLineStatus::Absent => DrtOutcome::Skipped,
         DrtLineStatus::Unsupported => DrtOutcome::Unsupported,
         DrtLineStatus::Failed(msg) => DrtOutcome::Failed(msg.clone()),
+    }
+}
+
+/// The per-export debug details of a claimed export, successful or failed: duration (`none`
+/// when Lua printed none), the byte count, read error or failure message, and the temp path.
+/// `None` when no export was attempted. Never the bytes or the outcome itself: a DRT carries
+/// the user's media paths.
+fn export_details(request_path: Option<&std::path::Path>, export_ms: Option<f64>, outcome: &DrtOutcome) -> Option<String> {
+    let path = request_path?.display();
+    let took = export_ms.map_or_else(|| "none".to_string(), |ms| format!("{ms:.1}ms"));
+    match outcome {
+        DrtOutcome::Exported { bytes: Ok(bytes), .. } => Some(format!("DRT export took {took}, read {} bytes from {path}", bytes.len())),
+        DrtOutcome::Exported { bytes: Err(e), .. } => Some(format!("DRT export took {took}, could not read {path}: {e}")),
+        DrtOutcome::Failed(msg) => Some(format!("DRT export failed: {msg}; took {took}, temp file {path}")),
+        DrtOutcome::NotRequested | DrtOutcome::Skipped | DrtOutcome::Unsupported | DrtOutcome::TimedOut => None,
     }
 }
 
@@ -874,13 +882,51 @@ mod tests {
                 panic!("no request, no file to read")
             }))
         };
-        // Lua exports only to a requested path, so an `exported` line without a request is not
-        // trusted as an export.
+        // Without a claimed export slot no export was attempted, so no status is trusted as an
+        // export attempt: an `exported`, `unsupported` or `failed` line must not touch the
+        // pacing state (a request-less `failed` would otherwise end a timeout block early).
         assert_eq!(label(DrtLineStatus::Exported), "skipped");
         assert_eq!(label(DrtLineStatus::Skipped), "skipped");
         assert_eq!(label(DrtLineStatus::Absent), "skipped");
-        assert_eq!(label(DrtLineStatus::Unsupported), "unsupported");
-        assert_eq!(label(DrtLineStatus::Failed("boom".into())), "failed:boom");
+        assert_eq!(label(DrtLineStatus::Unsupported), "skipped");
+        assert_eq!(label(DrtLineStatus::Failed("boom".into())), "skipped");
+    }
+
+    #[test]
+    fn export_details_cover_every_claimed_export() {
+        let path = std::path::Path::new("gyroflow-ofx-sizing-1-0.drt");
+        let exported = |bytes| DrtOutcome::Exported { export_ms: 72.5, bytes };
+        let failed = || DrtOutcome::Failed("export-returned-false".into());
+
+        assert_eq!(
+            export_details(Some(path), Some(72.5), &exported(Ok(vec![0; 3]))).as_deref(),
+            Some("DRT export took 72.5ms, read 3 bytes from gyroflow-ofx-sizing-1-0.drt")
+        );
+        assert_eq!(
+            export_details(Some(path), Some(72.5), &exported(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")))).as_deref(),
+            Some("DRT export took 72.5ms, could not read gyroflow-ofx-sizing-1-0.drt: gone")
+        );
+        assert_eq!(
+            export_details(Some(path), Some(3.0), &failed()).as_deref(),
+            Some("DRT export failed: export-returned-false; took 3.0ms, temp file gyroflow-ofx-sizing-1-0.drt")
+        );
+        // Lua prints no duration when the block failed before the `Export` call returned.
+        assert_eq!(
+            export_details(Some(path), None, &failed()).as_deref(),
+            Some("DRT export failed: export-returned-false; took none, temp file gyroflow-ofx-sizing-1-0.drt")
+        );
+        assert_eq!(
+            export_details(Some(path), None, &exported(Ok(vec![0; 3]))).as_deref(),
+            Some("DRT export took none, read 3 bytes from gyroflow-ofx-sizing-1-0.drt")
+        );
+
+        // No export was attempted: nothing to report.
+        for outcome in [DrtOutcome::NotRequested, DrtOutcome::Skipped, DrtOutcome::Unsupported, DrtOutcome::TimedOut] {
+            assert_eq!(export_details(Some(path), Some(1.0), &outcome), None, "{}", outcome_label(&outcome));
+        }
+        for outcome in [exported(Ok(vec![0; 3])), failed()] {
+            assert_eq!(export_details(None, Some(1.0), &outcome), None, "{}", outcome_label(&outcome));
+        }
     }
 
     #[test]
