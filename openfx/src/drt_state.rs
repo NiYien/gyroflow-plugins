@@ -178,7 +178,8 @@ struct Inner {
     timed_out: bool,
     /// Key of the last export attempt, passed to Lua so an unchanged key does not re-export.
     last_key: Option<String>,
-    /// Last validated (key, effective mode).
+    /// Last validated (key, effective mode). Cleared when a later export's content for the same
+    /// key is rejected.
     last_validated: Option<(String, &'static str)>,
     /// An explicit query asked for an export; consumed by the next `begin_request`.
     want: bool,
@@ -280,6 +281,8 @@ impl DrtSharedState {
 
         // Parse before locking: unzipping a large project's DRT takes a while.
         let mut parsed: Option<DrtSizing> = None;
+        // This query's DRT content was read and rejected by the parser or the cross-checks.
+        let mut content_rejected = false;
         let this_query: Option<Result<&'static str, String>> = match &outcome {
             DrtOutcome::NotRequested | DrtOutcome::Skipped => None,
             DrtOutcome::Unsupported => Some(Err("unsupported".to_string())),
@@ -290,9 +293,13 @@ impl DrtSharedState {
                 None => Err(DrtRejection::TimelineNotFound.reason()),
                 Some((name, _)) => {
                     let reading = ApiSizingReading { timeline_name: name, width: ctx.width, height: ctx.height, horizontal_mode: api_mode };
-                    effective_input_sizing(bytes, &reading)
-                        .map(|sizing| parsed.insert(sizing).effective_mode)
-                        .map_err(|rejection| rejection.reason())
+                    match effective_input_sizing(bytes, &reading) {
+                        Ok(sizing) => Ok(parsed.insert(sizing).effective_mode),
+                        Err(rejection) => {
+                            content_rejected = true;
+                            Err(rejection.reason())
+                        }
+                    }
                 }
             }),
         };
@@ -324,6 +331,13 @@ impl DrtSharedState {
         }
         if let (Some(key), Some(sizing)) = (key, &parsed) {
             inner.last_validated = Some((key.to_string(), sizing.effective_mode));
+        }
+        // Content read in this query and rejected outranks the value cached for the same key:
+        // the result falls back with the rejection reason, and later skips for that key do not
+        // return to the stale mode. Failures without content (io, timeout, export failure,
+        // unsupported) keep the cache preference.
+        if content_rejected && let Some(key) = key && inner.last_validated.as_ref().is_some_and(|(cached_key, _)| cached_key == key) {
+            inner.last_validated = None;
         }
 
         let cached = inner.last_validated.as_ref().map(|(k, mode)| (k.as_str(), *mode));
@@ -703,6 +717,47 @@ mod tests {
         let state = Arc::new(DrtSharedState::default());
         let d = state.finish(t0, begin(&state, t0, false, &dir), unreadable(), &vertical);
         assert_eq!(mode_and_source(&d), (Some("scaleToFit"), &fallback("export-failed(io: gone)")));
+    }
+
+    #[test]
+    fn content_rejection_overrides_cached_and_clears_it() {
+        let dir = TestDir::new();
+        let state = Arc::new(DrtSharedState::default());
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let tl_hex = name_hex();
+        let vertical = ctx(&tl_hex, 1080, 1920);
+
+        let d = state.finish(t0, begin(&state, t0, false, &dir), exported(80.0), &vertical);
+        assert_eq!(mode_and_source(&d), (Some("stretch"), &SizingSource::Drt));
+
+        // The same timeline key, but this export's vertical field is out of range.
+        let mut setup = fixture("b3_fit_stretch");
+        setup[112..116].copy_from_slice(&7i32.to_be_bytes());
+        let rejected = synthetic_drt(&[("Timeline A", &hex(&qt_fields(&[("SequenceSetup", QtValue::Bytes(setup))])))]);
+        let d = state.finish(at(10), begin(&state, at(10), false, &dir), DrtOutcome::Exported { export_ms: 80.0, bytes: Ok(rejected) }, &vertical);
+        assert_eq!(mode_and_source(&d), (Some("scaleToFit"), &fallback("vertical-out-of-range(7)")));
+
+        // The stale mode is gone for this key, not just outranked once.
+        let d = state.finish(at(15), begin(&state, at(15), false, &dir), DrtOutcome::Skipped, &vertical);
+        assert_eq!(mode_and_source(&d), (Some("scaleToFit"), &fallback("no-validated-value")));
+    }
+
+    #[test]
+    fn content_rejection_keeps_the_value_cached_for_another_key() {
+        let dir = TestDir::new();
+        let state = Arc::new(DrtSharedState::default());
+        let t0 = Instant::now();
+        let hex = name_hex();
+        let vertical = ctx(&hex, 1080, 1920);
+        state.finish(t0, begin(&state, t0, false, &dir), exported(80.0), &vertical);
+
+        // A rejection under another key (here: resolution mismatch) leaves the first key's value.
+        let other = ctx(&hex, 1080, 1350);
+        let d = state.finish(t0, begin(&state, t0, false, &dir), exported(80.0), &other);
+        assert_eq!(mode_and_source(&d), (Some("scaleToFit"), &fallback("resolution-mismatch(drt=1080x1920 api=1080x1350)")));
+        let d = state.finish(t0, None, DrtOutcome::Skipped, &vertical);
+        assert_eq!(mode_and_source(&d), (Some("stretch"), &SizingSource::DrtCached));
     }
 
     #[test]
