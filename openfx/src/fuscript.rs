@@ -17,6 +17,116 @@ It is also impossible to query file path on a compound clip.\n\nIn any case, you
 /// resident for the rest of the session.
 const QUERY_TIMEOUT_MS: u64 = 5_000;
 
+// Extended query: the original 6 lines (FPS, Frames, Duration, PAR, Resolution, File Path)
+// come first to preserve the pre-existing parse-by-line-count expectation. The next 4
+// lines carry the host-input-sizing setting: useCustomSettings (timeline-level toggle),
+// the timeline override or project default for `timelineInputResMismatchBehavior`, and
+// timelineResolutionWidth/Height (used as `stab.params.size` in Stretch and for the
+// FillCrop/CenterCrop crop geometry). The resolution honors the same timeline
+// custom-settings override as the mismatch mode: a custom timeline can have a different
+// resolution than the project (e.g. a portrait 1080x1920 timeline in a 1920x1080
+// project), and the project-level read returned the wrong dimensions there. Empty
+// timeline-level values (older Resolve / missing keys) fall back to the project read.
+// Empty-string fallbacks (older Resolve versions / missing keys) keep the line count.
+//
+// Host read-path notes (re-verified live on Resolve 21.0.0.47, 2026-07-26 — an
+// earlier comment here claimed the opposite and was wrong):
+//  - The single-key form `GetSetting('key')` used below reflects the user's edit as
+//    soon as the settings dialog is saved, at BOTH project and timeline level. There
+//    is no need to restart Resolve or toggle "Use Project Settings".
+//  - Do NOT switch this to the no-argument `GetSetting()` dump form to look for the
+//    timeline override: on a timeline that form returns the project-level value set
+//    (or, once custom settings are on, only the overridden subset), so the effective
+//    value cannot be found in it. The original investigation searched that dump,
+//    found nothing, and wrongly concluded the host had no live read path.
+//  - The snapshot can carry cross-session residue until the first dialog save of the
+//    session (observed: a 6-day-old timeline resolution). The plugin's freshness
+//    window re-reads periodically, which makes that self-correcting.
+//  - Per-clip overrides (Inspector > Retime and Scaling > Scaling) are NOT visible
+//    here: they live in `timelineItem:GetProperty()['Scaling']` and never move
+//    `timelineInputResMismatchBehavior`. Known gap, tracked separately.
+// Lines 11-12 (plugins-host-timeline-trim): the item's source-domain in/out
+// frames. Method existence is probed before calling (older Resolve lacks
+// GetSourceStartFrame — an unguarded call would nil-error and take the whole
+// 12-line query down with it). The GetLeftOffset+GetDuration fallback is
+// timeline-domain for the duration part, so it is only used when the source
+// accessors are absent; empty strings keep the line count on any failure.
+const CORE_QUERY_LUA: &str = "proj = Resolve():GetProjectManager():GetCurrentProject();\
+                              tl = proj:GetCurrentTimeline();\
+                              it = tl:GetCurrentVideoItem();\
+                              p = it:GetMediaPoolItem():GetClipProperty();\
+                              print(p['FPS']);print(p['Frames']);print(p['Duration']);print(p['PAR']);print(p['Resolution']);print(p['File Path']);\
+                              ucs = tl:GetSetting('useCustomSettings') or '';\
+                              if ucs == '1' then mm = tl:GetSetting('timelineInputResMismatchBehavior') or ''; else mm = proj:GetSetting('timelineInputResMismatchBehavior') or ''; end;\
+                              tw = ''; th = '';\
+                              if ucs == '1' then tw = tl:GetSetting('timelineResolutionWidth') or ''; th = tl:GetSetting('timelineResolutionHeight') or ''; end;\
+                              if tw == '' or th == '' then tw = proj:GetSetting('timelineResolutionWidth') or ''; th = proj:GetSetting('timelineResolutionHeight') or ''; end;\
+                              print(ucs);print(mm);print(tw);print(th);\
+                              ss = ''; se = '';\
+                              if it.GetSourceStartFrame ~= nil then ss = it:GetSourceStartFrame() or ''; se = it:GetSourceEndFrame() or ''; end;\
+                              if ss == '' and it.GetLeftOffset ~= nil then lo = it:GetLeftOffset(); du = it:GetDuration(); if lo ~= nil and du ~= nil then ss = lo; se = lo + du; end; end;\
+                              print(ss);print(se);";
+
+/// Fixed-protocol DRT export block appended after the core query. It reads the core script's
+/// globals `tl`, `tw`, `th` and `mm`, plus the `GF_*` header globals.
+const DRT_BLOCK_LUA: &str = r#"local function gf_hex(s) return (s:gsub('.', function(c) return string.format('%02x', c:byte()) end)) end
+local gf_ok, gf_err = pcall(function()
+    local name_hex = gf_hex(tl:GetName() or '')
+    print('gf_tl_name_hex=' .. name_hex)
+    local w, h = tonumber(tw) or 0, tonumber(th) or 0
+    if GF_ALLOW_DRT ~= 1 or h <= w then print('gf_drt=skipped'); return end
+    local key = name_hex .. '|' .. w .. '|' .. h .. '|' .. tostring(mm)
+    if GF_WANT_DRT ~= 1 and key == GF_LAST_KEY then print('gf_drt=skipped'); return end
+    local r = Resolve()
+    if r.EXPORT_DRT == nil or tl.Export == nil then print('gf_drt=unsupported'); return end
+    local t0 = bmd.gettime()
+    local ok = tl:Export(GF_DRT_PATH, r.EXPORT_DRT)
+    print(string.format('gf_drt_ms=%.3f', (bmd.gettime() - t0) * 1000))
+    print(ok and 'gf_drt=exported' or 'gf_drt=failed:export-returned-false')
+end)
+if not gf_ok then print('gf_drt=failed:' .. (string.gsub(tostring(gf_err), '[%c]', ' '))) end"#;
+
+/// Parameters of the DRT part of the query script.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrtScriptParams { pub allow: bool, pub want: bool, pub last_key: String, pub path: String }
+
+impl DrtScriptParams {
+    /// No export is allowed or requested; the DRT block only reports the timeline name.
+    pub fn disabled() -> Self {
+        Self { allow: false, want: false, last_key: String::new(), path: String::new() }
+    }
+}
+
+/// Renders `s` as a single-quoted, pure-ASCII Lua string literal. Bytes outside 0x20..=0x7E, plus
+/// `\` and `'`, are written as decimal escapes. Every escape uses exactly three digits, because
+/// Lua 5.1 reads up to three digits after `\` and a shorter escape followed by an ASCII digit
+/// would absorb it.
+pub fn lua_ascii_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for &b in s.as_bytes() {
+        if (0x20..=0x7E).contains(&b) && b != b'\\' && b != b'\'' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\{b:03}"));
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Builds the full fuscript query: four `GF_*` header globals, the core query, then the DRT block.
+pub fn build_query_script(drt: &DrtScriptParams) -> String {
+    // The core text has no trailing newline, so the separator keeps the block's first statement
+    // on its own line.
+    format!(
+        "GF_ALLOW_DRT = {}\nGF_WANT_DRT = {}\nGF_LAST_KEY = {}\nGF_DRT_PATH = {}\n{}\n{}",
+        drt.allow as u8, drt.want as u8,
+        lua_ascii_literal(&drt.last_key), lua_ascii_literal(&drt.path),
+        CORE_QUERY_LUA, DRT_BLOCK_LUA
+    )
+}
+
 fn replace_frame_count(input: &str) -> String {
     use regex::Regex;
     let re = Regex::new(r"\[(\d+)-(\d+)\]").unwrap();
@@ -145,55 +255,7 @@ impl CurrentFileInfo {
             #[cfg(target_os = "windows")]
             { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); } // CREATE_NO_WINDOW
 
-            // Extended query: the original 6 lines (FPS, Frames, Duration, PAR, Resolution, File Path)
-            // come first to preserve the pre-existing parse-by-line-count expectation. The next 4
-            // lines carry the host-input-sizing setting: useCustomSettings (timeline-level toggle),
-            // the timeline override or project default for `timelineInputResMismatchBehavior`, and
-            // timelineResolutionWidth/Height (used as `stab.params.size` in Stretch and for the
-            // FillCrop/CenterCrop crop geometry). The resolution honors the same timeline
-            // custom-settings override as the mismatch mode: a custom timeline can have a different
-            // resolution than the project (e.g. a portrait 1080x1920 timeline in a 1920x1080
-            // project), and the project-level read returned the wrong dimensions there. Empty
-            // timeline-level values (older Resolve / missing keys) fall back to the project read.
-            // Empty-string fallbacks (older Resolve versions / missing keys) keep the line count.
-            //
-            // Host read-path notes (re-verified live on Resolve 21.0.0.47, 2026-07-26 — an
-            // earlier comment here claimed the opposite and was wrong):
-            //  - The single-key form `GetSetting('key')` used below reflects the user's edit as
-            //    soon as the settings dialog is saved, at BOTH project and timeline level. There
-            //    is no need to restart Resolve or toggle "Use Project Settings".
-            //  - Do NOT switch this to the no-argument `GetSetting()` dump form to look for the
-            //    timeline override: on a timeline that form returns the project-level value set
-            //    (or, once custom settings are on, only the overridden subset), so the effective
-            //    value cannot be found in it. The original investigation searched that dump,
-            //    found nothing, and wrongly concluded the host had no live read path.
-            //  - The snapshot can carry cross-session residue until the first dialog save of the
-            //    session (observed: a 6-day-old timeline resolution). The plugin's freshness
-            //    window re-reads periodically, which makes that self-correcting.
-            //  - Per-clip overrides (Inspector > Retime and Scaling > Scaling) are NOT visible
-            //    here: they live in `timelineItem:GetProperty()['Scaling']` and never move
-            //    `timelineInputResMismatchBehavior`. Known gap, tracked separately.
-            // Lines 11-12 (plugins-host-timeline-trim): the item's source-domain in/out
-            // frames. Method existence is probed before calling (older Resolve lacks
-            // GetSourceStartFrame — an unguarded call would nil-error and take the whole
-            // 12-line query down with it). The GetLeftOffset+GetDuration fallback is
-            // timeline-domain for the duration part, so it is only used when the source
-            // accessors are absent; empty strings keep the line count on any failure.
-            let script = "proj = Resolve():GetProjectManager():GetCurrentProject();\
-                              tl = proj:GetCurrentTimeline();\
-                              it = tl:GetCurrentVideoItem();\
-                              p = it:GetMediaPoolItem():GetClipProperty();\
-                              print(p['FPS']);print(p['Frames']);print(p['Duration']);print(p['PAR']);print(p['Resolution']);print(p['File Path']);\
-                              ucs = tl:GetSetting('useCustomSettings') or '';\
-                              if ucs == '1' then mm = tl:GetSetting('timelineInputResMismatchBehavior') or ''; else mm = proj:GetSetting('timelineInputResMismatchBehavior') or ''; end;\
-                              tw = ''; th = '';\
-                              if ucs == '1' then tw = tl:GetSetting('timelineResolutionWidth') or ''; th = tl:GetSetting('timelineResolutionHeight') or ''; end;\
-                              if tw == '' or th == '' then tw = proj:GetSetting('timelineResolutionWidth') or ''; th = proj:GetSetting('timelineResolutionHeight') or ''; end;\
-                              print(ucs);print(mm);print(tw);print(th);\
-                              ss = ''; se = '';\
-                              if it.GetSourceStartFrame ~= nil then ss = it:GetSourceStartFrame() or ''; se = it:GetSourceEndFrame() or ''; end;\
-                              if ss == '' and it.GetLeftOffset ~= nil then lo = it:GetLeftOffset(); du = it:GetDuration(); if lo ~= nil and du ~= nil then ss = lo; se = lo + du; end; end;\
-                              print(ss);print(se);";
+            let script = build_query_script(&DrtScriptParams::disabled());
             // Run the query with a deadline instead of `output()`.
             //
             // `output()` blocks forever, and fuscript reaches Resolve over IPC: while Resolve is
@@ -202,7 +264,7 @@ impl CurrentFileInfo {
             // playback, and because the caller's stuck-guard reclamation re-arms on a timer, every
             // window leaked one more permanently hanging process (4 alive after ~3 minutes).
             //
-            // Polling without draining the pipes cannot deadlock here: the query prints ten short
+            // Polling without draining the pipes cannot deadlock here: the query prints at most ~16 short
             // lines, orders of magnitude below the pipe buffer.
             let spawned = cmd
                 .args(["-q", "-l", "lua", "-x", &script])
@@ -576,5 +638,59 @@ mod tests {
     fn parse_drt_lines_ignores_unknown_and_order() {
         let l = parse_drt_lines(&["gf_future=1", "gf_drt=skipped", "junk", "gf_tl_name_hex=00"]);
         assert_eq!((l.status, l.timeline_name_hex.as_deref()), (DrtLineStatus::Skipped, Some("00")));
+    }
+
+    // Lua 5.1 string unescape for what `lua_ascii_literal` can emit: `\ddd` (1-3 decimal digits),
+    // `\\` and `\'`; every other byte is copied as is.
+    fn lua51_unescape(s: &str) -> Vec<u8> {
+        let b = s.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] != b'\\' { out.push(b[i]); i += 1; continue; }
+            i += 1;
+            if b[i].is_ascii_digit() {
+                let mut v = 0u32;
+                let mut n = 0;
+                while n < 3 && i < b.len() && b[i].is_ascii_digit() { v = v * 10 + (b[i] - b'0') as u32; i += 1; n += 1; }
+                out.push(v as u8);
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn lua_literal_is_pure_ascii_and_round_trips() {
+        for s in ["C:/Users/张三/AppData/Local/Temp/x.drt", "/var/folders/ab/T/한국어/x.drt", "clip 🎬", "it's a \\ test", ""] {
+            let lit = lua_ascii_literal(s);
+            assert!(lit.is_ascii() && lit.starts_with('\'') && lit.ends_with('\''));
+            assert_eq!(lua51_unescape(&lit[1..lit.len() - 1]), s.as_bytes());
+        }
+    }
+
+    #[test]
+    fn lua_literal_non_ascii_byte_before_digit_round_trips() {
+        let lit = lua_ascii_literal("张1");
+        assert!(lit.is_ascii());
+        assert_eq!(lua51_unescape(&lit[1..lit.len() - 1]), "张1".as_bytes());
+    }
+
+    #[test]
+    fn query_script_keeps_core_query_verbatim() {
+        let s = build_query_script(&DrtScriptParams::disabled());
+        assert!(s.contains(CORE_QUERY_LUA) && s.contains(DRT_BLOCK_LUA));
+        assert!(s.starts_with("GF_ALLOW_DRT = 0\nGF_WANT_DRT = 0\nGF_LAST_KEY = ''\nGF_DRT_PATH = ''\n"));
+    }
+
+    #[test]
+    fn query_script_embeds_flags_and_escaped_path() {
+        let p = DrtScriptParams { allow: true, want: true, last_key: "6162|1080|1920|scaleToFit".into(), path: "C:/Users/张三/Temp/gyroflow-ofx-sizing-1-2.drt".into() };
+        let s = build_query_script(&p);
+        assert!(s.is_ascii() && !s.contains('张'));
+        assert!(s.contains("GF_ALLOW_DRT = 1\nGF_WANT_DRT = 1\nGF_LAST_KEY = '6162|1080|1920|scaleToFit'\n"));
+        assert!(s.contains(&format!("GF_DRT_PATH = {}\n", lua_ascii_literal(&p.path))));
     }
 }
