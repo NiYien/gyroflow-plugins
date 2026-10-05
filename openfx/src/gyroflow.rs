@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use ofx::*;
 use super::fuscript::*;
+use super::drt_state::{ DrtSharedState, sweep_temp_files };
 use gyroflow_plugin_base::*;
 use gyroflow_plugin_base::parking_lot::{ Mutex, RwLock };
 use gyroflow_plugin_base::lru::LruCache;
@@ -65,6 +66,11 @@ struct GyroflowPlugin {
     // observed it (single-flight busy, pacing floor) would let a query armed BEFORE the switch
     // land with the old project's values under a fresh timestamp and reinstate the stale window.
     host_input_sizing_force_refresh: AtomicBool,
+    // Process-global DRT export state that recovers the input sizing of vertical timelines
+    // (export pacing, the export claim, the last validated vertical mode and the explicit-path
+    // export request). Shared by every instance, like the cache above: per-instance exports or
+    // timers would break the process-wide export cost bound.
+    host_input_sizing_drt: Arc<DrtSharedState>,
 }
 
 /// Build the placeholder `CurrentFileInfo` that carries only host-input-sizing fields.
@@ -139,8 +145,11 @@ impl GyroflowPlugin {
         // back-off, the TTL=0 kill-switch and the forced-arm bypass all live in one pure,
         // unit-tested gate. The force flag is only PEEKED here — it is consumed at the arm
         // point below, so a skipped read (pacing floor, single-flight busy) leaves it pending.
+        // An explicit LoadCurrent / ReloadProject that found no validated vertical mode forces
+        // the arm as well: it never exports itself and leaves the export to this refresh. That
+        // request is consumed by the query thread when it claims the export slot.
         let ttl = mismatch_ttl_ms();
-        let forced = self.host_input_sizing_force_refresh.load(SeqCst);
+        let forced = self.host_input_sizing_force_refresh.load(SeqCst) || self.host_input_sizing_drt.want_pending();
         let decision = {
             let last_attempt = self.host_input_sizing_last_attempt.lock();
             host_sizing_arm_decision(
@@ -203,6 +212,9 @@ impl GyroflowPlugin {
             current_file_info_pending.clone(),
             self.host_input_sizing_refresh_in_flight.clone(),
             self.host_input_sizing_failures.clone(),
+            self.host_input_sizing_drt.clone(),
+            forced,
+            ttl,
         );
     }
 }
@@ -1873,9 +1885,12 @@ impl Execute for GyroflowPlugin {
                 // does real work when the pending flag flips, so this Render-path mirror only
                 // overwrites the cache when a new fuscript result came in.
                 //
-                // Same pass also persists the raw mismatch string into the per-node hidden
+                // Same pass also persists the mismatch string into the per-node hidden
                 // `DetectedMismatchMode` OFX param so subsequent `.drp` reopens can restore the
-                // mode without fuscript. The set_value happens AFTER the locks above are
+                // mode without fuscript. The string is the effective mode the query published
+                // (on vertical timelines the validated DRT vertical field, not the raw API
+                // value), so a reopen restores the correct geometry before the first live query;
+                // the restore precedence is unchanged. The set_value happens AFTER the locks above are
                 // dropped, so the synchronous `InstanceChanged(DetectedMismatchMode)` callback
                 // Resolve might fire (which would attempt to re-lock `current_file_info`)
                 // never deadlocks. The InstanceChanged handler treats unknown param names as a
@@ -2799,7 +2814,7 @@ impl Execute for GyroflowPlugin {
             InstanceChanged(ref mut effect, ref mut in_args) => {
                 let instance_data: &mut InstanceData = effect.get_instance_data()?;
                 if in_args.get_name()? == "LoadCurrent" {
-                    CurrentFileInfo::query(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone());
+                    CurrentFileInfo::query(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(self.host_input_sizing_drt.clone()));
                 }
                 // §8.2: re-query fuscript on ReloadProject so a user that just toggled Resolve's
                 // mismatched-resolution setting between renders can have the new value picked up
@@ -2808,7 +2823,7 @@ impl Execute for GyroflowPlugin {
                 // idempotency marker so the resolved mode change is honored on the next render
                 // without waiting for a stab rebuild.
                 if in_args.get_name()? == "ReloadProject" && CurrentFileInfo::is_available() {
-                    CurrentFileInfo::query_silent(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone());
+                    CurrentFileInfo::query_silent(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(self.host_input_sizing_drt.clone()));
                     instance_data.applied_host_input_sizing = None;
                 }
                 // §2.5 + §7.2: handle the OFX-only HostInputSizing dropdown before the
@@ -3262,6 +3277,9 @@ impl Execute for GyroflowPlugin {
 
             Load => {
 				self.gyroflow_plugin.initialize_log("openfx");
+                // Remove DRT temp files left behind by crashed sessions (older than an hour).
+                let swept = sweep_temp_files(&std::env::temp_dir(), std::process::id(), 0, std::time::SystemTime::now());
+                log::debug!(target: "host_input_sizing", "host_input_sizing: swept {swept} stale DRT temp file(s) at load");
                 OK
             },
 

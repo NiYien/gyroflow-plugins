@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 use gyroflow_plugin_base::parking_lot::Mutex;
 use gyroflow_plugin_base::rfd;
+use crate::drt_state::{ DrtOutcome, DrtSharedState, QueryContext, SizingSource };
 
 const FAILED_MSG: &str = "This feature relies on external scripting and is only available in paid Resolve Studio. You have to allow executing scripts:\n
 Set \"Preferences -> General -> External scripting using\" to \"Local\".\n\n
@@ -149,8 +150,11 @@ pub struct CurrentFileInfo {
     pub pixel_aspect_ratio: String,
 
     // Host-input-sizing fields populated alongside the core 6 lines by the extended lua script.
-    // `mismatch_mode` is the raw `timelineInputResMismatchBehavior` string (`scaleToFit` /
-    // `scaleToCrop` / `centerCrop` / `stretch`), already disambiguated by `useCustomSettings`.
+    // `mismatch_mode` is the effective input sizing mode (`scaleToFit` / `scaleToCrop` /
+    // `centerCrop` / `stretch`): on landscape and square timelines the raw
+    // `timelineInputResMismatchBehavior` value, already disambiguated by `useCustomSettings`; on
+    // vertical timelines the validated vertical field of the timeline's DRT export, or the raw
+    // value when no validated one exists for the current timeline (see `drt_state::decide`).
     // `timeline_w`/`timeline_h` come from the project (or timeline override) resolution settings;
     // they are used by Stretch mode to set `stab.params.size` to the host buffer dimensions.
     // `use_custom_settings` is the raw timeline `useCustomSettings` value, kept for diagnostics.
@@ -196,8 +200,11 @@ impl CurrentFileInfo {
     pub fn is_available() -> bool {
         Self::get_fuscript().map(|x| x.exists()).unwrap_or_default()
     }
-    pub fn query(current_file_info: Arc<Mutex<Option<Self>>>, current_file_info_pending: Arc<AtomicBool>) {
-        Self::query_inner(current_file_info, current_file_info_pending, false, None, true, None);
+    // Explicit query (LoadCurrent). With `drt`, the published mode is decided against the shared
+    // DRT state like every other query, but this query never exports: on a vertical timeline
+    // without a validated value it only asks the next refresh to export.
+    pub fn query(current_file_info: Arc<Mutex<Option<Self>>>, current_file_info_pending: Arc<AtomicBool>, drt: Option<Arc<DrtSharedState>>) {
+        Self::query_inner(current_file_info, current_file_info_pending, false, None, true, None, drt.map(|state| (state, false, false, 0)));
     }
 
     // Refresh variant used by the expiry-driven path (openfx-mismatch-mode-refresh). Differs from
@@ -205,25 +212,41 @@ impl CurrentFileInfo {
     // query thread finishes (every path, including early returns and panics), and it publishes
     // ONLY the host-input-sizing fields — never the clip-level fields, never the pending flag.
     // See the publication block in `query_inner` for why that separation is load-bearing.
+    // It is also the only query that may export the DRT of a vertical timeline: `forced` and
+    // `ttl_ms` drive the export pacing in `DrtSharedState::begin_request`.
     pub fn query_refresh(
         current_file_info: Arc<Mutex<Option<Self>>>,
         current_file_info_pending: Arc<AtomicBool>,
         in_flight: Arc<AtomicBool>,
         failures: Arc<std::sync::atomic::AtomicU32>,
+        drt: Arc<DrtSharedState>,
+        forced: bool,
+        ttl_ms: u64,
     ) {
-        Self::query_inner(current_file_info, current_file_info_pending, true, Some(in_flight), false, Some(failures));
+        Self::query_inner(current_file_info, current_file_info_pending, true, Some(in_flight), false, Some(failures), Some((drt, true, forced, ttl_ms)));
     }
 
     // Silent variant: same query, but does not pop the rfd error dialog when fuscript fails.
     // Used by automatic triggers (CreateInstance, ReloadProject) where a failure is expected
     // on Resolve Free / non-Resolve hosts / compound clips and the user did not explicitly ask
     // for the query — we just want to populate `CurrentFileInfo` when it happens to be available
-    // so the `HostInputSizing` Auto mode has fuscript data to consult.
-    pub fn query_silent(current_file_info: Arc<Mutex<Option<Self>>>, current_file_info_pending: Arc<AtomicBool>) {
-        Self::query_inner(current_file_info, current_file_info_pending, true, None, true, None);
+    // so the `HostInputSizing` Auto mode has fuscript data to consult. Like `query`, it never
+    // exports the DRT.
+    pub fn query_silent(current_file_info: Arc<Mutex<Option<Self>>>, current_file_info_pending: Arc<AtomicBool>, drt: Option<Arc<DrtSharedState>>) {
+        Self::query_inner(current_file_info, current_file_info_pending, true, None, true, None, drt.map(|state| (state, false, false, 0)));
     }
 
-    fn query_inner(current_file_info: Arc<Mutex<Option<Self>>>, current_file_info_pending: Arc<AtomicBool>, silent: bool, in_flight: Option<Arc<AtomicBool>>, publish_clip_fields: bool, failures: Option<Arc<std::sync::atomic::AtomicU32>>) {
+    // `drt` is `(state, allow_export, forced, ttl_ms)`. Without it the raw API mode is published,
+    // exactly as before the DRT state existed.
+    fn query_inner(
+        current_file_info: Arc<Mutex<Option<Self>>>,
+        current_file_info_pending: Arc<AtomicBool>,
+        silent: bool,
+        in_flight: Option<Arc<AtomicBool>>,
+        publish_clip_fields: bool,
+        failures: Option<Arc<std::sync::atomic::AtomicU32>>,
+        drt: Option<(Arc<DrtSharedState>, bool, bool, u64)>,
+    ) {
         std::thread::spawn(move || {
             // Releases the caller's single-flight guard on every exit path — parse failure,
             // fuscript spawn failure, early return, panic. A leaked guard would permanently
@@ -255,7 +278,22 @@ impl CurrentFileInfo {
             #[cfg(target_os = "windows")]
             { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); } // CREATE_NO_WINDOW
 
-            let script = build_query_script(&DrtScriptParams::disabled());
+            // Only the refresh path claims the process-wide export slot. The request is declared
+            // after the guards above, so on every exit that does not hand it to the state (lua
+            // error, fewer than 12 lines, spawn failure, panic) it is dropped first: the temp file
+            // is deleted and the claim released before the single-flight guard is, so a re-armed
+            // refresh never finds the claim still held.
+            let (drt_state, allow_export) = match &drt {
+                Some((state, allow, _, _)) => (Some(Arc::clone(state)), *allow),
+                None => (None, false),
+            };
+            let request = match &drt {
+                Some((state, true, forced, ttl_ms)) => state.begin_request(
+                    std::time::Instant::now(), *ttl_ms, *forced, &std::env::temp_dir(), std::process::id()),
+                _ => None,
+            };
+            let disabled = DrtScriptParams::disabled();
+            let script = build_query_script(request.as_ref().map_or(&disabled, |req| &req.params));
             // Run the query with a deadline instead of `output()`.
             //
             // `output()` blocks forever, and fuscript reaches Resolve over IPC: while Resolve is
@@ -293,6 +331,13 @@ impl CurrentFileInfo {
                         "fuscript query exceeded {QUERY_TIMEOUT_MS}ms and was killed — Resolve is \
                          most likely busy (playback / export); the host input sizing mode keeps \
                          its previous value and the next window retries");
+                    // A requested export may still be running inside Resolve: record the timeout
+                    // cost so no export runs again until its interval has passed. Nothing is
+                    // published, so there is no timeline reading to pass along.
+                    if let Some(state) = &drt_state {
+                        state.finish_unpublished(std::time::Instant::now(), request, DrtOutcome::TimedOut,
+                            &QueryContext { name_hex: None, width: 0, height: 0, api_mode: None });
+                    }
                     return;
                 }
                 let mut stdout = String::new();
@@ -318,6 +363,9 @@ impl CurrentFileInfo {
                 // stays the same; only a true script failure produces fewer lines. Lines after the 12th
                 // are optional `gf_`-prefixed DRT fields in order-independent format; unknown lines are
                 // ignored. The first 12 lines keep their exact meaning.
+                //
+                // The `errors.is_empty()` rule also holds for queries that export the DRT: stderr
+                // was observed empty across `Export` calls (3/3, Resolve 21.0.0.47).
                 if errors.is_empty() && lines.len() >= 12 {
                     let fps = lines[0].parse::<f64>().unwrap_or_default();
                     let frame_count = lines[1].parse::<usize>().unwrap_or_default();
@@ -327,7 +375,8 @@ impl CurrentFileInfo {
                     let file_path = replace_frame_count(lines[5]);
                     let use_custom_settings = lines[6].trim() == "1";
                     let mismatch_mode_raw = lines[7].trim();
-                    let mismatch_mode = if mismatch_mode_raw.is_empty() {
+                    // The raw API value; the published mode is the effective one decided below.
+                    let api_mismatch_mode = if mismatch_mode_raw.is_empty() {
                         None
                     } else {
                         Some(mismatch_mode_raw.to_string())
@@ -336,8 +385,47 @@ impl CurrentFileInfo {
                     let timeline_h = lines[9].trim().parse::<usize>().unwrap_or_default();
                     let source_start_frame = lines[10].trim().parse::<f64>().ok();
                     let source_end_frame   = lines[11].trim().parse::<f64>().ok();
-                    let _drt_lines = parse_drt_lines(&lines[12..]);
+                    let drt_lines = parse_drt_lines(&lines[12..]);
+                    let outcome = drt_outcome(allow_export, request.as_ref().map(|req| req.path.as_path()), &drt_lines, |path| std::fs::read(path));
+                    // Per-export details, logged at debug once the export is settled. Never the
+                    // bytes or the outcome itself: a DRT carries the user's media paths. The temp
+                    // file's deletion is logged by its guard.
+                    let export_details = match (&request, &outcome) {
+                        (Some(req), DrtOutcome::Exported { export_ms, bytes }) => Some(match bytes {
+                            Ok(bytes) => format!("DRT export took {export_ms:.1}ms, read {} bytes from {}", bytes.len(), req.path.display()),
+                            Err(e) => format!("DRT export took {export_ms:.1}ms, could not read {}: {e}", req.path.display()),
+                        }),
+                        _ => None,
+                    };
+                    let drt_ctx = QueryContext {
+                        name_hex: drt_lines.timeline_name_hex.as_deref(),
+                        width: timeline_w,
+                        height: timeline_h,
+                        api_mode: api_mismatch_mode.as_deref(),
+                    };
                     if fps > 0.0 && frame_count > 0 && duration_s > 0.0 && !file_path.is_empty() {
+                        // Everything published below — both publication modes, the change test
+                        // behind the forced re-render and the render-path mirror — sees only the
+                        // effective mode. The raw API value stays in the state's log line.
+                        let mismatch_mode = match &drt_state {
+                            Some(state) => {
+                                let decision = state.finish(std::time::Instant::now(), request, outcome, &drt_ctx);
+                                // The info line below appears only when the decision changes;
+                                // this one tells whether every single export validated.
+                                if let Some(details) = &export_details {
+                                    let source = match &decision.source {
+                                        SizingSource::ApiFallback(reason) => format!("api-fallback reason={reason}"),
+                                        source => source.label().to_string(),
+                                    };
+                                    log::debug!(target: "host_input_sizing", "host_input_sizing: {details}; source={source}");
+                                }
+                                if let Some(line) = &decision.log_line {
+                                    log::info!(target: "host_input_sizing", "{line}");
+                                }
+                                decision.effective_mode
+                            }
+                            None => api_mismatch_mode,
+                        };
                         let info = Self {
                             file_path: file_path.to_string(),
                             fps,
@@ -516,6 +604,14 @@ impl CurrentFileInfo {
                                 }
                             }
                         }
+                    } else if let Some(state) = &drt_state {
+                        // No usable clip under the playhead (e.g. a compound clip has no file
+                        // path): nothing is published, exactly as before, but an export that ran
+                        // is still accounted for in the pacing and the validated value.
+                        state.finish_unpublished(std::time::Instant::now(), request, outcome, &drt_ctx);
+                        if let Some(details) = &export_details {
+                            log::debug!(target: "host_input_sizing", "host_input_sizing: {details}; not published (no usable clip under the playhead)");
+                        }
                     }
                 } else {
                     log::debug!("fuscript stdout: {stdout}");
@@ -605,6 +701,35 @@ pub fn parse_drt_lines(extra: &[&str]) -> DrtLines {
     result
 }
 
+/// Maps the DRT lines of a completed query to the outcome recorded in the shared DRT state.
+///
+/// Explicit queries (`allow_export = false`) never export: their script carries
+/// `GF_ALLOW_DRT = 0`, so whatever the Lua block printed they report `NotRequested`, which lets
+/// the state request an export from the next refresh. On the refresh path a skip is a skip
+/// whether or not this query claimed the export slot, and only a claimed export is trusted as an
+/// export: `read` loads the requested file and is called for nothing else. A missing duration
+/// is passed on as NaN, which the state records as the worst-case cost.
+fn drt_outcome(
+    allow_export: bool,
+    request_path: Option<&std::path::Path>,
+    lines: &DrtLines,
+    read: impl FnOnce(&std::path::Path) -> std::io::Result<Vec<u8>>,
+) -> DrtOutcome {
+    if !allow_export {
+        return DrtOutcome::NotRequested;
+    }
+    match &lines.status {
+        DrtLineStatus::Exported => match request_path {
+            Some(path) => DrtOutcome::Exported { export_ms: lines.export_ms.unwrap_or(f64::NAN), bytes: read(path) },
+            // Lua only exports to the path of a request, so this cannot happen.
+            None => DrtOutcome::Skipped,
+        },
+        DrtLineStatus::Skipped | DrtLineStatus::Absent => DrtOutcome::Skipped,
+        DrtLineStatus::Unsupported => DrtOutcome::Unsupported,
+        DrtLineStatus::Failed(msg) => DrtOutcome::Failed(msg.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +808,79 @@ mod tests {
         let s = build_query_script(&DrtScriptParams::disabled());
         assert!(s.contains(CORE_QUERY_LUA) && s.contains(DRT_BLOCK_LUA));
         assert!(s.starts_with("GF_ALLOW_DRT = 0\nGF_WANT_DRT = 0\nGF_LAST_KEY = ''\nGF_DRT_PATH = ''\n"));
+    }
+
+    /// A comparable rendering of an outcome; `DrtOutcome` has no `PartialEq` (it carries an
+    /// `io::Error`).
+    fn outcome_label(outcome: &DrtOutcome) -> String {
+        match outcome {
+            DrtOutcome::NotRequested => "not-requested".into(),
+            DrtOutcome::Skipped => "skipped".into(),
+            DrtOutcome::Unsupported => "unsupported".into(),
+            DrtOutcome::Failed(msg) => format!("failed:{msg}"),
+            DrtOutcome::TimedOut => "timed-out".into(),
+            DrtOutcome::Exported { export_ms, bytes: Ok(bytes) } => format!("exported:{export_ms}:{}", bytes.len()),
+            DrtOutcome::Exported { export_ms, bytes: Err(e) } => format!("exported:{export_ms}:err:{e}"),
+        }
+    }
+
+    fn drt_lines_with(status: DrtLineStatus, export_ms: Option<f64>) -> DrtLines {
+        DrtLines { status, export_ms, timeline_name_hex: Some("6162".into()) }
+    }
+
+    fn every_status() -> [DrtLineStatus; 5] {
+        [DrtLineStatus::Absent, DrtLineStatus::Exported, DrtLineStatus::Skipped, DrtLineStatus::Unsupported, DrtLineStatus::Failed("x".into())]
+    }
+
+    #[test]
+    fn drt_outcome_explicit_paths_are_never_an_export() {
+        let path = std::path::Path::new("gyroflow-ofx-sizing-1-0.drt");
+        for status in every_status() {
+            for request in [None, Some(path)] {
+                let outcome = drt_outcome(false, request, &drt_lines_with(status.clone(), Some(72.5)), |_| {
+                    panic!("an explicit query never reads a DRT file")
+                });
+                assert_eq!(outcome_label(&outcome), "not-requested", "{status:?} request={request:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn drt_outcome_refresh_with_request() {
+        let path = std::path::Path::new("gyroflow-ofx-sizing-1-0.drt");
+        let read_ok = |p: &std::path::Path| { assert_eq!(p, path); Ok(vec![1, 2, 3]) };
+        let read_err = |_: &std::path::Path| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        let label = |status: DrtLineStatus, export_ms: Option<f64>| {
+            outcome_label(&drt_outcome(true, Some(path), &drt_lines_with(status, export_ms), read_ok))
+        };
+
+        assert_eq!(label(DrtLineStatus::Exported, Some(72.5)), "exported:72.5:3");
+        // A missing duration is recorded as an unknown (worst-case) cost.
+        assert_eq!(label(DrtLineStatus::Exported, None), "exported:NaN:3");
+        assert_eq!(
+            outcome_label(&drt_outcome(true, Some(path), &drt_lines_with(DrtLineStatus::Exported, Some(80.0)), read_err)),
+            "exported:80:err:gone"
+        );
+        assert_eq!(label(DrtLineStatus::Skipped, None), "skipped");
+        assert_eq!(label(DrtLineStatus::Absent, None), "skipped");
+        assert_eq!(label(DrtLineStatus::Unsupported, None), "unsupported");
+        assert_eq!(label(DrtLineStatus::Failed("export-returned-false".into()), Some(3.0)), "failed:export-returned-false");
+    }
+
+    #[test]
+    fn drt_outcome_refresh_without_request() {
+        let label = |status: DrtLineStatus| {
+            outcome_label(&drt_outcome(true, None, &drt_lines_with(status, Some(72.5)), |_| {
+                panic!("no request, no file to read")
+            }))
+        };
+        // Lua exports only to a requested path, so an `exported` line without a request is not
+        // trusted as an export.
+        assert_eq!(label(DrtLineStatus::Exported), "skipped");
+        assert_eq!(label(DrtLineStatus::Skipped), "skipped");
+        assert_eq!(label(DrtLineStatus::Absent), "skipped");
+        assert_eq!(label(DrtLineStatus::Unsupported), "unsupported");
+        assert_eq!(label(DrtLineStatus::Failed("boom".into())), "failed:boom");
     }
 
     #[test]
