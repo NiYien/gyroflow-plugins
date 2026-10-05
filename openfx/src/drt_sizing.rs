@@ -15,6 +15,8 @@ const OFF_WIDTH: usize = 44;
 const OFF_HEIGHT: usize = 52;
 const OFF_HORIZONTAL: usize = 96;
 const OFF_VERTICAL: usize = 112;
+/// Real Resolve blobs nest QVariants one level deep; anything deeper is treated as corrupt.
+const MAX_QVARIANT_DEPTH: usize = 32;
 
 /// Values the scripting API reports for the same timeline, used to cross-check the DRT.
 pub struct ApiSizingReading<'a> {
@@ -175,7 +177,10 @@ impl<'a> Reader<'a> {
         Ok(String::from_utf16_lossy(&units))
     }
     /// Reads a variant; returns the byte array payload when it is one.
-    fn variant(&mut self) -> Result<Option<Vec<u8>>, String> {
+    fn variant(&mut self, depth: usize) -> Result<Option<Vec<u8>>, String> {
+        if depth > MAX_QVARIANT_DEPTH {
+            return Err(format!("QVariant nesting exceeds {MAX_QVARIANT_DEPTH} levels"));
+        }
         let ty = self.u32()?;
         let _null = self.u8()?;
         match ty {
@@ -184,11 +189,11 @@ impl<'a> Reader<'a> {
             4 | 5 | 6 => { self.take(8)?; }
             8 => {
                 let count = self.u32()?;
-                for _ in 0..count { self.string()?; self.variant()?; }
+                for _ in 0..count { self.string()?; self.variant(depth + 1)?; }
             }
             9 => {
                 let count = self.u32()?;
-                for _ in 0..count { self.variant()?; }
+                for _ in 0..count { self.variant(depth + 1)?; }
             }
             10 => { self.string()?; }
             11 => {
@@ -216,7 +221,7 @@ fn extract_setup(blob: &[u8]) -> Result<Vec<u8>, DrtRejection> {
     let mut found: HashMap<String, Vec<u8>> = HashMap::new();
     for _ in 0..count {
         let key = r.string().map_err(DrtRejection::BlobDecode)?;
-        if let Some(bytes) = r.variant().map_err(DrtRejection::BlobDecode)? {
+        if let Some(bytes) = r.variant(0).map_err(DrtRejection::BlobDecode)? {
             found.insert(key, bytes);
         }
     }
@@ -356,6 +361,26 @@ mod tests {
         let h = hex(&qt_fields(&[("X", QtValue::Unknown(99)), ("SequenceSetup", QtValue::Bytes(fixture("p0_crop_crop")))]));
         let r = effective_input_sizing(&synthetic_drt(&[("Timeline A", &h)]), &reading("Timeline A", 1080, 1920, "scaleToCrop"));
         assert!(matches!(r, Err(DrtRejection::BlobDecode(_))), "{r:?}");
+    }
+
+    #[test]
+    fn rejects_excessive_qvariant_nesting() {
+        // Entry "X": a chain of single-element lists (type 9) nested deeper than the limit, then SequenceSetup.
+        let mut blob = Vec::new();
+        blob.extend(1u32.to_be_bytes());
+        blob.extend(2u32.to_be_bytes());
+        blob.extend(2u32.to_be_bytes());
+        blob.extend([0, b'X']);
+        for _ in 0..(MAX_QVARIANT_DEPTH + 8) {
+            blob.extend(9u32.to_be_bytes());
+            blob.push(0);
+            blob.extend(1u32.to_be_bytes());
+        }
+        blob.extend(2u32.to_be_bytes());
+        blob.push(0);
+        blob.extend(0i32.to_be_bytes());
+        let r = effective_input_sizing(&synthetic_drt(&[("Timeline A", &hex(&blob))]), &reading("Timeline A", 1080, 1920, "scaleToCrop"));
+        assert!(matches!(&r, Err(DrtRejection::BlobDecode(m)) if m.contains("nesting")), "{r:?}");
     }
 
     #[test]
