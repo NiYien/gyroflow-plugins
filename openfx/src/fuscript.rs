@@ -251,10 +251,12 @@ impl CurrentFileInfo {
                         .filter(|line| !is_missing_python2(line))
                         .collect::<Vec<_>>();
                 let lines = stdout.trim().lines().collect::<Vec<_>>();
-                // Accept exactly 12 lines from the extended query. Older Resolve versions without
+                // Accept the 12 core lines from the extended query. Older Resolve versions without
                 // the extra settings keys still emit empty strings (`print('')`) so the line count
-                // stays the same; only a true script failure produces fewer lines.
-                if errors.is_empty() && lines.len() == 12 {
+                // stays the same; only a true script failure produces fewer lines. Lines after the 12th
+                // are optional `gf_`-prefixed DRT fields in order-independent format; unknown lines are
+                // ignored. The first 12 lines keep their exact meaning.
+                if errors.is_empty() && lines.len() >= 12 {
                     let fps = lines[0].parse::<f64>().unwrap_or_default();
                     let frame_count = lines[1].parse::<usize>().unwrap_or_default();
                     let duration_s = Self::parse_duration(lines[2], fps);
@@ -272,6 +274,7 @@ impl CurrentFileInfo {
                     let timeline_h = lines[9].trim().parse::<usize>().unwrap_or_default();
                     let source_start_frame = lines[10].trim().parse::<f64>().ok();
                     let source_end_frame   = lines[11].trim().parse::<f64>().ok();
+                    let _drt_lines = parse_drt_lines(&lines[12..]);
                     if fps > 0.0 && frame_count > 0 && duration_s > 0.0 && !file_path.is_empty() {
                         let info = Self {
                             file_path: file_path.to_string(),
@@ -477,5 +480,101 @@ impl CurrentFileInfo {
         } else {
             0.0
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum DrtLineStatus {
+    #[default]
+    Absent,
+    Exported,
+    Skipped,
+    Unsupported,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DrtLines {
+    pub status: DrtLineStatus,
+    pub export_ms: Option<f64>,
+    pub timeline_name_hex: Option<String>,
+}
+
+pub fn parse_drt_lines(extra: &[&str]) -> DrtLines {
+    let mut result = DrtLines::default();
+
+    for line in extra {
+        if let Some(eq_pos) = line.find('=') {
+            let key = &line[..eq_pos];
+            let mut value = &line[eq_pos + 1..];
+
+            // Trim trailing \r from values (Windows pipes)
+            if value.ends_with('\r') {
+                value = &value[..value.len() - 1];
+            }
+
+            match key {
+                "gf_drt" => {
+                    if value == "exported" {
+                        result.status = DrtLineStatus::Exported;
+                    } else if value == "skipped" {
+                        result.status = DrtLineStatus::Skipped;
+                    } else if value == "unsupported" {
+                        result.status = DrtLineStatus::Unsupported;
+                    } else if let Some(msg) = value.strip_prefix("failed:") {
+                        result.status = DrtLineStatus::Failed(msg.to_string());
+                    }
+                }
+                "gf_drt_ms" => {
+                    if let Ok(ms) = value.parse::<f64>() {
+                        result.export_ms = Some(ms);
+                    }
+                }
+                "gf_tl_name_hex" => {
+                    result.timeline_name_hex = Some(value.to_string());
+                }
+                _ => {
+                    // Ignore unknown keys
+                }
+            }
+        }
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_drt_lines_absent_for_core_only() {
+        assert_eq!(parse_drt_lines(&[]), DrtLines::default());
+    }
+
+    #[test]
+    fn parse_drt_lines_exported() {
+        assert_eq!(
+            parse_drt_lines(&["gf_tl_name_hex=6162", "gf_drt_ms=72.500", "gf_drt=exported"]),
+            DrtLines {
+                status: DrtLineStatus::Exported,
+                export_ms: Some(72.5),
+                timeline_name_hex: Some("6162".into())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_drt_lines_failed_keeps_message() {
+        assert_eq!(
+            parse_drt_lines(&["gf_drt=failed:attempt to call nil"]).status,
+            DrtLineStatus::Failed("attempt to call nil".into())
+        );
+    }
+
+    #[test]
+    fn parse_drt_lines_ignores_unknown_and_order() {
+        let l = parse_drt_lines(&["gf_future=1", "gf_drt=skipped", "junk", "gf_tl_name_hex=00"]);
+        assert_eq!((l.status, l.timeline_name_hex.as_deref()), (DrtLineStatus::Skipped, Some("00")));
     }
 }
