@@ -18,6 +18,11 @@ It is also impossible to query file path on a compound clip.\n\nIn any case, you
 /// resident for the rest of the session.
 const QUERY_TIMEOUT_MS: u64 = 5_000;
 
+/// How long the query thread waits for the stdout of a query killed on timeout. The pipe can
+/// stay open when another process still holds its write end; an incomplete read counts as "the
+/// export had not started".
+const TIMEOUT_STDOUT_READ_MS: u64 = 500;
+
 // Extended query: the original 6 lines (FPS, Frames, Duration, PAR, Resolution, File Path)
 // come first to preserve the pre-existing parse-by-line-count expectation. The next 4
 // lines carry the host-input-sizing setting: useCustomSettings (timeline-level toggle),
@@ -80,6 +85,8 @@ local gf_ok, gf_err = pcall(function()
     if GF_WANT_DRT ~= 1 and key == GF_LAST_KEY then print('gf_drt=skipped'); return end
     local r = Resolve()
     if r.EXPORT_DRT == nil or tl.Export == nil then print('gf_drt=unsupported'); return end
+    print('gf_drt_begin=1')
+    if io ~= nil and io.flush ~= nil then io.flush() end
     local t0 = bmd.gettime()
     local ok = tl:Export(GF_DRT_PATH, r.EXPORT_DRT)
     print(string.format('gf_drt_ms=%.3f', (bmd.gettime() - t0) * 1000))
@@ -331,11 +338,24 @@ impl CurrentFileInfo {
                         "fuscript query exceeded {QUERY_TIMEOUT_MS}ms and was killed — Resolve is \
                          most likely busy (playback / export); the host input sizing mode keeps \
                          its previous value and the next window retries");
-                    // A requested export may still be running inside Resolve: record the timeout
-                    // cost so no export runs again until its interval has passed. Nothing is
-                    // published, so there is no timeline reading to pass along.
+                    // A requested export that had started may still be running inside Resolve:
+                    // record the timeout cost so no export runs again until its interval has
+                    // passed. The flushed `gf_drt_begin` marker in what already reached the pipe
+                    // tells whether it had started; a query killed before it (Resolve busy in the
+                    // core query, e.g. during playback) releases the request at no cost. Nothing
+                    // is published, so there is no timeline reading to pass along.
                     if let Some(state) = &drt_state {
-                        state.finish_unpublished(std::time::Instant::now(), request, DrtOutcome::TimedOut,
+                        let outcome = match &request {
+                            Some(_) => {
+                                let partial_stdout = child.stdout.take().and_then(|pipe| {
+                                    read_to_end_within(pipe, std::time::Duration::from_millis(TIMEOUT_STDOUT_READ_MS))
+                                });
+                                timed_out_outcome(partial_stdout.as_deref())
+                            }
+                            // Without a claimed slot no export can have started; nothing is recorded.
+                            None => DrtOutcome::TimedOut,
+                        };
+                        state.finish_unpublished(std::time::Instant::now(), request, outcome,
                             &QueryContext { name_hex: None, width: 0, height: 0, api_mode: None });
                     }
                     return;
@@ -649,6 +669,42 @@ pub struct DrtLines {
     pub status: DrtLineStatus,
     pub export_ms: Option<f64>,
     pub timeline_name_hex: Option<String>,
+    /// `gf_drt_begin=1`: the block reached the `Export` call. Printed and flushed before it, so
+    /// it survives fuscript being killed during the export.
+    pub export_started: bool,
+}
+
+/// The DRT lines of the query output: every line from the first `gf_` line on (empty when there
+/// is none).
+fn drt_part<'a, 'b>(lines: &'b [&'a str]) -> &'b [&'a str] {
+    let start = lines.iter().position(|line| line.starts_with("gf_")).unwrap_or(lines.len());
+    &lines[start..]
+}
+
+/// The outcome of a refresh query that held an export request and was killed on timeout.
+/// `partial_stdout` is what fuscript had written to the pipe before it was killed, `None` when
+/// it could not be read in time. Only an export that had started is charged (`TimedOut`); a
+/// query killed before the marker, e.g. in the core query while Resolve is busy with playback,
+/// is `Skipped`, which releases the request at no cost.
+fn timed_out_outcome(partial_stdout: Option<&str>) -> DrtOutcome {
+    let started = partial_stdout.is_some_and(|stdout| {
+        let lines = stdout.trim().lines().collect::<Vec<_>>();
+        parse_drt_lines(drt_part(&lines)).export_started
+    });
+    if started { DrtOutcome::TimedOut } else { DrtOutcome::Skipped }
+}
+
+/// Reads `pipe` to its end on a helper thread and waits at most `limit` for it. `None` on a
+/// read error or when the read did not finish in time; the helper thread then ends whenever the
+/// pipe closes. Invalid UTF-8 is replaced rather than failing the read.
+fn read_to_end_within(mut pipe: impl std::io::Read + Send + 'static, limit: std::time::Duration) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = tx.send(pipe.read_to_end(&mut bytes).map(|_| bytes));
+    });
+    let bytes = rx.recv_timeout(limit).ok()?.ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn parse_drt_lines(extra: &[&str]) -> DrtLines {
@@ -683,6 +739,11 @@ pub fn parse_drt_lines(extra: &[&str]) -> DrtLines {
                 }
                 "gf_tl_name_hex" => {
                     result.timeline_name_hex = Some(value.to_string());
+                }
+                "gf_drt_begin" => {
+                    if value == "1" {
+                        result.export_started = true;
+                    }
                 }
                 _ => {
                     // Ignore unknown keys
@@ -754,7 +815,8 @@ mod tests {
             DrtLines {
                 status: DrtLineStatus::Exported,
                 export_ms: Some(72.5),
-                timeline_name_hex: Some("6162".into())
+                timeline_name_hex: Some("6162".into()),
+                export_started: false,
             }
         );
     }
@@ -771,6 +833,80 @@ mod tests {
     fn parse_drt_lines_ignores_unknown_and_order() {
         let l = parse_drt_lines(&["gf_future=1", "gf_drt=skipped", "junk", "gf_tl_name_hex=00"]);
         assert_eq!((l.status, l.timeline_name_hex.as_deref()), (DrtLineStatus::Skipped, Some("00")));
+    }
+
+    #[test]
+    fn parse_drt_lines_recognizes_export_begin_marker() {
+        assert!(!DrtLines::default().export_started);
+        assert!(!parse_drt_lines(&["gf_tl_name_hex=6162"]).export_started);
+        let l = parse_drt_lines(&["gf_tl_name_hex=6162", "gf_drt_begin=1\r"]);
+        assert!(l.export_started);
+        assert_eq!(l.status, DrtLineStatus::Absent);
+        assert!(!parse_drt_lines(&["gf_drt_begin=0"]).export_started);
+    }
+
+    #[test]
+    fn query_script_marks_export_begin_before_timing() {
+        for params in [DrtScriptParams::disabled(), DrtScriptParams { allow: true, want: true, last_key: String::new(), path: "x.drt".into() }] {
+            let s = build_query_script(&params);
+            // Printed and flushed right before the timed `Export` call, at the block's indentation.
+            assert!(s.contains(concat!(
+                "\n    print('gf_drt_begin=1')\n",
+                "    if io ~= nil and io.flush ~= nil then io.flush() end\n",
+                "    local t0 = bmd.gettime()\n",
+            )));
+            assert_eq!(s.matches("gf_drt_begin").count(), 1);
+            // Only after every early return of the block.
+            assert!(s.find("gf_drt=unsupported").unwrap() < s.find("gf_drt_begin=1").unwrap());
+        }
+    }
+
+    #[test]
+    fn timeout_charges_only_a_started_export() {
+        let core = "25\n100\n00:00:04:00\n1\n1920x1080\nC:/clip.mov\n0\nscaleToFit\n1080\n1920\n0\n100\n";
+        let started = format!("{core}gf_tl_name_hex=6162\ngf_drt_begin=1\n");
+        let not_started = format!("{core}gf_tl_name_hex=6162\n");
+        assert_eq!(outcome_label(&timed_out_outcome(Some(&started))), "timed-out");
+        assert_eq!(outcome_label(&timed_out_outcome(Some(&started.replace('\n', "\r\n")))), "timed-out");
+        // Killed in the core query (e.g. during playback) or before the marker: nothing started.
+        assert_eq!(outcome_label(&timed_out_outcome(Some(&not_started))), "skipped");
+        assert_eq!(outcome_label(&timed_out_outcome(Some("25\n100\n"))), "skipped");
+        assert_eq!(outcome_label(&timed_out_outcome(Some(""))), "skipped");
+        // The bounded read did not complete: counted as not started.
+        assert_eq!(outcome_label(&timed_out_outcome(None)), "skipped");
+    }
+
+    /// A pipe whose read blocks until the test drops the sender, like a pipe still held open by
+    /// another process.
+    struct BlockingPipe(std::sync::mpsc::Receiver<()>);
+    impl std::io::Read for BlockingPipe {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(0)
+        }
+    }
+
+    struct FailingPipe;
+    impl std::io::Read for FailingPipe {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken"))
+        }
+    }
+
+    #[test]
+    fn killed_stdout_read_is_bounded() {
+        let limit = std::time::Duration::from_millis(50);
+        assert_eq!(
+            read_to_end_within(std::io::Cursor::new(b"gf_drt_begin=1\n".to_vec()), limit).as_deref(),
+            Some("gf_drt_begin=1\n")
+        );
+        assert_eq!(read_to_end_within(FailingPipe, limit), None);
+
+        let (release, rx) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
+        assert_eq!(read_to_end_within(BlockingPipe(rx), limit), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(release);
     }
 
     // Lua 5.1 string unescape for what `lua_ascii_literal` can emit: `\ddd` (1-3 decimal digits),
@@ -833,7 +969,7 @@ mod tests {
     }
 
     fn drt_lines_with(status: DrtLineStatus, export_ms: Option<f64>) -> DrtLines {
-        DrtLines { status, export_ms, timeline_name_hex: Some("6162".into()) }
+        DrtLines { status, export_ms, timeline_name_hex: Some("6162".into()), export_started: false }
     }
 
     fn every_status() -> [DrtLineStatus; 5] {
