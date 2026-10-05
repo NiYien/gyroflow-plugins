@@ -287,9 +287,9 @@ impl CurrentFileInfo {
 
             // Only the refresh path claims the process-wide export slot. The request is declared
             // after the guards above, so on every exit that does not hand it to the state (lua
-            // error, fewer than 12 lines, spawn failure, panic) it is dropped first: the temp file
-            // is deleted and the claim released before the single-flight guard is, so a re-armed
-            // refresh never finds the claim still held.
+            // error in the core query, output not framed as 12 core lines, spawn failure, panic)
+            // it is dropped first: the temp file is deleted and the claim released before the
+            // single-flight guard is, so a re-armed refresh never finds the claim still held.
             let (drt_state, allow_export) = match &drt {
                 Some((state, allow, _, _)) => (Some(Arc::clone(state)), *allow),
                 None => (None, false),
@@ -378,15 +378,19 @@ impl CurrentFileInfo {
                         .filter(|line| !is_missing_python2(line))
                         .collect::<Vec<_>>();
                 let lines = stdout.trim().lines().collect::<Vec<_>>();
-                // Accept the 12 core lines from the extended query. Older Resolve versions without
-                // the extra settings keys still emit empty strings (`print('')`) so the line count
-                // stays the same; only a true script failure produces fewer lines. Lines after the 12th
-                // are optional `gf_`-prefixed DRT fields in order-independent format; unknown lines are
-                // ignored. The first 12 lines keep their exact meaning.
+                // The 12 core lines from the extended query come first. Older Resolve versions
+                // without the extra settings keys still emit empty strings (`print('')`) so the
+                // line count stays the same; only a true script failure produces fewer lines. The
+                // core lines are the lines before the first `gf_` line and must number exactly 12;
+                // from that line on come the `gf_`-prefixed DRT fields in order-independent
+                // format, where unknown lines are ignored. The 12 core lines keep their exact
+                // meaning.
                 //
                 // The `errors.is_empty()` rule also holds for queries that export the DRT: stderr
                 // was observed empty across `Export` calls (3/3, Resolve 21.0.0.47).
-                if errors.is_empty() && lines.len() >= 12 {
+                let framed = split_query_lines(&lines);
+                // From here on `lines` are the 12 core lines.
+                if errors.is_empty() && let Some((lines, drt_part)) = framed {
                     let fps = lines[0].parse::<f64>().unwrap_or_default();
                     let frame_count = lines[1].parse::<usize>().unwrap_or_default();
                     let duration_s = Self::parse_duration(lines[2], fps);
@@ -394,28 +398,19 @@ impl CurrentFileInfo {
                     let resolution = lines[4].split("x").filter_map(|x| x.parse::<usize>().ok()).collect::<Vec<_>>();
                     let file_path = replace_frame_count(lines[5]);
                     let use_custom_settings = lines[6].trim() == "1";
-                    let mismatch_mode_raw = lines[7].trim();
-                    // The raw API value; the published mode is the effective one decided below.
-                    let api_mismatch_mode = if mismatch_mode_raw.is_empty() {
-                        None
-                    } else {
-                        Some(mismatch_mode_raw.to_string())
-                    };
-                    let timeline_w = lines[8].trim().parse::<usize>().unwrap_or_default();
-                    let timeline_h = lines[9].trim().parse::<usize>().unwrap_or_default();
                     let source_start_frame = lines[10].trim().parse::<f64>().ok();
                     let source_end_frame   = lines[11].trim().parse::<f64>().ok();
-                    let drt_lines = parse_drt_lines(&lines[12..]);
-                    let outcome = drt_outcome(allow_export, request.as_ref().map(|req| req.path.as_path()), &drt_lines, |path| std::fs::read(path));
-                    // Per-export details, logged at debug once the export is settled. The temp
-                    // file's deletion is logged by its guard.
-                    let export_log = export_details(request.as_ref().map(|req| req.path.as_path()), drt_lines.export_ms, &outcome);
-                    let drt_ctx = QueryContext {
-                        name_hex: drt_lines.timeline_name_hex.as_deref(),
-                        width: timeline_w,
-                        height: timeline_h,
-                        api_mode: api_mismatch_mode.as_deref(),
-                    };
+                    // `export_log`: per-export details, logged at debug once the export is
+                    // settled. The temp file's deletion is logged by its guard.
+                    let (drt_lines, outcome, export_log) =
+                        framed_drt_outcome(allow_export, request.as_ref().map(|req| req.path.as_path()), drt_part);
+                    // Lines 8-10 (mode and timeline resolution) are read once, for the DRT state
+                    // and for publishing alike.
+                    let drt_ctx = query_context(lines, &drt_lines);
+                    // The raw API value; the published mode is the effective one decided below.
+                    let api_mismatch_mode = drt_ctx.api_mode.map(str::to_string);
+                    let timeline_w = drt_ctx.width;
+                    let timeline_h = drt_ctx.height;
                     if fps > 0.0 && frame_count > 0 && duration_s > 0.0 && !file_path.is_empty() {
                         // Everything published below — both publication modes, the change test
                         // behind the forced re-render and the render-path mirror — sees only the
@@ -627,6 +622,17 @@ impl CurrentFileInfo {
                         }
                     }
                 } else {
+                    // stderr carried errors although the output is framed: the DRT block ran,
+                    // so an export may have run too. Account for it exactly as on the success
+                    // path, but publish nothing; the failure handling below is unchanged.
+                    if let (Some(state), Some((core, drt_part))) = (&drt_state, framed) {
+                        let (drt_lines, outcome, export_log) =
+                            framed_drt_outcome(allow_export, request.as_ref().map(|req| req.path.as_path()), drt_part);
+                        state.finish_unpublished(std::time::Instant::now(), request, outcome, &query_context(core, &drt_lines));
+                        if let Some(details) = &export_log {
+                            log::debug!(target: "host_input_sizing", "host_input_sizing: {details}; not published (fuscript reported errors)");
+                        }
+                    }
                     log::debug!("fuscript stdout: {stdout}");
                     log::debug!("fuscript stderr: {stderr}");
                     if !silent {
@@ -764,8 +770,8 @@ pub fn parse_drt_lines(extra: &[&str]) -> DrtLines {
 /// export attempt (`Exported`, `Unsupported`, `Failed`). Without a request every status is a
 /// skip: a request-less `Failed` (e.g. `GetName` raising inside the block) must not touch the
 /// pacing state, where it would end a timeout block early. `read` loads the requested file and
-/// is called for nothing else. A missing duration is passed on as NaN, which the state records
-/// as the worst-case cost.
+/// is called for nothing else. A missing duration of an exported DRT is passed on as NaN, which
+/// the state records as the worst-case cost; a failed export carries its duration, if any, as is.
 fn drt_outcome(
     allow_export: bool,
     request_path: Option<&std::path::Path>,
@@ -780,21 +786,60 @@ fn drt_outcome(
         DrtLineStatus::Exported => DrtOutcome::Exported { export_ms: lines.export_ms.unwrap_or(f64::NAN), bytes: read(path) },
         DrtLineStatus::Skipped | DrtLineStatus::Absent => DrtOutcome::Skipped,
         DrtLineStatus::Unsupported => DrtOutcome::Unsupported,
-        DrtLineStatus::Failed(msg) => DrtOutcome::Failed(msg.clone()),
+        DrtLineStatus::Failed(msg) => DrtOutcome::Failed { message: msg.clone(), export_ms: lines.export_ms },
     }
+}
+
+/// Number of core query lines (FPS through source end frame).
+const CORE_LINE_COUNT: usize = 12;
+
+/// Splits the query output into the core lines and the DRT lines. The core lines are the lines
+/// before the first `gf_` line (all lines when there is none) and must number exactly
+/// `CORE_LINE_COUNT`; the DRT lines are the rest. `None` when the framing is invalid.
+fn split_query_lines<'a, 'b>(lines: &'b [&'a str]) -> Option<(&'b [&'a str], &'b [&'a str])> {
+    let drt = drt_part(lines);
+    let core = &lines[..lines.len() - drt.len()];
+    (core.len() == CORE_LINE_COUNT).then_some((core, drt))
+}
+
+/// The timeline reading the DRT state needs from a framed query: the API mode (line 8, empty =
+/// none) and the timeline resolution (lines 9-10) from the core lines, and the timeline name from
+/// the DRT lines.
+fn query_context<'a>(core: &[&'a str], drt_lines: &'a DrtLines) -> QueryContext<'a> {
+    let api_mode = core[7].trim();
+    QueryContext {
+        name_hex: drt_lines.timeline_name_hex.as_deref(),
+        width: core[8].trim().parse::<usize>().unwrap_or_default(),
+        height: core[9].trim().parse::<usize>().unwrap_or_default(),
+        api_mode: (!api_mode.is_empty()).then_some(api_mode),
+    }
+}
+
+/// The DRT part of a framed query, computed the same way on every path that settles it: the
+/// parsed DRT lines, the outcome (which reads the requested file when an export was reported)
+/// and the per-export debug details.
+fn framed_drt_outcome(allow_export: bool, request_path: Option<&std::path::Path>, drt_part: &[&str]) -> (DrtLines, DrtOutcome, Option<String>) {
+    let drt_lines = parse_drt_lines(drt_part);
+    let outcome = drt_outcome(allow_export, request_path, &drt_lines, |path| std::fs::read(path));
+    let export_log = export_details(request_path, &outcome);
+    (drt_lines, outcome, export_log)
 }
 
 /// The per-export debug details of a claimed export, successful or failed: duration (`none`
 /// when Lua printed none), the byte count, read error or failure message, and the temp path.
 /// `None` when no export was attempted. Never the bytes or the outcome itself: a DRT carries
 /// the user's media paths.
-fn export_details(request_path: Option<&std::path::Path>, export_ms: Option<f64>, outcome: &DrtOutcome) -> Option<String> {
+fn export_details(request_path: Option<&std::path::Path>, outcome: &DrtOutcome) -> Option<String> {
     let path = request_path?.display();
-    let took = export_ms.map_or_else(|| "none".to_string(), |ms| format!("{ms:.1}ms"));
+    // An exported outcome carries a missing duration as NaN (see `drt_outcome`).
+    let took = |export_ms: Option<f64>| match export_ms {
+        Some(ms) if ms.is_finite() => format!("{ms:.1}ms"),
+        _ => "none".to_string(),
+    };
     match outcome {
-        DrtOutcome::Exported { bytes: Ok(bytes), .. } => Some(format!("DRT export took {took}, read {} bytes from {path}", bytes.len())),
-        DrtOutcome::Exported { bytes: Err(e), .. } => Some(format!("DRT export took {took}, could not read {path}: {e}")),
-        DrtOutcome::Failed(msg) => Some(format!("DRT export failed: {msg}; took {took}, temp file {path}")),
+        DrtOutcome::Exported { export_ms, bytes: Ok(bytes) } => Some(format!("DRT export took {}, read {} bytes from {path}", took(Some(*export_ms)), bytes.len())),
+        DrtOutcome::Exported { export_ms, bytes: Err(e) } => Some(format!("DRT export took {}, could not read {path}: {e}", took(Some(*export_ms)))),
+        DrtOutcome::Failed { message, export_ms } => Some(format!("DRT export failed: {message}; took {}, temp file {path}", took(*export_ms))),
         DrtOutcome::NotRequested | DrtOutcome::Skipped | DrtOutcome::Unsupported | DrtOutcome::TimedOut => None,
     }
 }
@@ -961,7 +1006,7 @@ mod tests {
             DrtOutcome::NotRequested => "not-requested".into(),
             DrtOutcome::Skipped => "skipped".into(),
             DrtOutcome::Unsupported => "unsupported".into(),
-            DrtOutcome::Failed(msg) => format!("failed:{msg}"),
+            DrtOutcome::Failed { message, .. } => format!("failed:{message}"),
             DrtOutcome::TimedOut => "timed-out".into(),
             DrtOutcome::Exported { export_ms, bytes: Ok(bytes) } => format!("exported:{export_ms}:{}", bytes.len()),
             DrtOutcome::Exported { export_ms, bytes: Err(e) } => format!("exported:{export_ms}:err:{e}"),
@@ -1029,40 +1074,91 @@ mod tests {
     }
 
     #[test]
+    fn drt_outcome_failed_carries_the_duration() {
+        let path = std::path::Path::new("gyroflow-ofx-sizing-1-0.drt");
+        for export_ms in [Some(3.0), None] {
+            let lines = drt_lines_with(DrtLineStatus::Failed("export-returned-false".into()), export_ms);
+            match drt_outcome(true, Some(path), &lines, |_| panic!("a failed export has no file to read")) {
+                DrtOutcome::Failed { message, export_ms: got } => assert_eq!((message.as_str(), got), ("export-returned-false", export_ms)),
+                other => panic!("expected a failed export, got {}", outcome_label(&other)),
+            }
+        }
+    }
+
+    #[test]
     fn export_details_cover_every_claimed_export() {
         let path = std::path::Path::new("gyroflow-ofx-sizing-1-0.drt");
-        let exported = |bytes| DrtOutcome::Exported { export_ms: 72.5, bytes };
-        let failed = || DrtOutcome::Failed("export-returned-false".into());
+        let exported = |export_ms, bytes| DrtOutcome::Exported { export_ms, bytes };
+        let failed = |export_ms| DrtOutcome::Failed { message: "export-returned-false".into(), export_ms };
 
         assert_eq!(
-            export_details(Some(path), Some(72.5), &exported(Ok(vec![0; 3]))).as_deref(),
+            export_details(Some(path), &exported(72.5, Ok(vec![0; 3]))).as_deref(),
             Some("DRT export took 72.5ms, read 3 bytes from gyroflow-ofx-sizing-1-0.drt")
         );
         assert_eq!(
-            export_details(Some(path), Some(72.5), &exported(Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")))).as_deref(),
+            export_details(Some(path), &exported(72.5, Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")))).as_deref(),
             Some("DRT export took 72.5ms, could not read gyroflow-ofx-sizing-1-0.drt: gone")
         );
         assert_eq!(
-            export_details(Some(path), Some(3.0), &failed()).as_deref(),
+            export_details(Some(path), &failed(Some(3.0))).as_deref(),
             Some("DRT export failed: export-returned-false; took 3.0ms, temp file gyroflow-ofx-sizing-1-0.drt")
         );
         // Lua prints no duration when the block failed before the `Export` call returned.
         assert_eq!(
-            export_details(Some(path), None, &failed()).as_deref(),
+            export_details(Some(path), &failed(None)).as_deref(),
             Some("DRT export failed: export-returned-false; took none, temp file gyroflow-ofx-sizing-1-0.drt")
         );
+        // A missing duration reaches an exported outcome as NaN (see `drt_outcome`).
         assert_eq!(
-            export_details(Some(path), None, &exported(Ok(vec![0; 3]))).as_deref(),
+            export_details(Some(path), &exported(f64::NAN, Ok(vec![0; 3]))).as_deref(),
             Some("DRT export took none, read 3 bytes from gyroflow-ofx-sizing-1-0.drt")
         );
 
         // No export was attempted: nothing to report.
         for outcome in [DrtOutcome::NotRequested, DrtOutcome::Skipped, DrtOutcome::Unsupported, DrtOutcome::TimedOut] {
-            assert_eq!(export_details(Some(path), Some(1.0), &outcome), None, "{}", outcome_label(&outcome));
+            assert_eq!(export_details(Some(path), &outcome), None, "{}", outcome_label(&outcome));
         }
-        for outcome in [exported(Ok(vec![0; 3])), failed()] {
-            assert_eq!(export_details(None, Some(1.0), &outcome), None, "{}", outcome_label(&outcome));
+        for outcome in [exported(1.0, Ok(vec![0; 3])), failed(Some(1.0))] {
+            assert_eq!(export_details(None, &outcome), None, "{}", outcome_label(&outcome));
         }
+    }
+
+    const CORE: [&str; 12] = ["25", "100", "00:00:04:00", "1", "1920x1080", "C:/clip.mov", "1", " scaleToFit ", "1080", " 1920", "", ""];
+    const DRT: [&str; 2] = ["gf_tl_name_hex=6162", "gf_drt=skipped"];
+
+    #[test]
+    fn split_query_lines_requires_exactly_12_core_lines() {
+        // The last two core lines (source in/out) are empty: still 12 core lines, indices intact.
+        let lines = [&CORE[..], &DRT[..]].concat();
+        let (core, drt) = split_query_lines(&lines).expect("12 core lines");
+        assert_eq!(core, &CORE[..]);
+        assert_eq!(drt, &DRT[..]);
+        assert_eq!((core[0], core[5], core[9], core[10], core[11]), ("25", "C:/clip.mov", " 1920", "", ""));
+
+        // 13 lines before the first `gf_` line: the framing is invalid, not "12 plus a junk line".
+        let thirteen = [&CORE[..], &["stray"][..], &DRT[..]].concat();
+        assert_eq!(split_query_lines(&thirteen), None);
+        let eleven = [&CORE[..11], &DRT[..]].concat();
+        assert_eq!(split_query_lines(&eleven), None);
+
+        // Without a `gf_` line every line is a core line, and exactly 12 are required.
+        assert_eq!(split_query_lines(&CORE), Some((&CORE[..], &[][..])));
+        assert_eq!(split_query_lines(&CORE[..11]), None);
+        assert_eq!(split_query_lines(&[&CORE[..], &["stray"][..]].concat()), None);
+    }
+
+    #[test]
+    fn query_context_reads_mode_resolution_and_name() {
+        let drt_lines = parse_drt_lines(&DRT);
+        let c = query_context(&CORE, &drt_lines);
+        assert_eq!((c.name_hex, c.width, c.height, c.api_mode), (Some("6162"), 1080, 1920, Some("scaleToFit")));
+
+        let mut core = CORE;
+        core[7] = " ";
+        core[8] = "x";
+        let no_name = DrtLines::default();
+        let c = query_context(&core, &no_name);
+        assert_eq!((c.name_hex, c.width, c.height, c.api_mode), (None, 0, 1920, None));
     }
 
     #[test]

@@ -144,7 +144,9 @@ pub enum DrtOutcome {
     /// The refresh path declined the export, or the Lua block skipped it.
     Skipped,
     Unsupported,
-    Failed(String),
+    /// The export ran (or was attempted) and failed. `export_ms` is the duration Lua measured
+    /// around the `Export` call, `None` when the block failed before printing one.
+    Failed { message: String, export_ms: Option<f64> },
     TimedOut,
     Exported { export_ms: f64, bytes: std::io::Result<Vec<u8>> },
 }
@@ -286,20 +288,24 @@ impl DrtSharedState {
         let this_query: Option<Result<&'static str, String>> = match &outcome {
             DrtOutcome::NotRequested | DrtOutcome::Skipped => None,
             DrtOutcome::Unsupported => Some(Err("unsupported".to_string())),
-            DrtOutcome::Failed(msg) => Some(Err(format!("export-failed({msg})"))),
+            DrtOutcome::Failed { message, .. } => Some(Err(format!("export-failed({message})"))),
             DrtOutcome::TimedOut => Some(Err("timeout".to_string())),
             DrtOutcome::Exported { bytes: Err(e), .. } => Some(Err(format!("export-failed(io: {e})"))),
             DrtOutcome::Exported { bytes: Ok(bytes), .. } => Some(match &named {
                 None => Err(DrtRejection::TimelineNotFound.reason()),
                 Some((name, _)) => {
                     let reading = ApiSizingReading { timeline_name: name, width: ctx.width, height: ctx.height, horizontal_mode: api_mode };
-                    match effective_input_sizing(bytes, &reading) {
+                    let parse_started = Instant::now();
+                    let result = match effective_input_sizing(bytes, &reading) {
                         Ok(sizing) => Ok(parsed.insert(sizing).effective_mode),
                         Err(rejection) => {
                             content_rejected = true;
                             Err(rejection.reason())
                         }
-                    }
+                    };
+                    let parse_ms = parse_started.elapsed().as_secs_f64() * 1000.0;
+                    log::debug!(target: "host_input_sizing", "{}", parse_details(parse_ms, bytes.len(), &result));
+                    result
                 }
             }),
         };
@@ -313,8 +319,13 @@ impl DrtSharedState {
                 inner.timed_out = false;
                 inner.want = false;
             }
-            DrtOutcome::Failed(_) => {
+            DrtOutcome::Failed { export_ms, .. } => {
                 inner.last_export_at = Some(now);
+                // A failed export that ran costs what it took, like an exported one. Without a
+                // measured duration the last known cost stays.
+                if let Some(ms) = export_ms {
+                    inner.last_export_ms = Some(export_cost_ms(*ms));
+                }
                 inner.timed_out = false;
                 inner.want = false;
             }
@@ -326,7 +337,7 @@ impl DrtSharedState {
             DrtOutcome::Unsupported => inner.support = Support::No,
             _ => {}
         }
-        if matches!(outcome, DrtOutcome::Exported { .. } | DrtOutcome::Failed(_)) && let Some(key) = key {
+        if matches!(outcome, DrtOutcome::Exported { .. } | DrtOutcome::Failed { .. }) && let Some(key) = key {
             inner.last_key = Some(key.to_string());
         }
         if let (Some(key), Some(sizing)) = (key, &parsed) {
@@ -372,6 +383,16 @@ impl DrtSharedState {
         drop(request);
         Decision { effective_mode, source, log_line }
     }
+}
+
+/// The per-parse debug line: parse duration, DRT size and the result (mode or rejection
+/// reason). Never the DRT content, which carries the user's media paths.
+fn parse_details(parse_ms: f64, byte_count: usize, result: &Result<&'static str, String>) -> String {
+    let result = match result {
+        Ok(mode) => format!("mode={mode}"),
+        Err(reason) => format!("reason={reason}"),
+    };
+    format!("host_input_sizing: DRT parse took {parse_ms:.1}ms, {byte_count} bytes -> {result}")
 }
 
 /// Recorded export cost: whole milliseconds rounded up. An unknown (non-finite or negative)
@@ -426,6 +447,7 @@ mod tests {
         synthetic_drt(&[("Timeline A", &hex(&qt_fields(&[("SequenceSetup", QtValue::Bytes(fixture("b3_fit_stretch")))])))])
     }
     fn exported(export_ms: f64) -> DrtOutcome { DrtOutcome::Exported { export_ms, bytes: Ok(valid_drt()) } }
+    fn failed(message: &str, export_ms: Option<f64>) -> DrtOutcome { DrtOutcome::Failed { message: message.to_string(), export_ms } }
     fn begin(state: &Arc<DrtSharedState>, at: Instant, forced: bool, dir: &TestDir) -> Option<DrtRequest> {
         state.begin_request(at, TTL, forced, &dir.0, PID)
     }
@@ -625,6 +647,50 @@ mod tests {
     }
 
     #[test]
+    fn failed_export_with_duration_records_its_cost() {
+        let dir = TestDir::new();
+        let hex = name_hex();
+        let vertical = ctx(&hex, 1080, 1920);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+
+        // 2 s failed export: interval 200 s, recorded like an exported one.
+        let state = Arc::new(DrtSharedState::default());
+        let d = state.finish(t0, begin(&state, t0, false, &dir), failed("export-returned-false", Some(1999.2)), &vertical);
+        assert_eq!(
+            d.log_line.as_deref(),
+            Some("host_input_sizing: source=api-fallback effective=scaleToFit api=scaleToFit res=1080x1920 last_export_ms=2000 reason=export-failed(export-returned-false)")
+        );
+        assert!(!begin(&state, at(199_999), false, &dir).expect("request").params.want);
+        assert!(begin(&state, at(200_000), false, &dir).expect("request").params.want);
+
+        // Without a duration the last known cost is kept.
+        let state = Arc::new(DrtSharedState::default());
+        state.finish(t0, begin(&state, t0, false, &dir), exported(2000.0), &vertical);
+        state.finish(at(200_000), begin(&state, at(200_000), false, &dir), failed("x", None), &vertical);
+        assert!(!begin(&state, at(399_999), false, &dir).expect("request").params.want);
+        assert!(begin(&state, at(400_000), false, &dir).expect("request").params.want);
+
+        // A non-finite duration counts as the worst known cost, as for an exported one.
+        let state = Arc::new(DrtSharedState::default());
+        state.finish(t0, begin(&state, t0, false, &dir), failed("x", Some(f64::NAN)), &vertical);
+        assert!(!begin(&state, at(499_999), false, &dir).expect("request").params.want);
+        assert!(begin(&state, at(500_000), false, &dir).expect("request").params.want);
+    }
+
+    #[test]
+    fn parse_details_name_the_cost_and_the_result() {
+        assert_eq!(
+            parse_details(12.34, 27_309, &Ok("stretch")),
+            "host_input_sizing: DRT parse took 12.3ms, 27309 bytes -> mode=stretch"
+        );
+        assert_eq!(
+            parse_details(0.06, 812, &Err("vertical-out-of-range(7)".to_string())),
+            "host_input_sizing: DRT parse took 0.1ms, 812 bytes -> reason=vertical-out-of-range(7)"
+        );
+    }
+
+    #[test]
     fn unsupported_disables_exports_for_session() {
         let dir = TestDir::new();
         let state = Arc::new(DrtSharedState::default());
@@ -678,7 +744,7 @@ mod tests {
         drop(next);
 
         let state = Arc::new(DrtSharedState::default());
-        let d = state.finish(t0, begin(&state, t0, false, &dir), DrtOutcome::Failed("export-returned-false".into()), &mismatched);
+        let d = state.finish(t0, begin(&state, t0, false, &dir), failed("export-returned-false", None), &mismatched);
         assert_eq!(mode_and_source(&d), (Some("scaleToFit"), &fallback("export-failed(export-returned-false)")));
         let next = begin(&state, t0 + Duration::from_secs(5), false, &dir).expect("request");
         assert_eq!(next.params.last_key, timeline_key(&hex, 1080, 1350, "scaleToFit"));
@@ -829,7 +895,7 @@ mod tests {
         let t0 = Instant::now();
         let hex = name_hex();
         let vertical = ctx(&hex, 1080, 1920);
-        state.finish(t0, begin(&state, t0, false, &dir), DrtOutcome::Failed("x".into()), &vertical);
+        state.finish(t0, begin(&state, t0, false, &dir), failed("x", None), &vertical);
         state.finish(t0 + Duration::from_secs(1), None, DrtOutcome::NotRequested, &vertical);
         assert!(state.want_pending());
 
@@ -887,7 +953,7 @@ mod tests {
         assert_eq!(state.finish(t0, None, DrtOutcome::Skipped, &vertical).log_line, None);
 
         // A changed reason is a changed source.
-        let d = state.finish(t0, None, DrtOutcome::Failed("x".into()), &vertical);
+        let d = state.finish(t0, None, failed("x", None), &vertical);
         assert_eq!(
             d.log_line.as_deref(),
             Some("host_input_sizing: source=api-fallback effective=scaleToFit api=scaleToFit res=1080x1920 last_export_ms=none reason=export-failed(x)")
