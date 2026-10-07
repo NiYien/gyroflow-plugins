@@ -3,6 +3,7 @@
 #import "GFFrameGeometryAdapter.h"
 #import "GFGeometryProbe.h"
 #import "GFLocalization.h"
+#import "GFMetalPassthrough.h"
 #import "GFParameterCommitter.h"
 #import "GFParameterIDs.h"
 #import "GFProjectDropView.h"
@@ -105,6 +106,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 @interface GFMetalDeviceResources : NSObject
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
+@property(nonatomic, strong) GFMetalPassthrough *passthrough;
 @end
 
 @implementation GFMetalDeviceResources
@@ -801,66 +803,12 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             GFMetalDeviceResources *resources = [[GFMetalDeviceResources alloc] init];
             resources.device = device;
             resources.commandQueue = queue;
+            resources.passthrough = [[GFMetalPassthrough alloc] initWithDevice:device];
             [self.metalResources setObject:resources forKey:key cost:1];
             return resources;
         }
     }
     return nil;
-}
-
-- (BOOL)copyTexture:(id<MTLTexture>)sourceTexture
-          toTexture:(id<MTLTexture>)destinationTexture
-       commandQueue:(id<MTLCommandQueue>)queue
-              error:(NSError **)outError {
-    if (sourceTexture.width != destinationTexture.width ||
-        sourceTexture.height != destinationTexture.height ||
-        sourceTexture.pixelFormat != destinationTexture.pixelFormat) {
-        if (outError != NULL) {
-            *outError = GFFxError(GFLocalized(
-                @"effect.error.passthrough_texture_mismatch",
-                @"Safe passthrough requires matching source and destination textures"));
-        }
-        return NO;
-    }
-    id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
-    if (queue == nil || commandBuffer == nil || blit == nil) {
-        if (outError != NULL) {
-            *outError = GFFxError(GFLocalized(
-                @"effect.error.passthrough_command",
-                @"Unable to create the Metal safe-passthrough command"));
-        }
-        return NO;
-    }
-    [blit copyFromTexture:sourceTexture
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(sourceTexture.width, sourceTexture.height, 1)
-                toTexture:destinationTexture
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
-    [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
-    if (commandBuffer.GPUEndTime >= commandBuffer.GPUStartTime &&
-        commandBuffer.GPUStartTime > 0.0) {
-        [self.renderDiagnostics
-            recordGPUSeconds:commandBuffer.GPUEndTime - commandBuffer.GPUStartTime];
-    }
-    if (commandBuffer.status == MTLCommandBufferStatusError) {
-        if (outError != NULL) {
-            NSString *detail = commandBuffer.error.localizedDescription
-                ?: GFLocalized(@"effect.error.passthrough_failed",
-                               @"Metal safe passthrough failed");
-            *outError = GFFxError([NSString stringWithFormat:GFLocalized(
-                @"effect.error.passthrough_failed_detail",
-                @"Metal safe passthrough failed: %@"), detail]);
-        }
-        return NO;
-    }
-    return YES;
 }
 
 - (BOOL)renderDestinationImage:(FxImageTile *)destinationImage
@@ -1025,12 +973,24 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     [self reportRenderStatus:message ?: @"" applied:NO snapshot:snapshot];
     if (disposition == GF_RENDER_DISPOSITION_PASSTHROUGH) {
         [snapshot.renderLock unlock];
-        [self.renderDiagnostics recordPassthroughStatus:status reason:message ?: @""];
+        NSString *passthroughReason = [NSString stringWithFormat:
+            @"%@ (input=%lux%lu origin=%lu, output=%lux%lu origin=%lu)", message ?: @"",
+            (unsigned long)sourceTexture.width, (unsigned long)sourceTexture.height,
+            (unsigned long)sourceImage.imageOrigin,
+            (unsigned long)destinationTexture.width, (unsigned long)destinationTexture.height,
+            (unsigned long)destinationImage.imageOrigin];
+        [self.renderDiagnostics recordPassthroughStatus:status reason:passthroughReason];
         gf_finalcut_error_free(bridgeError);
-        BOOL copied = [self copyTexture:sourceTexture
-                              toTexture:destinationTexture
-                           commandQueue:metalResources.commandQueue
-                                  error:outError];
+        double gpuSeconds = 0;
+        BOOL copied = [metalResources.passthrough
+            copySource:sourceTexture
+            sourceImage:GFHostImageSnapshot(sourceImage, sourceTexture)
+            destination:destinationTexture
+            destinationImage:GFHostImageSnapshot(destinationImage, destinationTexture)
+            commandQueue:metalResources.commandQueue
+            gpuSeconds:&gpuSeconds
+            error:outError];
+        if (gpuSeconds > 0) { [self.renderDiagnostics recordGPUSeconds:gpuSeconds]; }
         [self.renderDiagnostics
             recordFrameSeconds:[NSDate timeIntervalSinceReferenceDate] - frameStarted
                      processed:NO];

@@ -894,7 +894,7 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertIn("projectContentHash", state_header)
         self.assertIn("schemaVersion", state_header)
         self.assertIn("GFRenderMode", state_header)
-        self.assertIn("kGFRenderStateSchema = 4", state_source)
+        self.assertIn("kGFRenderStateSchema = 5", state_source)
         self.assertIn("schema < 1", state_source)
         self.assertIn("snapshot.state.projectDisplayName", effect)
         self.assertIn("state.schemaVersion", effect)

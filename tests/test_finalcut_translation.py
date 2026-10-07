@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+import os
 import subprocess
 import sys
 import tempfile
@@ -17,9 +18,12 @@ class TranslationSettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             executable = compile_helper(Path(directory), "translation-committer", [
                 EFFECT / "GFParameterCommitter.m",
+                EFFECT / "GFTranslationSettings.m",
                 ROOT / "tests/helpers/finalcut_parameter_committer_main.m",
             ], fxplug=True)
-            run = subprocess.run([str(executable), "--translation"], capture_output=True, text=True)
+            environment = os.environ.copy()
+            environment["DYLD_FRAMEWORK_PATH"] = "/Library/Developer/Frameworks"
+            run = subprocess.run([str(executable), "--translation"], capture_output=True, text=True, env=environment)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             result = json.loads(run.stdout)
             for key in ("saved", "rolledBack", "restartRestored", "reloadReset", "staleEditRejected", "undoRestored", "balancedActions"):
