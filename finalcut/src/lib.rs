@@ -32,6 +32,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use project_parameters::{snapshot_project_parameters, validate_render_parameters};
+mod translation_parameters;
+pub use translation_parameters::{GFTranslationInfo, GFTranslationParameters,
+    gf_finalcut_instance_get_project_translation_info, gf_finalcut_instance_set_translation_parameters};
 
 pub const FINALCUT_RUST_BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROJECT_PAYLOAD_VERSION: u32 = 1;
@@ -383,6 +386,7 @@ const _: () = {
 };
 
 struct LoadedProject {
+    original_translation_parameters: GFTranslationParameters,
     host_geometry: std::sync::Mutex<Option<host_geometry::HostGeometryState>>,
     manager: Arc<StabilizationManager>,
     _bytes: Arc<[u8]>,
@@ -538,6 +542,7 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
     };
     validate_project_sync_readiness(&project_json, has_sync_points, has_accurate_timestamps)?;
     Ok(LoadedProject {
+        original_translation_parameters: translation_parameters::snapshot(&manager).parameters,
         host_geometry: Default::default(),
         manager: Arc::new(manager),
         _bytes: Arc::from(project_bytes),

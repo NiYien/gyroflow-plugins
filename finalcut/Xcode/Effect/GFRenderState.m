@@ -1,7 +1,7 @@
 #import "GFRenderState.h"
 #import <CommonCrypto/CommonDigest.h>
 
-static const NSInteger kGFRenderStateSchema = 4;
+static const NSInteger kGFRenderStateSchema = 5;
 
 CMTime GFDirectSourceTime(CMTime hostTime, GFTime origin, GFTime scale) {
     if (!CMTIME_IS_NUMERIC(hostTime) || origin.denominator <= 0 || origin.denominator > INT32_MAX ||
@@ -33,6 +33,8 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
 @property(nonatomic, readwrite) NSString *timingPayload;
 @property(nonatomic, readwrite) GFRenderMode mode;
 @property(nonatomic, readwrite) GFRenderParameters parameters;
+@property(nonatomic, readwrite) NSString *translationSettings;
+@property(nonatomic, readwrite) NSString *translationProjectIdentity;
 @property(nonatomic, readwrite) GFHostOptions hostOptions;
 @property(nonatomic, readwrite) GFTime sourceTimeScale;
 @property(nonatomic, readwrite) GFTimeRange effectBounds;
@@ -82,6 +84,8 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
         self.timingPayload = [timingPayload copy];
         self.mode = mode;
         self.parameters = parameters;
+        self.translationSettings = @"";
+        self.translationProjectIdentity = @"";
         self.effectBounds = effectBounds;
         self.inputBounds = inputBounds;
         self.sourceTimeScale = (GFTime){.numerator = 1, .denominator = 1};
@@ -105,6 +109,18 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
     if (self != nil) {
         self.hostOptions = options;
         self.sourceTimeScale = scale;
+        self.translationSettings = state.translationSettings;
+        self.translationProjectIdentity = state.translationProjectIdentity;
+    }
+    return self;
+}
+
+- (instancetype)initWithState:(GFRenderState *)state translationSettings:(NSString *)settings
+               projectIdentity:(NSString *)projectIdentity {
+    self = [self initWithState:state hostOptions:state.hostOptions sourceTimeScale:state.sourceTimeScale];
+    if (self != nil) {
+        self.translationSettings = [settings copy];
+        self.translationProjectIdentity = [projectIdentity copy];
     }
     return self;
 }
@@ -187,10 +203,18 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
     if (scale.numerator <= 0 || scale.numerator > INT32_MAX ||
         scale.denominator <= 0 || scale.denominator > INT32_MAX) { return nil; }
     state.sourceTimeScale = scale;
+    state.translationSettings = schema >= 5
+        ? [coder decodeObjectOfClass:NSString.class forKey:@"translationSettings"] : @"";
+    state.translationProjectIdentity = schema >= 5
+        ? [coder decodeObjectOfClass:NSString.class forKey:@"translationProjectIdentity"] : @"";
+    if (state.translationSettings == nil || state.translationSettings.length > 4096 ||
+        state.translationProjectIdentity == nil || state.translationProjectIdentity.length > 128) { return nil; }
     return state;
 }
 
 - (void)encodeWithCoder:(NSCoder *)coder {
+    [coder encodeObject:self.translationSettings forKey:@"translationSettings"];
+    [coder encodeObject:self.translationProjectIdentity forKey:@"translationProjectIdentity"];
     [coder encodeInt64:self.sourceTimeScale.numerator forKey:@"sourceTimeScaleNumerator"];
     [coder encodeInt64:self.sourceTimeScale.denominator forKey:@"sourceTimeScaleDenominator"];
     [coder encodeInt32:self.hostOptions.input_orientation forKey:@"inputOrientation"];

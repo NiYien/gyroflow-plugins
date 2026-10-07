@@ -78,6 +78,33 @@ typedef struct GFRenderParameters {
     uint8_t reserved[3];
 } GFRenderParameters;
 
+/* Separate parameters keep the original render-parameter ABI unchanged. */
+typedef struct GFTranslationParameters {
+    double reference_percent;
+    double smoothness_seconds;
+    uint8_t enabled;
+    uint8_t automatic;
+    uint8_t along_axis;
+    /* Zero restores the settings from the imported project. */
+    uint8_t initialized;
+    uint8_t reserved[4];
+} GFTranslationParameters;
+
+typedef struct GFTranslationInfo {
+    /* Original imported settings; result flags reflect the current manager. */
+    GFTranslationParameters parameters;
+    uint8_t available;
+    uint8_t active;
+    uint8_t stale;
+    uint8_t reserved[5];
+} GFTranslationInfo;
+
+GFStatus gf_finalcut_instance_get_project_translation_info(
+    const GFFinalCutInstance *instance, GFTranslationInfo *out_info, GFError **out_error);
+/* Call before set_render_parameters, which completes the recomputation. */
+GFStatus gf_finalcut_instance_set_translation_parameters(
+    GFFinalCutInstance *instance, const GFTranslationParameters *parameters, GFError **out_error);
+
 #define GF_FRAME_GEOMETRY_VERSION_LEGACY ((uint32_t)0)
 #define GF_FRAME_GEOMETRY_VERSION ((uint32_t)1)
 

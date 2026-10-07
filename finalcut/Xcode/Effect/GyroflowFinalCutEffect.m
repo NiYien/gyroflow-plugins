@@ -10,6 +10,7 @@
 #import "GFRenderCache.h"
 #import "GFRenderDiagnostics.h"
 #import "GFRenderPolicy.h"
+#import "GFTranslationView.h"
 #import "GyroflowFinalCut.h"
 #import <Metal/Metal.h>
 #import <math.h>
@@ -98,7 +99,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         (long long)input.duration.numerator,
         (long long)input.duration.denominator,
         (long)state.mode];
-    return [NSString stringWithFormat:@"%@|%u|%u|%lld/%lld", identity, state.hostOptions.input_orientation, state.hostOptions.sizing, (long long)state.sourceTimeScale.numerator, (long long)state.sourceTimeScale.denominator];
+    return [NSString stringWithFormat:@"%@|%u|%u|%lld/%lld|%@|%@", identity, state.hostOptions.input_orientation, state.hostOptions.sizing, (long long)state.sourceTimeScale.numerator, (long long)state.sourceTimeScale.denominator, state.translationProjectIdentity, state.translationSettings];
 }
 
 @interface GFMetalDeviceResources : NSObject
@@ -119,6 +120,14 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 @property(nonatomic, copy) NSString *cachedPluginStateIdentity;
 @property(nonatomic, copy) NSData *cachedPluginStateData;
 @property(nonatomic, weak) GFProjectDropView *projectView;
+@property(nonatomic, weak) GFTranslationView *translationView;
+@property(nonatomic) GFTranslationInfo translationInfo;
+@property(atomic, copy) NSString *translationSettings;
+@property(atomic, copy) NSString *translationProjectIdentity;
+@property(nonatomic, copy) NSString *lastTranslationPublishedIdentity;
+@property(nonatomic) NSUInteger translationUIEpoch;
+@property(nonatomic) BOOL translationVisibilityKnown;
+@property(nonatomic) BOOL translationVisible;
 @property(nonatomic) BOOL renderStateRestoreScheduled;
 @property(nonatomic, copy) NSString *lastRenderStatusIdentity;
 @end
@@ -312,6 +321,11 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                                      parameterFlags:(kFxParameterFlag_HIDDEN |
                                                      kFxParameterFlag_NOT_ANIMATABLE)];
     }
+    ok = ok && [parameters addCustomParameterWithName:@"" parameterID:kGFTranslationControl defaultValue:@0
+        parameterFlags:(kFxParameterFlag_CUSTOM_UI | kFxParameterFlag_NOT_ANIMATABLE |
+                        kFxParameterFlag_USE_FULL_VIEW_WIDTH | kFxParameterFlag_HIDDEN)];
+    ok = ok && [parameters addStringParameterWithName:@"Translation Settings" parameterID:kGFTranslationSettings
+        defaultValue:@"" parameterFlags:(kFxParameterFlag_HIDDEN | kFxParameterFlag_NOT_ANIMATABLE)];
     if (!ok && error != NULL) {
         *error = GFFxError(GFLocalized(
             @"effect.error.parameters_create",
@@ -362,13 +376,44 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 }
 
 - (BOOL)parameterChanged:(UInt32)paramID atTime:(CMTime)time error:(NSError **)error {
-    (void)paramID; (void)time; (void)error;
+    (void)time; (void)error;
+    if (paramID == kGFTranslationSettings || paramID == kGFProjectPayloadManifestA ||
+        paramID == kGFProjectPayloadManifestB || paramID == kGFProjectPayload) {
+        [self.pluginStateCacheLock lock];
+        self.translationUIEpoch += 1;
+        [self.pluginStateCacheLock unlock];
+    }
     [self restoreProjectStoreFromHostParameters];
-    dispatch_async(dispatch_get_main_queue(), ^{ [self.projectView refreshStatus]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [self.projectView refreshStatus]; [self.translationView refresh]; });
     return YES;
 }
 
 - (NSView *)createViewForParameterID:(UInt32)parameterID {
+    if (parameterID == kGFTranslationControl) {
+        __weak GyroflowFinalCutEffect *weakSelf = self;
+        GFTranslationView *view = [[GFTranslationView alloc] initWithInfoHandler:^GFTranslationInfo {
+            GyroflowFinalCutEffect *strongSelf = weakSelf;
+            return strongSelf != nil ? strongSelf.translationInfo : (GFTranslationInfo){0};
+        } commitHandler:^BOOL(GFTranslationParameters parameters, NSView *sender) {
+            GyroflowFinalCutEffect *strongSelf = weakSelf;
+            if (strongSelf == nil || !strongSelf.translationInfo.available) { return NO; }
+            NSString *identity = strongSelf.translationProjectIdentity;
+            BOOL committed = [strongSelf.parameterCommitter commitTranslationParameters:parameters
+                projectIdentity:identity sender:sender];
+            if (committed) {
+                [strongSelf.pluginStateCacheLock lock];
+                strongSelf.translationUIEpoch += 1;
+                [strongSelf.pluginStateCacheLock unlock];
+                strongSelf.translationSettings = GFTranslationSettingsString(parameters, identity);
+                GFTranslationInfo info = strongSelf.translationInfo;
+                info.parameters = parameters;
+                strongSelf.translationInfo = info;
+            }
+            return committed;
+        }];
+        self.translationView = view;
+        return view;
+    }
     if (parameterID != kGFProjectControl) {
         return nil;
     }
@@ -386,12 +431,13 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                    return committed;
                }];
     self.projectView = view;
+    [self updateTranslationVisibility];
     [view refreshStatus];
     return view;
 }
 
 - (NSSet<Class> *)classesForCustomParameterID:(UInt32)parameterID {
-    return parameterID == kGFProjectControl
+    return (parameterID == kGFProjectControl || parameterID == kGFTranslationControl)
         ? [NSSet setWithObject:[NSNumber class]]
         : [NSSet set];
 }
@@ -430,6 +476,55 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     });
 }
 
+- (void)updateTranslationVisibility {
+    BOOL visible = self.translationInfo.available != 0;
+    if ((self.translationVisibilityKnown && self.translationVisible == visible) || self.projectView == nil) { return; }
+    id<FxCustomParameterActionAPI_v4> action =
+        [self.apiManager apiForProtocol:@protocol(FxCustomParameterActionAPI_v4)];
+    if (action == nil) { return; }
+    [action startAction:self.projectView];
+    @try {
+        id<FxParameterSettingAPI_v5> setting =
+            [self.apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+        FxParameterFlags flags = kFxParameterFlag_CUSTOM_UI | kFxParameterFlag_NOT_ANIMATABLE |
+            kFxParameterFlag_USE_FULL_VIEW_WIDTH | (visible ? 0 : kFxParameterFlag_HIDDEN);
+        if ([setting setParameterFlags:flags toParameter:kGFTranslationControl]) {
+            self.translationVisibilityKnown = YES;
+            self.translationVisible = visible;
+        }
+    } @finally {
+        [action endAction:self.projectView];
+    }
+}
+
+- (void)publishTranslationInfo:(GFTranslationInfo)info settings:(NSString *)settings
+               projectIdentity:(NSString *)identity epoch:(NSUInteger)epoch onlyCurrent:(BOOL)onlyCurrent {
+    NSString *infoKey = [[NSData dataWithBytes:&info length:sizeof(info)] base64EncodedStringWithOptions:0];
+    NSString *key = [NSString stringWithFormat:@"%@|%@|%lu|%@", identity, settings, (unsigned long)epoch, infoKey];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.pluginStateCacheLock lock];
+        BOOL current = epoch == self.translationUIEpoch;
+        [self.pluginStateCacheLock unlock];
+        if (!current || ![self.parameterCommitter.currentProjectIdentity isEqualToString:identity]) { return; }
+        if (onlyCurrent && (![self.translationSettings isEqualToString:settings] ||
+            ![self.translationProjectIdentity isEqualToString:identity])) { return; }
+        if ([self.lastTranslationPublishedIdentity isEqualToString:key]) { return; }
+        self.lastTranslationPublishedIdentity = key;
+        GFTranslationParameters parameters = {0};
+        GFTranslationInfo resolvedInfo = info;
+        if (!GFTranslationParametersFromSettings(settings, identity, &parameters)) {
+            resolvedInfo.stale = 1;
+        } else if (parameters.initialized) {
+            resolvedInfo.parameters = parameters;
+        }
+        self.translationSettings = settings;
+        self.translationProjectIdentity = identity;
+        self.translationInfo = resolvedInfo;
+        [self updateTranslationVisibility];
+        [self.translationView refresh];
+    });
+}
+
 - (void)reportRenderStatus:(NSString *)message applied:(BOOL)applied snapshot:(GFRenderSnapshot *)snapshot {
     NSString *payload = snapshot.state.projectPayload;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -459,6 +554,9 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             quality:(FxQuality)qualityLevel
               error:(NSError **)error {
     NSTimeInterval pluginStateStarted = [NSDate timeIntervalSinceReferenceDate];
+    [self.pluginStateCacheLock lock];
+    NSUInteger translationEpoch = self.translationUIEpoch;
+    [self.pluginStateCacheLock unlock];
     id<FxParameterRetrievalAPI_v6> retrieval = [self parameterRetrievalAPI];
     if (retrieval == nil) {
         [self.projectStore failPendingHostReadbackWithMessage:GFLocalized(
@@ -598,6 +696,10 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             GFTimeFromCMTime(nativeFrameDuration), timelineFrameDuration);
     }
     state = [[GFRenderState alloc] initWithState:state hostOptions:hostOptions sourceTimeScale:sourceTimeScale];
+    NSString *translationSettings = [self stringValueForParameter:kGFTranslationSettings];
+    NSString *translationIdentity = self.parameterCommitter.currentProjectIdentity;
+    state = [[GFRenderState alloc] initWithState:state translationSettings:translationSettings
+        projectIdentity:translationIdentity];
     NSString *archiveIdentity = GFRenderStateArchiveIdentity(state);
     [self.pluginStateCacheLock lock];
     NSData *archived = [self.cachedPluginStateIdentity isEqualToString:archiveIdentity]
@@ -627,7 +729,13 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         }
         return NO;
     }
-    [self.renderCache snapshotForPluginStateData:archived error:NULL];
+    GFRenderSnapshot *translationSnapshot = [self.renderCache snapshotForPluginStateData:archived error:NULL];
+    GFTranslationInfo translationInfo = {0};
+    if (translationSnapshot.instance != NULL) {
+        gf_finalcut_instance_get_project_translation_info(translationSnapshot.instance, &translationInfo, NULL);
+    }
+    [self publishTranslationInfo:translationInfo settings:translationSettings
+        projectIdentity:translationIdentity epoch:translationEpoch onlyCurrent:NO];
     [self.renderDiagnostics
         recordPluginStateBytes:archived.length
                  encodeSeconds:[NSDate timeIntervalSinceReferenceDate] - pluginStateStarted];
@@ -845,7 +953,18 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 
     GFError *bridgeError = NULL;
     GFStatus status = snapshot.preparationStatus;
+    NSString *translationError = nil;
     [snapshot.renderLock lock];
+    if (status == GF_STATUS_OK) {
+        GFTranslationParameters translation = {0};
+        if (!GFTranslationParametersFromSettings(snapshot.state.translationSettings,
+                snapshot.state.translationProjectIdentity, &translation)) {
+            status = GF_STATUS_INVALID_ARGUMENT;
+            translationError = GFLocalized(@"effect.translation.invalid", @"Invalid translation settings");
+        } else {
+            status = gf_finalcut_instance_set_translation_parameters(snapshot.instance, &translation, &bridgeError);
+        }
+    }
     if (status == GF_STATUS_OK) {
         GFRenderParameters parameters = snapshot.state.parameters;
         status = gf_finalcut_instance_set_render_parameters(snapshot.instance, &parameters, &bridgeError);
@@ -882,6 +1001,14 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     }
     GFRenderDisposition disposition = GFRenderDispositionForStatus(status);
     if (disposition == GF_RENDER_DISPOSITION_PROCESSED) {
+        GFTranslationInfo translationInfo = {0};
+        if (gf_finalcut_instance_get_project_translation_info(snapshot.instance, &translationInfo, NULL) == GF_STATUS_OK) {
+            [self.pluginStateCacheLock lock];
+            NSUInteger epoch = self.translationUIEpoch;
+            [self.pluginStateCacheLock unlock];
+            [self publishTranslationInfo:translationInfo settings:snapshot.state.translationSettings
+                projectIdentity:snapshot.state.translationProjectIdentity epoch:epoch onlyCurrent:YES];
+        }
         [self reportRenderStatus:@"" applied:YES snapshot:snapshot];
         [snapshot.renderLock unlock];
         [self.renderDiagnostics
@@ -894,7 +1021,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         ? GFBridgeErrorMessage(
               bridgeError,
               GFLocalized(@"effect.error.render_failed", @"Gyroflow Metal render failed"))
-        : snapshot.statusMessage;
+        : (translationError ?: snapshot.statusMessage);
     [self reportRenderStatus:message ?: @"" applied:NO snapshot:snapshot];
     if (disposition == GF_RENDER_DISPOSITION_PASSTHROUGH) {
         [snapshot.renderLock unlock];

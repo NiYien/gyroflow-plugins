@@ -963,7 +963,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1358,7 +1358,7 @@ dependencies = [
 [[package]]
 name = "gyroflow-core"
 version = "1.6.3"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=2246deed4d5c3d2d8d882dcbfc2d8974c4d03ea4#2246deed4d5c3d2d8d882dcbfc2d8974c4d03ea4"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=72d7cd08a9b7bd6a50d5f892ce47d8fa84da1ae5#72d7cd08a9b7bd6a50d5f892ce47d8fa84da1ae5"
 dependencies = [
  "ahrs",
  "akaze",
@@ -1640,7 +1640,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -2303,7 +2303,7 @@ dependencies = [
 [[package]]
 name = "neuflow-trace-shared"
 version = "0.1.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=2246deed4d5c3d2d8d882dcbfc2d8974c4d03ea4#2246deed4d5c3d2d8d882dcbfc2d8974c4d03ea4"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=72d7cd08a9b7bd6a50d5f892ce47d8fa84da1ae5#72d7cd08a9b7bd6a50d5f892ce47d8fa84da1ae5"
 
 [[package]]
 name = "nodrop"
@@ -2908,7 +2908,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3243,7 +3243,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3549,7 +3549,7 @@ source = "git+https://github.com/Rust-GPU/rust-gpu?rev=854e9ba#854e9ba7da26d52ca
 [[package]]
 name = "stabilize_spirv"
 version = "0.0.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=2246deed4d5c3d2d8d882dcbfc2d8974c4d03ea4#2246deed4d5c3d2d8d882dcbfc2d8974c4d03ea4"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=72d7cd08a9b7bd6a50d5f892ce47d8fa84da1ae5#72d7cd08a9b7bd6a50d5f892ce47d8fa84da1ae5"
 dependencies = [
  "spirv-std",
 ]
@@ -3640,7 +3640,7 @@ dependencies = [
 [[package]]
 name = "telemetry-parser"
 version = "0.3.0"
-source = "git+https://github.com/NiYien/telemetry-parser.git?branch=niyien#23967efb0d4db041f816a203e2ec7ada43959cbd"
+source = "git+https://github.com/NiYien/telemetry-parser.git?branch=niyien#665a5e887df35f2d52f7523b8b743bb48c1a1c59"
 dependencies = [
  "argh",
  "byteorder",
@@ -4356,7 +4356,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

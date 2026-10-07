@@ -48,6 +48,8 @@ def compile_helper(
         )
     if EFFECT / "GFRenderState.m" in sources:
         command.extend(["-framework", "CoreMedia"])
+    if EFFECT / "GFParameterCommitter.m" in sources:
+        sources = [*sources, EFFECT / "GFTranslationSettings.m"]
     if appkit:
         command.extend(["-framework", "AppKit"])
     localized_sources = {

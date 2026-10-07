@@ -135,5 +135,20 @@
   "ae.msg.about_suffix": "Gyroflow(Niyien) プラグイン。",
 
   "frei0r.plugin.explanation": "Gyroflow(Niyien) 動画手ぶれ補正",
-  "frei0r.hint.timestamp_scale": "入力タイムスタンプのスケール"
+  "frei0r.hint.timestamp_scale": "入力タイムスタンプのスケール",
+
+  "label.translation_enabled": "並進手ぶれ補正（実験機能）",
+  "hint.translation_enabled": "プロジェクトに保存された並進解析を使用します。無効にしても解析結果は保持されます。",
+  "label.translation_auto": "自動パラメーター",
+  "hint.translation_auto": "基準レイヤーと滑らかさを自動選択します。手動設定は保持されます。",
+  "label.translation_reference": "基準距離（%）",
+  "hint.translation_reference": "100% は画面内の遠景レイヤーを安定させます。0% は平滑化後に残る回転のみを補正します。",
+  "label.translation_smoothness": "並進の滑らかさ（秒）",
+  "hint.translation_smoothness": "平滑化時間は 0.1～10 秒です。",
+  "label.translation_along_axis": "レンズ軸方向を補正",
+  "hint.translation_along_axis": "レンズ軸方向の移動による画面の拡大・縮小を補正します。",
+  "label.translation_status": "並進の状態",
+  "status.translation_disabled": "並進補正は無効です",
+  "status.translation_stale": "Gyroflow で再解析してください",
+  "status.translation_active": "並進補正が有効です"
 }

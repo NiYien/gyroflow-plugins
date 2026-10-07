@@ -20,6 +20,9 @@ NS_ASSUME_NONNULL_BEGIN
     (NSError * _Nullable * _Nullable)error;
 - (nullable NSString *)persistedProjectPayloadWithHash:(NSString * _Nullable * _Nullable)hash
                                                   error:(NSError * _Nullable * _Nullable)error;
+@property(nonatomic, readonly) NSString *currentProjectIdentity;
+- (BOOL)commitTranslationParameters:(GFTranslationParameters)parameters
+                     projectIdentity:(NSString *)projectIdentity sender:(id)sender;
 
 @end
 

@@ -30,6 +30,16 @@ SHARED_KEYS = {
     "effect.param.horizon_roll": "label.horizon_lock_roll",
     "effect.param.zoom_mode": "label.zoom_mode",
     "effect.param.overview": "label.toggle_overview",
+    "effect.translation.enabled": "label.translation_enabled",
+    "effect.translation.help": "hint.translation_enabled",
+    "effect.translation.automatic": "label.translation_auto",
+    "effect.translation.reference": "label.translation_reference",
+    "effect.translation.reference_help": "hint.translation_reference",
+    "effect.translation.smoothness": "label.translation_smoothness",
+    "effect.translation.axis": "label.translation_along_axis",
+    "effect.translation.disabled": "status.translation_disabled",
+    "effect.translation.stale": "status.translation_stale",
+    "effect.translation.active": "status.translation_active",
 }
 FORMAT_PLACEHOLDER = re.compile(r"%(?:\d+\$)?(?:ld|lu|[@df])")
 Translation = Union[str, Dict[str, str]]

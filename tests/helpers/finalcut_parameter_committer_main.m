@@ -5,6 +5,7 @@
 
 #import "GFParameterCommitter.h"
 #import "GFParameterIDs.h"
+#import "GFTranslationSettings.h"
 
 static const UInt32 kVisibleParameterIDs[] = {
     kGFFOV,
@@ -59,6 +60,7 @@ static NSError *GFTestError(NSString *message) {
 @property(nonatomic) NSUInteger insideActionReads;
 @property(nonatomic) BOOL discardVisibleWriteOnce;
 @property(nonatomic) BOOL discardManifestWriteOnce;
+@property(nonatomic) BOOL corruptTranslationWriteOnce;
 @property(nonatomic) BOOL failProjectOverviewWriteOnce;
 @property(nonatomic) BOOL discardOldFOVWriteOnce;
 @property(nonatomic) BOOL projectStaticWritesAtZero;
@@ -99,6 +101,11 @@ static NSError *GFTestError(NSString *message) {
 - (BOOL)setStringParameterValue:(NSString *)value toParameter:(UInt32)parameterID {
     if (![self recordWriteForParameter:parameterID]) {
         return NO;
+    }
+    if (parameterID == kGFTranslationSettings && self.corruptTranslationWriteOnce) {
+        self.corruptTranslationWriteOnce = NO;
+        self.strings[@(parameterID)] = [value stringByAppendingString:@" "];
+        return YES;
     }
     if ((parameterID == kGFProjectPayloadManifestA ||
          parameterID == kGFProjectPayloadManifestB) &&
@@ -590,6 +597,51 @@ int main(int argc, const char *argv[]) {
         GFParameterCommitter *committer =
             [[GFParameterCommitter alloc] initWithAPIManager:manager];
         GFRenderParameters parameters = GFProjectParameters();
+
+        if (argc > 1 && strcmp(argv[1], "--translation") == 0) {
+            NSString *payload = @"QUFB";
+            NSCAssert(GFCommit(committer, payload, @"A.gyroflow", parameters, manager), @"load project");
+            [committer persistedProjectPayloadWithError:NULL];
+            NSString *identity = committer.currentProjectIdentity;
+            NSDictionary *beforeReload = [manager.setting.strings copy];
+            manager.parameterAPIsRequireAction = YES;
+            manager.setting.readsRequireAction = YES;
+            GFTranslationParameters translation = {.reference_percent = 70, .smoothness_seconds = 2.5,
+                .enabled = 0, .automatic = 1, .along_axis = 1, .initialized = 1};
+            BOOL saved = [committer commitTranslationParameters:translation projectIdentity:identity sender:manager];
+            NSString *savedSettings = manager.setting.strings[@(kGFTranslationSettings)];
+            translation.enabled = 1;
+            manager.setting.corruptTranslationWriteOnce = YES;
+            BOOL rejected = ![committer commitTranslationParameters:translation projectIdentity:identity sender:manager];
+            BOOL rolledBack = [manager.setting.strings[@(kGFTranslationSettings)] isEqualToString:savedSettings];
+            GFParameterCommitter *restarted = [[GFParameterCommitter alloc] initWithAPIManager:manager];
+            [manager.action startAction:manager];
+            [restarted persistedProjectPayloadWithError:NULL];
+            [manager.action endAction:manager];
+            GFTranslationParameters restored = {0};
+            BOOL restartRestored = GFTranslationParametersFromSettings(savedSettings, restarted.currentProjectIdentity, &restored) &&
+                restored.initialized && !restored.enabled && restored.automatic && restored.reference_percent == 70;
+            NSCAssert(GFCommit(restarted, payload, @"A.gyroflow", parameters, manager), @"reload same file");
+            [manager.action startAction:manager];
+            [restarted persistedProjectPayloadWithError:NULL];
+            [manager.action endAction:manager];
+            BOOL reloadReset = ![restarted.currentProjectIdentity isEqualToString:identity] &&
+                GFTranslationParametersFromSettings(savedSettings, restarted.currentProjectIdentity, &restored) && !restored.initialized;
+            BOOL staleEditRejected = ![restarted commitTranslationParameters:translation projectIdentity:identity sender:manager];
+            manager.setting.strings = [beforeReload mutableCopy];
+            manager.setting.strings[@(kGFTranslationSettings)] = savedSettings;
+            [manager.action startAction:manager];
+            [restarted persistedProjectPayloadWithError:NULL];
+            [manager.action endAction:manager];
+            BOOL undoRestored = GFTranslationParametersFromSettings(savedSettings, restarted.currentProjectIdentity, &restored) &&
+                restored.initialized && !restored.enabled;
+            GFPrintJSON(@{@"saved": @(saved), @"rolledBack": @(rejected && rolledBack),
+                @"restartRestored": @(restartRestored), @"reloadReset": @(reloadReset),
+                @"staleEditRejected": @(staleEditRejected), @"undoRestored": @(undoRestored),
+                @"outsideActionWrites": @(manager.setting.outsideActionWrites),
+                @"balancedActions": @(manager.action.startCount == manager.action.endCount)});
+            return saved && rejected && rolledBack && restartRestored && reloadReset && staleEditRejected && undoRestored ? 0 : 1;
+        }
 
         if (argc > 1 && strcmp(argv[1], "--cycle") == 0) {
             NSString *payloadA = GFRepeatedPayload(@"QUFB", 300000);

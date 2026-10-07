@@ -106,6 +106,8 @@ int main(void) {
         state = [[GFRenderState alloc] initWithState:state
             hostOptions:(GFHostOptions){.input_orientation = 2, .sizing = 3}
             sourceTimeScale:(GFTime){.numerator = 1001, .denominator = 1000}];
+        state = [[GFRenderState alloc] initWithState:state translationSettings:@"saved-translation"
+            projectIdentity:@"fixture-translation-identity"];
         NSError *error = nil;
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:state
                                             requiringSecureCoding:YES
@@ -120,6 +122,8 @@ int main(void) {
         if (roundTrip == nil) {
             return 3;
         }
+        NSCAssert([roundTrip.translationSettings isEqualToString:@"saved-translation"], @"translation settings survive XPC archival");
+        NSCAssert([roundTrip.translationProjectIdentity isEqualToString:@"fixture-translation-identity"], @"project ownership survives archival");
         GFRenderDiagnostics *diagnostics = [[GFRenderDiagnostics alloc] init];
         GFRenderCache *cache = [[GFRenderCache alloc] initWithDiagnostics:diagnostics];
         GFRenderSnapshot *first = [cache snapshotForPluginStateData:data error:&error];
@@ -280,7 +284,7 @@ int main(void) {
             @"invalidClockRejected" : @(!CMTIME_IS_VALID(invalidClock)),
             @"legacyV2DefaultsToAutomatic" : @(legacyState.schemaVersion == 2 && legacyState.hostOptions.input_orientation == 0 && legacyState.hostOptions.sizing == 0 && legacyState.parameters.fov == 1.25 && legacyState.sourceTimeScale.numerator == 1 && legacyState.sourceTimeScale.denominator == 1),
             @"secureRoundTrip" : @(
-                roundTrip.schemaVersion == 4 &&
+                roundTrip.schemaVersion == 5 &&
                 roundTrip.sourceTimeScale.numerator == 1001 &&
                 roundTrip.sourceTimeScale.denominator == 1000 &&
                 roundTrip.hostOptions.input_orientation == 2 &&

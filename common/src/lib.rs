@@ -309,6 +309,13 @@ pub enum Params {
     ZoomModeGroup, ZoomModeGroupEnd,
     UseDynamicZoom,
     UseStaticZoom,
+    TranslationInitialized,
+    TranslationEnabled,
+    TranslationAuto,
+    TranslationReference,
+    TranslationSmoothness,
+    TranslationAlongAxis,
+    TranslationStatus,
 }
 
 // ---- Plugin file logger ----
@@ -604,7 +611,7 @@ impl GyroflowPluginBase {
         }
     }
 
-    pub fn get_param_definitions() -> [ParameterType; 14] {
+    pub fn get_param_definitions() -> Vec<ParameterType> {
         [
             ParameterType::HiddenString { id: "InstanceId" },
             ParameterType::HiddenString { id: "ProjectPath" },
@@ -699,9 +706,11 @@ impl GyroflowPluginBase {
                 ParameterType::Button { id: "UseDynamicZoom", label: t!("option.zoom_mode_dynamic"), hint: t!("hint.zoom_mode"), hidden: false },
                 ParameterType::Button { id: "UseStaticZoom", label: t!("option.zoom_mode_static"), hint: t!("hint.zoom_mode"), hidden: false },
             ] },
-        ]
+        ].into_iter().chain(translation::definitions()).collect()
     }
 }
+
+pub mod translation;
 
 pub enum ParameterType {
     HiddenString { id: &'static str },
@@ -722,6 +731,7 @@ pub enum TimeType {
     FrameOrMicrosecond((Option<f64>, Option<i64>))
 }
 pub trait GyroflowPluginParams {
+    fn set_visible(&mut self, _param: Params, _visible: bool) -> PluginResult<()> { Ok(()) }
     fn set_enabled(&mut self, param: Params, enabled: bool) -> PluginResult<()>;
     fn set_label(&mut self, param: Params, label: &str) -> PluginResult<()>;
     fn set_hint(&mut self, param: Params, hint: &str) -> PluginResult<()>;
@@ -1348,6 +1358,7 @@ impl GyroflowPluginBaseInstance {
         let instance_id = params.get_string(Params::InstanceId)?;
         let path = params.get_string(Params::ProjectPath)?;
         if path.is_empty() {
+            translation::update_ui(params, None);
             self.update_loaded_state(params, false);
             return Err("Path is empty".into());
         }
@@ -1357,13 +1368,19 @@ impl GyroflowPluginBaseInstance {
         }
 
         let key = format!("{path}{disable_stretch}{instance_id}");
-        let cloned = manager_cache.lock().get(&key).map(Arc::clone);
+        // A render worker may still hold the previous manager after clear_stab.
+        // An explicit reload must read the project instead of reusing that manager.
+        let cloned = if self.reload_values_from_project { None }
+            else { manager_cache.lock().get(&key).map(Arc::clone) };
         let stab = if let Some(stab) = cloned {
             // Cache it in this instance as well
             if !self.managers.contains(&key) {
                 self.managers.put(key.to_owned(), stab.clone());
             }
             self.set_keyframe_provider(&stab);
+            translation::load(params, &stab, false)?;
+            if translation::apply(params, &stab)? { stab.recompute_blocking(); }
+            translation::update_ui(params, Some(&stab));
             stab
         } else {
             log::info!("new stab manager for key: {key}");
@@ -1562,6 +1579,7 @@ impl GyroflowPluginBaseInstance {
                 }
             }
 
+            translation::load(params, &stab, self.reload_values_from_project)?;
             let loaded = {
                 stab.params.write().calculate_ramped_timestamps(&stab.keyframes.read(), false, true);
                 let gf_params = stab.params.read();
@@ -1837,6 +1855,7 @@ impl GyroflowPluginBaseInstance {
             // #1 reported `any above limit: false` but the post-mutation
             // recompute disagreed. Diff list goes to `stab.load` so a future
             // log shows which mutation actually triggers the rerun.
+            let translation_changed = translation::apply(params, &stab)?;
             let post_snapshot = snapshot_compute_inputs(&stab);
             if let Some(invalidation) = post_mutation_invalidation(&pre_snapshot, &post_snapshot) {
                 let diff = pre_snapshot.diff(&post_snapshot);
@@ -1847,8 +1866,13 @@ impl GyroflowPluginBaseInstance {
                 }
                 stab.recompute_blocking();
             } else {
-                log::info!(target: "stab.load", "post-mutation recompute skipped, no input change");
+                if translation_changed {
+                    stab.recompute_blocking();
+                } else {
+                    log::info!(target: "stab.load", "post-mutation recompute skipped, no input change");
+                }
             }
+            translation::update_ui(params, Some(&stab));
             let inverse = !(params.get_bool(Params::UseGyroflowsKeyframes)? && stab.keyframes.read().is_keyframed_internally(&KeyframeType::VideoSpeed));
             stab.params.write().calculate_ramped_timestamps(&stab.keyframes.read(), inverse, inverse);
 
@@ -2027,7 +2051,9 @@ impl GyroflowPluginBaseInstance {
                 //Params::PositionX | Params::PositionY |
                 Params::AdditionalPitch | Params::AdditionalYaw |
                 Params::Rotation | Params::InputRotation | Params::VideoSpeed | Params::IntegrationMethod | Params::ZoomMode |
-                Params::UseGyroflowsKeyframes | Params::RecalculateKeyframes => {
+                Params::UseGyroflowsKeyframes | Params::RecalculateKeyframes |
+                Params::TranslationEnabled | Params::TranslationAuto | Params::TranslationReference |
+                Params::TranslationSmoothness | Params::TranslationAlongAxis => {
 
                     params.set_string(Params::Status, t!("status.calculating"))?;
                     if !self.ever_changed {
@@ -2038,6 +2064,10 @@ impl GyroflowPluginBaseInstance {
                     let use_gyroflows_keyframes = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
                     self.cache_keyframes(params, use_gyroflows_keyframes, self.num_frames, self.fps.max(1.0));
                     for (_, v) in self.managers.iter_mut() {
+                        if translation::is_setting(param) {
+                            translation::apply(params, v)?;
+                            v.invalidate_blocking_zooming();
+                        }
                         match param {
                             Params::IntegrationMethod => {
                                 if let Ok(im) = params.get_i32(Params::IntegrationMethod) {
@@ -2088,6 +2118,11 @@ impl GyroflowPluginBaseInstance {
             if param == Params::Interpolation {
                 self.managers.clear();
                 manager_cache.lock().clear();
+            }
+            if let Some((_, stab)) = self.managers.peek_lru() {
+                translation::update_ui(params, Some(stab));
+            } else {
+                translation::update_ui(params, None);
             }
         }
 
@@ -2743,10 +2778,13 @@ mod tests {
         bools: BTreeMap<Params, bool>,
         f64s: BTreeMap<Params, f64>,
         i32s: BTreeMap<Params, i32>,
+        visible: BTreeMap<Params, bool>,
+        enabled: BTreeMap<Params, bool>,
     }
 
     impl GyroflowPluginParams for TestParams {
-        fn set_enabled(&mut self, _param: Params, _enabled: bool) -> PluginResult<()> { Ok(()) }
+        fn set_visible(&mut self, param: Params, visible: bool) -> PluginResult<()> { self.visible.insert(param, visible); Ok(()) }
+        fn set_enabled(&mut self, param: Params, enabled: bool) -> PluginResult<()> { self.enabled.insert(param, enabled); Ok(()) }
         fn set_label(&mut self, _param: Params, _label: &str) -> PluginResult<()> { Ok(()) }
         fn set_hint(&mut self, _param: Params, _hint: &str) -> PluginResult<()> { Ok(()) }
 
@@ -2815,6 +2853,136 @@ mod tests {
         assert!(!instance_id.is_empty());
         assert!(instance.ever_changed);
         assert!(instance.reload_values_from_project);
+    }
+
+    fn translation_control_fixture() -> StabilizationManager {
+        let manager = StabilizationManager::default();
+        manager.set_translation_stabilization_enabled(true);
+        manager.set_translation_reference(0.7);
+        manager.set_translation_smoothness(2.5);
+        manager.set_translation_along_axis(false);
+        manager.gyro.write().optical_translation = Some(gyroflow_core::gyro_source::OpticalTranslation::new(
+            Vec::new(), manager.optical_ui.read().translation_settings));
+        manager
+    }
+
+    #[test]
+    fn translation_controls_require_results_and_hide_after_project_switch() {
+        let without = StabilizationManager::default();
+        without.set_translation_stabilization_enabled(true);
+        let mut params = TestParams::default();
+        translation::load(&mut params, &without, true).unwrap();
+        assert!(!params.get_bool(Params::TranslationInitialized).unwrap());
+        assert!(!translation::apply(&params, &without).unwrap());
+        translation::update_ui(&mut params, Some(&translation_control_fixture()));
+        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        translation::update_ui(&mut params, Some(&without));
+        assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
+    }
+
+    #[test]
+    fn translation_controls_restore_overrides_until_explicit_reload() {
+        let manager = translation_control_fixture();
+        let mut params = TestParams::default();
+        translation::load(&mut params, &manager, false).unwrap();
+        assert_eq!(params.get_f64(Params::TranslationReference).unwrap(), 70.0);
+        assert_eq!(params.get_f64(Params::TranslationSmoothness).unwrap(), 2.5);
+        assert!(!params.get_bool(Params::TranslationAlongAxis).unwrap());
+        params.set_bool(Params::TranslationEnabled, false).unwrap();
+        params.set_f64(Params::TranslationReference, 120.0).unwrap();
+        let restored = translation_control_fixture();
+        translation::load(&mut params, &restored, false).unwrap();
+        assert!(translation::apply(&params, &restored).unwrap());
+        assert!(!restored.optical_ui.read().translation_enabled);
+        assert_eq!(restored.optical_ui.read().translation_settings.reference, 1.2);
+        assert!(restored.gyro.read().optical_translation.is_some());
+        assert!(!translation::apply(&params, &restored).unwrap());
+        translation::load(&mut params, &manager, true).unwrap();
+        assert!(params.get_bool(Params::TranslationEnabled).unwrap());
+        assert_eq!(params.get_f64(Params::TranslationReference).unwrap(), 70.0);
+    }
+
+    #[test]
+    fn translation_controls_auto_preserves_manual_values_and_disables_them() {
+        let manager = translation_control_fixture();
+        let mut params = TestParams::default();
+        translation::load(&mut params, &manager, true).unwrap();
+        params.set_bool(Params::TranslationAuto, true).unwrap();
+        translation::apply(&params, &manager).unwrap();
+        translation::update_ui(&mut params, Some(&manager));
+        assert_eq!(params.get_string(Params::TranslationStatus).unwrap(), t!("status.translation_stale"));
+        assert!(!params.enabled[&Params::TranslationReference]);
+        assert!(!params.enabled[&Params::TranslationSmoothness]);
+        assert_eq!(manager.optical_ui.read().translation_settings.reference, 0.7);
+        assert_eq!(manager.optical_ui.read().translation_settings.smoothness_s, 2.5);
+        params.set_bool(Params::TranslationAuto, false).unwrap();
+        translation::apply(&params, &manager).unwrap();
+        translation::update_ui(&mut params, Some(&manager));
+        assert!(params.enabled[&Params::TranslationReference]);
+        params.set_bool(Params::TranslationEnabled, false).unwrap();
+        translation::apply(&params, &manager).unwrap();
+        translation::update_ui(&mut params, Some(&manager));
+        assert!(params.enabled[&Params::TranslationEnabled]);
+        assert!(!params.enabled[&Params::TranslationAuto]);
+        assert_eq!(params.get_string(Params::TranslationStatus).unwrap(), t!("status.translation_disabled"));
+    }
+
+    #[test]
+    fn translation_controls_reject_invalid_values_before_mutating() {
+        let manager = translation_control_fixture();
+        let before = *manager.optical_ui.read();
+        let mut params = TestParams::default();
+        translation::load(&mut params, &manager, true).unwrap();
+        params.set_bool(Params::TranslationEnabled, false).unwrap();
+        params.set_f64(Params::TranslationSmoothness, f64::NAN).unwrap();
+        assert!(translation::apply(&params, &manager).is_err());
+        assert_eq!(*manager.optical_ui.read(), before);
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied project with translation analysis"]
+    fn translation_controls_real_project_load_edit_and_reopen() {
+        use gyroflow_core::stabilization::{ComputeParams, FrameTransform};
+        let project = std::env::var("GYROFLOW_PLUGIN_TRANSLATION_PROJECT").unwrap();
+        let mut params = TestParams::default();
+        params.set_string(Params::ProjectPath, &project).unwrap();
+        params.set_string(Params::InstanceId, "translation-test").unwrap();
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let mut instance = GyroflowPluginBaseInstance::default();
+        let stab = instance.stab_manager(&mut params, &cache, (0, 0), false).unwrap();
+        assert!(stab.gyro.read().optical_translation.as_ref().unwrap().is_active());
+        let project_translation_settings = *stab.optical_ui.read();
+        let frame = (stab.params.read().frame_count / 2).min(300);
+        let timestamp = gyroflow_core::timestamp_at_frame(frame as i32, stab.params.read().fps);
+        let original = FrameTransform::at_timestamp(&ComputeParams::from_manager(&stab), timestamp, frame).matrices;
+        params.set_bool(Params::TranslationEnabled, false).unwrap();
+        instance.param_changed(&mut params, &cache, Params::TranslationEnabled, true).unwrap();
+        let disabled = instance.stab_manager(&mut params, &cache, (0, 0), false).unwrap();
+        disabled.recompute_blocking();
+        assert!(!disabled.gyro.read().optical_translation.as_ref().unwrap().is_active());
+        let off = FrameTransform::at_timestamp(&ComputeParams::from_manager(&disabled), timestamp, frame).matrices;
+        assert_ne!(original, off);
+        let mut reopened = GyroflowPluginBaseInstance { reload_values_from_project: false, ..Default::default() };
+        reopened.stab_manager(&mut params, &Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap())), (0, 0), false).unwrap();
+        assert!(!params.get_bool(Params::TranslationEnabled).unwrap());
+        params.set_bool(Params::TranslationEnabled, true).unwrap();
+        params.set_bool(Params::TranslationAuto, false).unwrap();
+        params.set_f64(Params::TranslationReference, 140.0).unwrap();
+        params.set_f64(Params::TranslationSmoothness, 0.5).unwrap();
+        reopened.param_changed(&mut params, &cache, Params::TranslationReference, true).unwrap();
+        let edited = reopened.stab_manager(&mut params, &cache, (0, 0), false).unwrap();
+        edited.recompute_blocking();
+        assert!(edited.gyro.read().optical_translation.as_ref().unwrap().is_active());
+        assert_eq!(edited.optical_ui.read().translation_settings.reference, 1.4);
+        let edited_matrices = FrameTransform::at_timestamp(&ComputeParams::from_manager(&edited), timestamp, frame).matrices;
+        assert_ne!(edited_matrices, off);
+        assert_ne!(edited_matrices, original);
+        instance.param_changed(&mut params, &cache, Params::ReloadProject, true).unwrap();
+        let reloaded = instance.stab_manager(&mut params, &cache, (0, 0), false).unwrap();
+        assert!(reloaded.gyro.read().optical_translation.as_ref().unwrap().is_active());
+        assert_eq!(*reloaded.optical_ui.read(), project_translation_settings);
+        let restored = FrameTransform::at_timestamp(&ComputeParams::from_manager(&reloaded), timestamp, frame).matrices;
+        assert!(original == restored, "explicit reload must restore the original render matrices");
     }
 
     #[test]
@@ -3045,7 +3213,7 @@ mod tests {
         }
         let defs = GyroflowPluginBase::get_param_definitions();
         assert!(find(&defs, "ZoomMode"));
-        let ParameterType::Group { id, parameters, .. } = defs.last().unwrap() else { panic!("zoom actions must be appended") };
+        let ParameterType::Group { id, parameters, .. } = &defs[13] else { panic!("the existing zoom group must keep its position") };
         assert_eq!(*id, "ZoomModeGroup");
         assert_eq!(parameters.len(), 2);
         for (def, expected) in parameters.iter().zip(["UseDynamicZoom", "UseStaticZoom"]) {
@@ -3570,6 +3738,7 @@ macro_rules! define_params {
         set_label:   $slabel_s:ident $slabel_p:ident, $slabel_v:ident $slabel_block:block,
         set_hint:    $shint_s:ident  $shint_p:ident,  $shint_v:ident  $shint_block:block,
         set_enabled: $sen_s:ident    $sen_p:ident,    $sen_v:ident    $sen_block:block,
+        set_visible: $svis_s:ident $svis_p:ident, $svis_v:ident $svis_block:block,
         get_bool_at_time: $gtbool_s:ident  $gtbool_p:ident, $gtbool_t:ident                $gtbool_block:block,
         get_f64_at_time:  $gtf64_s:ident   $gtf64_p:ident,  $gtf64_t:ident                 $gtf64_block:block,
         set_f64_at_time:  $stf64_s:ident  $stf64_p:ident,  $stf64_t:ident, $stf64_v:ident $stf64_block:block,
@@ -3592,6 +3761,17 @@ macro_rules! define_params {
             pub fields: ParamsAdditionalFields,
         }
         impl GyroflowPluginParams for $name {
+            fn set_visible(&mut self, param: Params, visible: bool) -> $crate::PluginResult<()> {
+                let mut $svis_s = &mut self.fields;
+                let $svis_v = visible;
+                match param {
+                    $( Params::$str_enum => { let $svis_p = &mut self.$str_field; $svis_block }, )*
+                    $( Params::$bool_enum => { let $svis_p = &mut self.$bool_field; $svis_block }, )*
+                    $( Params::$f64_enum => { let $svis_p = &mut self.$f64_field; $svis_block }, )*
+                    $( Params::$i32_enum => { let $svis_p = &mut self.$i32_field; $svis_block }, )*
+                    _ => Ok(()),
+                }
+            }
             fn get_string(&self, param: Params) -> $crate::PluginResult<String> {
                 let $gstr_s = &self.fields;
                 match param {

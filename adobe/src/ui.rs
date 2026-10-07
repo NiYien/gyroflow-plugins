@@ -62,6 +62,14 @@ pub fn draw(_in_data: &ae::InData, params: &mut ae::Parameters<Params>, event: &
             }
         }
 
+        if event.param_index() == params.index(Params::TranslationStatus).unwrap_or_default() {
+            let status = get_str2(inst, Params::TranslationStatus).unwrap_or_default();
+            let font = supplier.new_default_font(supplier.default_font_size()? * 0.9)?;
+            let brush = supplier.new_brush(&ae::drawbot::ColorRgba { red: 0.8, green: 0.8, blue: 0.8, alpha: 1.0 })?;
+            let origin = ae::drawbot::PointF32 { x: current_frame.left as f32, y: current_frame.top as f32 + 10.0 };
+            surface.draw_string(&brush, &font, &status, &origin, ae::drawbot::TextAlignment::Left, ae::drawbot::TextTruncation::None, 0.0)?;
+        }
+
         // Draw status
         if event.param_index() == params.index(Params::Status).unwrap_or_default() {
             let status = get_str(params, inst, Params::Status)?;

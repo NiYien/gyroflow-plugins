@@ -135,5 +135,20 @@
   "ae.msg.about_suffix": "Gyroflow(Niyien) 플러그인.",
 
   "frei0r.plugin.explanation": "Gyroflow(Niyien) 영상 안정화",
-  "frei0r.hint.timestamp_scale": "입력 타임스탬프 스케일"
+  "frei0r.hint.timestamp_scale": "입력 타임스탬프 스케일",
+
+  "label.translation_enabled": "이동 흔들림 보정 (실험 기능)",
+  "hint.translation_enabled": "프로젝트에 저장된 이동 분석 결과를 사용합니다. 꺼도 분석 결과는 유지됩니다.",
+  "label.translation_auto": "자동 매개변수",
+  "hint.translation_auto": "기준 레이어와 부드러움을 자동으로 선택합니다. 수동 설정은 유지됩니다.",
+  "label.translation_reference": "기준 거리 (%)",
+  "hint.translation_reference": "100%는 화면에 보이는 원경 레이어를 안정화합니다. 0%는 평활화 후 남은 회전만 보정합니다.",
+  "label.translation_smoothness": "이동 부드러움 (초)",
+  "hint.translation_smoothness": "평활화 시간은 0.1~10초입니다.",
+  "label.translation_along_axis": "렌즈 축 방향 보정",
+  "hint.translation_along_axis": "렌즈 축 방향 이동으로 인한 화면 확대와 축소를 보정합니다.",
+  "label.translation_status": "이동 보정 상태",
+  "status.translation_disabled": "이동 보정 꺼짐",
+  "status.translation_stale": "Gyroflow에서 다시 분석하세요",
+  "status.translation_active": "이동 보정 적용 중"
 }

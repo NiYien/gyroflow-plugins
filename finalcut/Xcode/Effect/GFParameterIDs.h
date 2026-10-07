@@ -35,3 +35,6 @@ static const UInt32 kGFOverview = 2007;
 static const UInt32 kGFHostOptionsGroup = 2100;
 static const UInt32 kGFInputOrientation = 2101;
 static const UInt32 kGFHostSizing = 2102;
+
+static const UInt32 kGFTranslationControl = 2200;
+static const UInt32 kGFTranslationSettings = 2201;

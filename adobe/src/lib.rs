@@ -72,6 +72,10 @@ pub struct StoredParams {
     pub pending_params_bool: HashMap<Params, bool>,
     pub pending_params_str: HashMap<Params, String>,
     pub pending_params_i32: HashMap<Params, i32>,
+    #[serde(skip)]
+    pub translation_visibility: HashMap<Params, bool>,
+    #[serde(skip)]
+    pub translation_enabled: HashMap<Params, bool>,
     pub premiere_keyframed_params: HashSet<Params>,
     pub speed_per_frame: Vec<f64>,
     pub speed_checksum: u64
@@ -94,6 +98,8 @@ impl Default for StoredParams {
                 (Params::Status, String::from("---")),
             ]),
             pending_params_i32: HashMap::new(),
+            translation_visibility: HashMap::new(),
+            translation_enabled: HashMap::new(),
             premiere_keyframed_params: HashSet::new(),
             speed_per_frame: Vec::new(),
             speed_checksum: 0,
@@ -377,6 +383,7 @@ impl AdobePluginGlobal for Plugin {
                 out_data.set_return_msg(&about_msg);
             }
             ae::Command::GlobalSetup => {
+                out_data.set_out_flag(ae::OutFlags::SendUpdateParamsUi, true);
                 gyroflow_plugin_base::i18n::init();
                 gyroflow_core::gpu::initialize_contexts();
 
@@ -446,6 +453,8 @@ impl CrossThreadInstance {
             Params::Fov | Params::Smoothness | Params::ZoomLimit | Params::LensCorrectionStrength |
             Params::HorizonLockAmount | Params::HorizonLockRoll |
             Params::AdditionalPitch | Params::AdditionalYaw | Params::Rotation | Params::InputRotation | Params::VideoSpeed |
+            Params::TranslationEnabled | Params::TranslationAuto | Params::TranslationReference |
+            Params::TranslationSmoothness | Params::TranslationAlongAxis |
             Params::UseGyroflowsKeyframes | Params::RecalculateKeyframes |
             Params::OutputHeight | Params::OutputWidth | Params::OutputSizeSwap | Params::OutputSizeToTimeline => {
                 let _self = self.get().unwrap();
@@ -679,6 +688,30 @@ impl AdobePluginInstance for CrossThreadInstance {
             ae::Command::UserChangedParam { param_index } => {
                 self.user_changed_param(plugin, plugin.params.type_at(param_index))?;
                 plugin.out_data.set_force_rerender();
+            }
+            ae::Command::UpdateParamsUi => {
+                let (visibility, enabled_states) = {
+                    let instance = self.get().unwrap();
+                    let instance = instance.read();
+                    let stored = instance.stored.read();
+                    (stored.translation_visibility.clone(), stored.translation_enabled.clone())
+                };
+                for param in gyroflow_plugin_base::translation::CONTROLS {
+                    let visible = visibility.get(&param).copied().unwrap_or(false);
+                    let enabled = enabled_states.get(&param).copied().unwrap_or(false);
+                    let mut definition = plugin.params.get(param)?.clone();
+                    definition.set_ui_flag(ae::ParamUIFlags::DISABLED, !enabled);
+                    if in_data.is_premiere() {
+                        definition.set_ui_flag(ae::ParamUIFlags::INVISIBLE, !visible);
+                    } else {
+                        let plugin_id = unsafe { AEGP_PLUGIN_ID };
+                        let effect = in_data.effect().aegp_effect(plugin_id)?;
+                        let index = plugin.params.index(param).ok_or(ae::Error::InvalidIndex)?;
+                        let stream = effect.new_stream_by_index(plugin_id, index as i32)?;
+                        stream.set_dynamic_stream_flag(ae::aegp::DynamicStreamFlags::Hidden, false, !visible)?;
+                    }
+                    definition.update_param_ui()?;
+                }
             }
             ae::Command::SequenceSetup => {
                 let _self = self.get().unwrap();

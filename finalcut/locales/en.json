@@ -231,5 +231,7 @@
   "effect.host.stretch": "Stretch",
   "effect.status.not_applied": "%@ loaded — stabilization not applied",
   "effect.host.auto_orientation": "Automatic (project orientation)",
-  "effect.host.auto_sizing": "Automatic (fit)"
+  "effect.host.auto_sizing": "Automatic (fit)",
+  "effect.translation.save_failed": "Unable to save translation settings",
+  "effect.translation.invalid": "Invalid translation settings"
 }

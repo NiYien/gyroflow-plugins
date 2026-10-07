@@ -135,5 +135,20 @@
   "ae.msg.about_suffix": "Gyroflow(Niyien) plugin.",
 
   "frei0r.plugin.explanation": "Gyroflow(Niyien) video stabilization",
-  "frei0r.hint.timestamp_scale": "Scale for the input timestamp"
+  "frei0r.hint.timestamp_scale": "Scale for the input timestamp",
+
+  "label.translation_enabled": "Translation stabilization (experimental)",
+  "hint.translation_enabled": "Use the translation analysis saved in the project. Disabling keeps the analysis for later use.",
+  "label.translation_auto": "Automatic parameters",
+  "hint.translation_auto": "Automatically choose the reference layer and smoothness. Manual values are retained.",
+  "label.translation_reference": "Reference distance (%)",
+  "hint.translation_reference": "100% stabilizes the far layer of the visible picture. 0% only compensates rotation retained by smoothing.",
+  "label.translation_smoothness": "Translation smoothness (s)",
+  "hint.translation_smoothness": "Smoothing time in seconds, from 0.1 to 10.",
+  "label.translation_along_axis": "Compensate along the lens axis",
+  "hint.translation_along_axis": "Compensate expansion and contraction caused by motion along the lens axis.",
+  "label.translation_status": "Translation status",
+  "status.translation_disabled": "Translation stabilization disabled",
+  "status.translation_stale": "Analyze again in Gyroflow",
+  "status.translation_active": "Translation stabilization active"
 }

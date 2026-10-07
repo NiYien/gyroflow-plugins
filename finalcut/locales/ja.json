@@ -228,5 +228,7 @@
   "effect.host.stretch": "引き伸ばし",
   "effect.status.not_applied": "%@ 読み込み済み・手ぶれ補正未適用",
   "effect.host.auto_orientation": "自動（プロジェクトの向き）",
-  "effect.host.auto_sizing": "自動（フィット）"
+  "effect.host.auto_sizing": "自動（フィット）",
+  "effect.translation.save_failed": "並進パラメーターを保存できません",
+  "effect.translation.invalid": "並進パラメーターが無効です"
 }

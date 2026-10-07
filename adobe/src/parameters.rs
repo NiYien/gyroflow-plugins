@@ -89,6 +89,7 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
         }
         ParameterType::Text { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
+            let hidden = hidden && p != Params::TranslationStatus;
             // The loaded-project name is shown in Adobe via the custom Status panel (ui.rs draws
             // "Project: …"), so the standard LoadedProject text param is a redundant always-empty
             // field here (set_string is a no-op for it — parameters.rs `set_string`). Hide it
@@ -104,12 +105,14 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
                 if hidden { ui |= ae::ParamUIFlags::NO_ECW_UI; }
                 param.set_ui_flags(ui);
                 param.set_ui_width(250);
-                param.set_ui_height(15*4);
+                param.set_ui_height(if p == Params::TranslationStatus { 15 } else { 15*4 });
                 -1
             }).unwrap();
         }
         ParameterType::Slider { id, label, min, max, default, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
+            let translation = gyroflow_plugin_base::translation::is_setting(p);
+            let hidden = hidden && !translation;
             if p == Params::VideoSpeed { return; }
             if p == Params::FusionStartFrame { return; }
             let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
@@ -122,16 +125,19 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
                 f.set_default(default);
                 f.set_precision(1);
                 f.set_display_flags(ValueDisplayFlag::NONE);
-            }), ParamFlag::SUPERVISE, ui).unwrap();
+            }), ParamFlag::SUPERVISE | if translation { ParamFlag::CANNOT_TIME_VARY } else { ParamFlag::empty() }, ui).unwrap();
         }
         ParameterType::Checkbox { id, label, default, hidden, .. } => {
             if id == "DontDrawOutside" { return; }
+            let p = Params::from_str(id).unwrap();
+            let translation = gyroflow_plugin_base::translation::is_setting(p);
+            let hidden = hidden && !translation;
             let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
-            params.add_with_flags(Params::from_str(id).unwrap(), label, ae::CheckBoxDef::setup(|f| {
+            params.add_with_flags(p, label, ae::CheckBoxDef::setup(|f| {
                 f.set_default(default);
                 f.set_value(default);
                 f.set_label("");
-            }), ParamFlag::SUPERVISE, ui).unwrap();
+            }), ParamFlag::SUPERVISE | if translation { ParamFlag::CANNOT_TIME_VARY } else { ParamFlag::empty() }, ui).unwrap();
         }
         ParameterType::Select { id, label, options, default, hidden, .. } => {
             // Input-rotation dropdown is removed from the Adobe UI: the geometry path always outputs
@@ -195,6 +201,10 @@ pub struct ParamHandler<'a, 'b> where 'b: 'a {
     pub stored: Arc<RwLock<StoredParams>>,
 }
 impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
+    fn set_visible(&mut self, p: Params, visible: bool) -> PluginResult<()> {
+        self.stored.write().translation_visibility.insert(p, visible);
+        Ok(())
+    }
     fn get_string(&self, p: Params) -> PluginResult<String> {
         if p == Params::InstanceId {
             return Ok(self.stored.read().instance_id.clone());
@@ -272,7 +282,11 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         self.stored.write().pending_params_bool.insert(p, v);
         match &mut self.inner {
             ParamsInner::Ae(x) => {
-                x.get_mut(p)?.as_checkbox_mut()?.set_value(v);
+                let mut param = x.get_mut(p)?;
+                param.as_checkbox_mut()?.set_value(v);
+                if gyroflow_plugin_base::translation::is_setting(p) || p == Params::TranslationInitialized {
+                    param.set_value_changed();
+                }
             }
             ParamsInner::AeRO(_) => { }
             ParamsInner::Premiere(_) => { } // Premiere can't set param values
@@ -331,7 +345,9 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         self.stored.write().pending_params_f64.insert(p, v);
         match &mut self.inner {
             ParamsInner::Ae(x) => {
-                x.get_mut(p)?.as_float_slider_mut()?.set_value(v);
+                let mut param = x.get_mut(p)?;
+                param.as_float_slider_mut()?.set_value(v);
+                if gyroflow_plugin_base::translation::is_setting(p) { param.set_value_changed(); }
             }
             ParamsInner::AeRO(_) => { }
             ParamsInner::Premiere(_) => { } // Premiere can't set param values
@@ -397,6 +413,10 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         Ok(())
     }
     fn set_enabled(&mut self, p: Params, v: bool) -> PluginResult<()> {
+        if gyroflow_plugin_base::translation::CONTROLS.contains(&p) {
+            self.stored.write().translation_enabled.insert(p, v);
+            return Ok(());
+        }
         if p == Params::VideoSpeed { return Ok(()); }
         match &mut self.inner {
             ParamsInner::Ae(x) => {

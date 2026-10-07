@@ -228,5 +228,7 @@
   "effect.host.stretch": "늘이기",
   "effect.status.not_applied": "%@ 로드됨 · 안정화 적용 안 됨",
   "effect.host.auto_orientation": "자동 (프로젝트 방향)",
-  "effect.host.auto_sizing": "자동 (맞춤)"
+  "effect.host.auto_sizing": "자동 (맞춤)",
+  "effect.translation.save_failed": "이동 보정 설정을 저장할 수 없습니다",
+  "effect.translation.invalid": "이동 보정 설정이 유효하지 않습니다"
 }

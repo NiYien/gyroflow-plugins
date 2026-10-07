@@ -910,6 +910,7 @@ define_params!(ParamHandler {
         LoadedProject       => loaded_project:   ParamHandle<String>,
         LoadedPreset        => loaded_preset:    ParamHandle<String>,
         LoadedLens          => loaded_lens:      ParamHandle<String>,
+        TranslationStatus   => translation_status: ParamHandle<String>,
     ],
     bools: [
         DisableStretch        => disable_stretch:         ParamHandle<bool>,
@@ -921,6 +922,10 @@ define_params!(ParamHandler {
         // get_bool_at_time match falls through to panic!("Wrong parameter type") on these.
         FlipHorizontal        => flip_horizontal:         ParamHandle<bool>,
         FlipVertical          => flip_vertical:           ParamHandle<bool>,
+        TranslationInitialized=> translation_initialized: ParamHandle<bool>,
+        TranslationEnabled    => translation_enabled:     ParamHandle<bool>,
+        TranslationAuto       => translation_auto:        ParamHandle<bool>,
+        TranslationAlongAxis  => translation_along_axis:  ParamHandle<bool>,
     ],
     f64s: [
         Fov                   => fov:                      ParamHandle<Double>,
@@ -943,6 +948,8 @@ define_params!(ParamHandler {
         OutputRotation        => output_rotation_param:    ParamHandle<Double>,
         OutputOffsetX         => output_offset_x:          ParamHandle<Double>,
         OutputOffsetY         => output_offset_y:          ParamHandle<Double>,
+        TranslationReference  => translation_reference:   ParamHandle<Double>,
+        TranslationSmoothness => translation_smoothness:  ParamHandle<Double>,
         //FusionStartFrame      => fusion_start_frame:       ParamHandle<Double>,
     ],
     i32s: [
@@ -962,7 +969,8 @@ define_params!(ParamHandler {
     set_i32:     _s p, v { Ok(p.set_value(v)?) },
     set_label:   _s p, l { Ok(p.set_label(l)?) },
     set_hint:    _s p, h { Ok(p.set_hint(h) ?) },
-    set_enabled: _s p, e { Ok(p.set_enabled(e)?) },
+    set_enabled: _s p, e { if p.get_enabled()? != e { p.set_enabled(e)?; } Ok(()) },
+    set_visible: _s p, v { if p.get_secret()? == v { p.set_secret(!v)?; } Ok(()) },
     get_bool_at_time: _s p, t    { Ok(p.get_value_at_time(frame_from_timetype(t))?) },
     get_f64_at_time:  _s p, t    { Ok(p.get_value_at_time(frame_from_timetype(t))?) },
     set_f64_at_time:  _s p, t, v { Ok(p.set_value_at_time(frame_from_timetype(t), v)?) },
@@ -2631,6 +2639,13 @@ impl Execute for GyroflowPlugin {
                         interpolation:            param_set.parameter("Interpolation")?,
                         integration_method:       param_set.parameter("IntegrationMethod")?,
                         zoom_mode:                param_set.parameter("ZoomMode")?,
+                        translation_initialized: param_set.parameter("TranslationInitialized")?,
+                        translation_enabled:     param_set.parameter("TranslationEnabled")?,
+                        translation_auto:        param_set.parameter("TranslationAuto")?,
+                        translation_reference:   param_set.parameter("TranslationReference")?,
+                        translation_smoothness:  param_set.parameter("TranslationSmoothness")?,
+                        translation_along_axis:  param_set.parameter("TranslationAlongAxis")?,
+                        translation_status:      param_set.parameter("TranslationStatus")?,
                         use_dynamic_zoom:         param_set.parameter("UseDynamicZoom")?,
                         use_static_zoom:          param_set.parameter("UseStaticZoom")?,
 
@@ -3063,6 +3078,9 @@ impl Execute for GyroflowPlugin {
                         }
                         ParameterType::Slider { id, label, hint, min, max, default, hidden } => {
                             let mut param = param_set.param_define_double(id)?;
+                            if matches!(id, "TranslationReference" | "TranslationSmoothness") {
+                                <i32 as ofx::RawSetter<_>>::set_at(&mut param, c"OfxParamPropAnimates".as_ptr(), 0, &0)?;
+                            }
                             param.set_default(default)?;
                             param.set_display_min(min)?;
                             param.set_display_max(max)?;
@@ -3075,6 +3093,9 @@ impl Execute for GyroflowPlugin {
                         ParameterType::Checkbox { id, label, hint, default, hidden } => {
                             if id == "StabilizationSpeedRamp" { return OK; }
                             let mut param = param_set.param_define_boolean(id)?;
+                            if id.starts_with("Translation") {
+                                <i32 as ofx::RawSetter<_>>::set_at(&mut param, c"OfxParamPropAnimates".as_ptr(), 0, &0)?;
+                            }
                             param.set_label(label)?;
                             param.set_hint(hint)?;
                             param.set_default(default)?;

@@ -228,5 +228,7 @@
   "effect.host.stretch": "拉伸",
   "effect.status.not_applied": "%@ 已載入，未套用穩定",
   "effect.host.auto_orientation": "自動（工程方向）",
-  "effect.host.auto_sizing": "自動（適合）"
+  "effect.host.auto_sizing": "自動（適合）",
+  "effect.translation.save_failed": "無法儲存位移參數",
+  "effect.translation.invalid": "位移參數無效"
 }

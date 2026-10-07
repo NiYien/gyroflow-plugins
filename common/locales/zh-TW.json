@@ -135,5 +135,20 @@
   "ae.msg.about_suffix": "Gyroflow(Niyien) 外掛。",
 
   "frei0r.plugin.explanation": "Gyroflow(Niyien) 影片穩定",
-  "frei0r.hint.timestamp_scale": "輸入時間戳的縮放"
+  "frei0r.hint.timestamp_scale": "輸入時間戳的縮放",
+
+  "label.translation_enabled": "位移防抖（實驗性功能）",
+  "hint.translation_enabled": "使用工程儲存的位移分析結果。關閉後保留分析結果，方便再次開啟。",
+  "label.translation_auto": "自動參數",
+  "hint.translation_auto": "自動選擇參考層和平滑度，保留手動設定的值。",
+  "label.translation_reference": "參考距離（%）",
+  "hint.translation_reference": "100% 穩定可見畫面的遠景層；0% 只補償旋轉平滑保留的轉動。",
+  "label.translation_smoothness": "位移平滑度（秒）",
+  "hint.translation_smoothness": "平滑時間，範圍為 0.1 到 10 秒。",
+  "label.translation_along_axis": "沿鏡頭軸補償",
+  "hint.translation_along_axis": "補償沿鏡頭軸移動造成的畫面縮放。",
+  "label.translation_status": "位移狀態",
+  "status.translation_disabled": "位移防抖已關閉",
+  "status.translation_stale": "請在 Gyroflow 中重新分析",
+  "status.translation_active": "位移防抖已生效"
 }

@@ -237,5 +237,7 @@
   "effect.host.stretch": "Растянуть",
   "effect.status.not_applied": "%@ загружен — стабилизация не применена",
   "effect.host.auto_orientation": "Авто (поворот проекта)",
-  "effect.host.auto_sizing": "Авто (вписать)"
+  "effect.host.auto_sizing": "Авто (вписать)",
+  "effect.translation.save_failed": "Не удалось сохранить параметры смещения",
+  "effect.translation.invalid": "Недопустимые параметры смещения"
 }

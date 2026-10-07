@@ -135,5 +135,20 @@
   "ae.msg.about_suffix": "плагин Gyroflow(Niyien).",
 
   "frei0r.plugin.explanation": "Стабилизация видео Gyroflow(Niyien)",
-  "frei0r.hint.timestamp_scale": "Масштаб входной временной метки"
+  "frei0r.hint.timestamp_scale": "Масштаб входной временной метки",
+
+  "label.translation_enabled": "Стабилизация смещения (эксперимент)",
+  "hint.translation_enabled": "Использует анализ смещения, сохранённый в проекте. При отключении результаты сохраняются.",
+  "label.translation_auto": "Автоматические параметры",
+  "hint.translation_auto": "Автоматически выбирает опорный слой и плавность. Ручные значения сохраняются.",
+  "label.translation_reference": "Опорное расстояние (%)",
+  "hint.translation_reference": "100% стабилизирует дальний слой видимой области. 0% компенсирует только вращение, оставшееся после сглаживания.",
+  "label.translation_smoothness": "Плавность смещения (с)",
+  "hint.translation_smoothness": "Время сглаживания от 0,1 до 10 секунд.",
+  "label.translation_along_axis": "Компенсация вдоль оси объектива",
+  "hint.translation_along_axis": "Компенсирует расширение и сжатие изображения при движении вдоль оси объектива.",
+  "label.translation_status": "Состояние смещения",
+  "status.translation_disabled": "Стабилизация смещения отключена",
+  "status.translation_stale": "Повторите анализ в Gyroflow",
+  "status.translation_active": "Стабилизация смещения активна"
 }

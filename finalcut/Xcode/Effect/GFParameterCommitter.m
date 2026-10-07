@@ -1,4 +1,5 @@
 #import "GFParameterCommitter.h"
+#import "GFTranslationSettings.h"
 
 #import "GFParameterIDs.h"
 #import <CommonCrypto/CommonDigest.h>
@@ -82,6 +83,7 @@ static BOOL GFValidLowercaseSHA256(NSString *value) {
 @property(nonatomic, copy) NSString *cachedManifestB;
 @property(nonatomic, copy) NSString *cachedPayload;
 @property(nonatomic, copy) NSString *cachedPayloadHash;
+@property(nonatomic, copy) NSString *cachedProjectIdentity;
 @end
 
 @interface GFParameterSnapshot : NSObject
@@ -267,6 +269,13 @@ static BOOL GFValidLowercaseSHA256(NSString *value) {
     return generationA > generationB ? candidateA : candidateB;
 }
 
+- (NSString *)currentProjectIdentity {
+    [self.cacheLock lock];
+    NSString *identity = self.cachedProjectIdentity ?: @"";
+    [self.cacheLock unlock];
+    return identity;
+}
+
 - (nullable NSString *)persistedProjectPayloadWithError:(NSError **)error {
     return [self persistedProjectPayloadWithHash:NULL error:error];
 }
@@ -350,9 +359,13 @@ static BOOL GFValidLowercaseSHA256(NSString *value) {
             return nil;
         }
         if (legacy.length > 0) {
+            NSData *legacyData = [legacy dataUsingEncoding:NSASCIIStringEncoding];
+            NSString *legacyHash = GFSHA256(legacyData ?: [NSData data]);
+            [self.cacheLock lock];
+            self.cachedProjectIdentity = legacyHash;
+            [self.cacheLock unlock];
             if (hash != NULL) {
-                NSData *legacyData = [legacy dataUsingEncoding:NSASCIIStringEncoding];
-                *hash = GFSHA256(legacyData ?: [NSData data]);
+                *hash = legacyHash;
             }
             return legacy;
         }
@@ -365,6 +378,9 @@ static BOOL GFValidLowercaseSHA256(NSString *value) {
         if (hash != NULL) {
             *hash = @"";
         }
+        [self.cacheLock lock];
+        self.cachedProjectIdentity = @"";
+        [self.cacheLock unlock];
         return @"";
     }
 
@@ -375,11 +391,53 @@ static BOOL GFValidLowercaseSHA256(NSString *value) {
     self.cachedManifestB = manifestB;
     self.cachedPayload = payload;
     self.cachedPayloadHash = payloadHash;
+    // Include the manifest generation so explicitly loading the same file resets overrides.
+    NSString *identitySource = [NSString stringWithFormat:@"%@|%@|%@", payloadHash, manifestA, manifestB];
+    self.cachedProjectIdentity = GFSHA256([identitySource dataUsingEncoding:NSUTF8StringEncoding]);
     [self.cacheLock unlock];
     if (hash != NULL) {
         *hash = payloadHash;
     }
     return payload;
+}
+
+- (BOOL)commitTranslationParameters:(GFTranslationParameters)parameters
+                     projectIdentity:(NSString *)projectIdentity sender:(id)sender {
+    if (sender == nil || projectIdentity.length == 0) { return NO; }
+    NSString *settings = GFTranslationSettingsString(parameters, projectIdentity);
+    GFTranslationParameters decoded = {0};
+    if (settings == nil || !GFTranslationParametersFromSettings(settings, projectIdentity, &decoded)) { return NO; }
+    id<FxCustomParameterActionAPI_v4> action =
+        [self.apiManager apiForProtocol:@protocol(FxCustomParameterActionAPI_v4)];
+    if (action == nil) { return NO; }
+    BOOL committed = NO;
+    [action startAction:sender];
+    @try {
+        id<FxParameterRetrievalAPI_v6> retrieval =
+            [self.apiManager apiForProtocol:@protocol(FxParameterRetrievalAPI_v6)];
+        id<FxParameterSettingAPI_v5> setting =
+            [self.apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+        NSString *old = nil;
+        if (retrieval != nil && setting != nil &&
+            [self persistedProjectPayloadWithError:NULL] != nil &&
+            [self.currentProjectIdentity isEqualToString:projectIdentity] &&
+            [retrieval getStringParameterValue:&old fromParameter:kGFTranslationSettings]) {
+            BOOL written = [setting setStringParameterValue:settings toParameter:kGFTranslationSettings];
+            NSString *actual = nil;
+            committed = written && [retrieval getStringParameterValue:&actual fromParameter:kGFTranslationSettings] &&
+                [actual isEqualToString:settings];
+            if (!committed) {
+                for (NSUInteger attempt = 0; attempt < 2; ++attempt) {
+                    [setting setStringParameterValue:old ?: @"" toParameter:kGFTranslationSettings];
+                    if ([retrieval getStringParameterValue:&actual fromParameter:kGFTranslationSettings] &&
+                        [actual isEqualToString:old ?: @""]) { break; }
+                }
+            }
+        }
+    } @finally {
+        [action endAction:sender];
+    }
+    return committed;
 }
 
 - (nullable NSNumber *)numberForSpec:(GFParameterSpec)spec
@@ -772,6 +830,7 @@ static BOOL GFValidLowercaseSHA256(NSString *value) {
     self.cachedManifestB = nil;
     self.cachedPayload = nil;
     self.cachedPayloadHash = nil;
+    self.cachedProjectIdentity = nil;
     [self.cacheLock unlock];
 
     id<FxParameterRetrievalAPI_v6> retrieval = nil;
