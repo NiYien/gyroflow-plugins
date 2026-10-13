@@ -759,6 +759,45 @@ pub struct KeyframableParams {
     pub cached_keyframes: KeyframeManager
 }
 
+fn changed_host_keyframes(stab: &StabilizationManager, host: &KeyframableParams) -> Vec<KeyframeType> {
+    let params = stab.params.read();
+    let project = stab.keyframes.read();
+    let smoothing = stab.smoothing.read();
+    let horizon = &smoothing.horizon_lock;
+    let defaults = [
+        (KeyframeType::Fov, params.fov),
+        (KeyframeType::MaxZoom, params.max_zoom.unwrap_or(0.0)),
+        (KeyframeType::SmoothingParamSmoothness, smoothing.current().get_parameter("smoothness")),
+        (KeyframeType::LensCorrectionStrength, params.lens_correction_amount),
+        (KeyframeType::LockHorizonAmount, if horizon.lock_enabled { horizon.horizonlockpercent } else { 0.0 }),
+        (KeyframeType::LockHorizonRoll, if horizon.lock_enabled { horizon.horizonroll } else { 0.0 }),
+        (KeyframeType::VideoSpeed, params.video_speed),
+        (KeyframeType::VideoRotation, params.video_rotation),
+        (KeyframeType::AdditionalRotationX, params.additional_rotation.0),
+        (KeyframeType::AdditionalRotationY, params.additional_rotation.1),
+    ];
+    defaults.into_iter().filter_map(|(typ, default)| {
+        if host.use_gyroflows_keyframes && project.is_keyframed_internally(&typ) {
+            return None;
+        }
+        let host_keys = host.cached_keyframes.get_keyframes(&typ).filter(|keys| !keys.is_empty())?;
+        let project_keys = project.get_keyframes(&typ).filter(|keys| !keys.is_empty());
+        let first_value = host_keys.first_key_value().unwrap().1.value;
+        let equivalent = if host_keys.values().all(|key| key.value == first_value) {
+            // A constant host value is equivalent to an unkeyframed project default.
+            project_keys.map_or(default == first_value, |keys| keys.values().all(|key| key.value == first_value))
+        } else {
+            // Ignore random keyframe IDs, but preserve timestamps, values and easing.
+            // The project's time scale applies before the host provider is called.
+            host.cached_keyframes.timestamp_scale.unwrap_or(1.0) == 1.0
+                && project_keys.is_some_and(|keys| keys.len() == host_keys.len() && keys.iter().zip(host_keys).all(|((pt, p), (ht, h))| {
+                    pt == ht && p.value == h.value && p.easing == h.easing
+                }))
+        };
+        (!equivalent).then_some(typ)
+    }).collect()
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct GyroflowPluginBaseInstance {
@@ -1694,6 +1733,9 @@ impl GyroflowPluginBaseInstance {
             // snapshot_compute_inputs do not nest with the gf_params guard held
             // inside that block.
             let pre_snapshot = snapshot_compute_inputs(&stab);
+            // The serialized snapshot excludes custom_provider. Compare its effective
+            // host overrides against the project that import already computed.
+            let host_keyframe_changes = changed_host_keyframes(&stab, &self.keyframable_params.read());
 
             // adobe-rotated-anamorphic-full-frame: Premiere renders rotated anamorphic
             // sources as a squeezed full frame. Keep the DESKTOP pipeline intact —
@@ -1857,9 +1899,15 @@ impl GyroflowPluginBaseInstance {
             // log shows which mutation actually triggers the rerun.
             let translation_changed = translation::apply(params, &stab)?;
             let post_snapshot = snapshot_compute_inputs(&stab);
-            if let Some(invalidation) = post_mutation_invalidation(&pre_snapshot, &post_snapshot) {
-                let diff = pre_snapshot.diff(&post_snapshot);
-                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?} invalidation={}", invalidation.as_str());
+            let invalidation = if host_keyframe_changes.is_empty() {
+                post_mutation_invalidation(&pre_snapshot, &post_snapshot)
+            } else {
+                Some(PostMutationInvalidation::Smoothing)
+            };
+            if let Some(invalidation) = invalidation {
+                let mut diff = pre_snapshot.diff(&post_snapshot);
+                if !host_keyframe_changes.is_empty() { diff.push("host_keyframes"); }
+                log::info!(target: "stab.load", "post-mutation recompute fired, diff={diff:?} invalidation={} host_keyframes={host_keyframe_changes:?}", invalidation.as_str());
                 match invalidation {
                     PostMutationInvalidation::Smoothing => stab.invalidate_smoothing(),
                     PostMutationInvalidation::Zoom => stab.invalidate_zooming(),
@@ -3162,6 +3210,8 @@ mod tests {
         assert_eq!(command.program, "open");
         assert_eq!(command.args, vec!["-a", "/Applications/GyroflowNiYien.app"]);
     }
+
+    include!("host_keyframes_tests.rs");
 
     // Equal-state fast path: an un-mutated manager must not request either
     // smoothing or zoom invalidation.
