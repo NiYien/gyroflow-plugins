@@ -20,7 +20,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "after-effects"
 version = "0.3.0"
-source = "git+https://github.com/NiYien/after-effects.git?rev=e55cb119bcf02fb489a58614e9484e26b3cd285c#e55cb119bcf02fb489a58614e9484e26b3cd285c"
+source = "git+https://github.com/NiYien/after-effects.git?rev=6dc1912ae5e4ea0fe8ca5b10da5a68c1966a6bcc#6dc1912ae5e4ea0fe8ca5b10da5a68c1966a6bcc"
 dependencies = [
  "after-effects-sys",
  "bincode",
@@ -2778,7 +2778,7 @@ dependencies = [
 [[package]]
 name = "premiere"
 version = "0.2.1"
-source = "git+https://github.com/NiYien/after-effects.git?rev=e55cb119bcf02fb489a58614e9484e26b3cd285c#e55cb119bcf02fb489a58614e9484e26b3cd285c"
+source = "git+https://github.com/NiYien/after-effects.git?rev=6dc1912ae5e4ea0fe8ca5b10da5a68c1966a6bcc#6dc1912ae5e4ea0fe8ca5b10da5a68c1966a6bcc"
 dependencies = [
  "base64",
  "bincode",
