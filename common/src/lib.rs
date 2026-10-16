@@ -1,4 +1,5 @@
 pub mod i18n;
+pub mod update_notice;
 
 use lru::LruCache;
 use parking_lot::{ Mutex, RwLock };
@@ -316,6 +317,8 @@ pub enum Params {
     TranslationSmoothness,
     TranslationAlongAxis,
     TranslationStatus,
+    PluginUpdateNotice,
+    OpenPluginUpdater,
 }
 
 // ---- Plugin file logger ----
@@ -612,6 +615,7 @@ impl GyroflowPluginBase {
     }
 
     pub fn get_param_definitions() -> Vec<ParameterType> {
+        update_notice::available();
         [
             ParameterType::HiddenString { id: "InstanceId" },
             ParameterType::HiddenString { id: "ProjectPath" },
@@ -706,7 +710,10 @@ impl GyroflowPluginBase {
                 ParameterType::Button { id: "UseDynamicZoom", label: t!("option.zoom_mode_dynamic"), hint: t!("hint.zoom_mode"), hidden: false },
                 ParameterType::Button { id: "UseStaticZoom", label: t!("option.zoom_mode_static"), hint: t!("hint.zoom_mode"), hidden: false },
             ] },
-        ].into_iter().chain(translation::definitions()).collect()
+        ].into_iter().chain(translation::definitions()).chain([
+            ParameterType::Text { id: "PluginUpdateNotice", label: t!("update.available"), hint: "", hidden: true },
+            ParameterType::Button { id: "OpenPluginUpdater", label: t!("update.open_app"), hint: "", hidden: true },
+        ]).collect()
     }
 }
 
@@ -2030,6 +2037,9 @@ impl GyroflowPluginBaseInstance {
         }
         if param == Params::OpenGyroflow {
             GyroflowPluginBase::open_gyroflow(params.get_string(Params::ProjectPath).ok().as_deref());
+        }
+        if param == Params::OpenPluginUpdater {
+            GyroflowPluginBase::open_gyroflow(None);
         }
         if param == Params::OpenRecentProject {
             let last_project = gyroflow_core::settings::get_str("lastProject", "");

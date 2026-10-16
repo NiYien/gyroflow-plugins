@@ -1744,10 +1744,65 @@ fn apply_openfx_input_rotation_override_to_managers(
     }
 }
 
+const PLUGIN_UPDATE_GROUP: &str = "PluginUpdateGroup";
+
+fn arrange_openfx_params(definitions: Vec<ParameterType>) -> Vec<ParameterType> {
+    let (update_controls, mut parameters): (Vec<_>, Vec<_>) = definitions.into_iter().partition(|definition| {
+        matches!(definition, ParameterType::Text { id: "PluginUpdateNotice", .. }
+            | ParameterType::Button { id: "OpenPluginUpdater", .. })
+    });
+    if !update_controls.is_empty() {
+        let controls = update_controls.into_iter().map(|control| match control {
+            // Keep the saved parameter identity without exposing a text input.
+            ParameterType::Text { id, hint, .. } => ParameterType::Text { id, label: t!("group.info"), hint, hidden: true },
+            control => control,
+        }).collect();
+        parameters.insert(0, ParameterType::Group {
+            id: PLUGIN_UPDATE_GROUP,
+            label: t!("update.available"),
+            parameters: controls,
+            opened: true,
+            hidden: true,
+        });
+    }
+    parameters
+}
+
+fn refresh_plugin_update_notice(effect: &ImageEffectHandle, context: &PluginContext) -> Result<()> {
+    let visible = update_notice::available() == Some(true);
+    let param_set = effect.parameter_set()?;
+    let mut group = param_set.parameter::<String>(PLUGIN_UPDATE_GROUP)?;
+    let mut notice = param_set.parameter::<String>("PluginUpdateNotice")?;
+    let mut button = param_set.parameter::<String>("OpenPluginUpdater")?;
+    if visible {
+        let host_name = context.get_host().get_name().unwrap_or_default().to_lowercase();
+        let host = if host_name.contains("resolve") { t!("update.host_resolve") }
+            else if host_name.contains("fusion") { "Fusion" }
+            else { t!("update.host_editor") };
+        let caption = gyroflow_plugin_base::i18n::tf("update.available_close_host", &[("host", host)]);
+        if group.get_label()? != caption {
+            group.set_label(&caption)?;
+            let reminder = update_notice::close_host_message(host);
+            group.set_hint(&reminder)?;
+            button.set_hint(&reminder)?;
+        }
+    }
+    if group.get_secret()? == visible { group.set_secret(!visible)?; }
+    if !notice.get_secret()? { notice.set_secret(true)?; }
+    if button.get_secret()? == visible { button.set_secret(!visible)?; }
+    Ok(())
+}
+
 impl Execute for GyroflowPlugin {
     #[allow(clippy::float_cmp)]
     fn execute(&mut self, _plugin_context: &PluginContext, action: &mut Action) -> Result<Int> {
         use Action::*;
+
+        if matches!(action, Unload) { update_notice::shutdown(); }
+        if let InstanceChanged(ref mut effect, _) | GetClipPreferences(ref mut effect, _) = *action {
+            // Refresh only from host UI callbacks, never from the download thread.
+            let _ = refresh_plugin_update_notice(effect, _plugin_context);
+        }
 
         match *action {
             // plugins-host-timeline-trim (out-of-window passthrough): frames outside
@@ -2823,10 +2878,12 @@ impl Execute for GyroflowPlugin {
                 }
 
                 effect.set_instance_data(instance_data)?;
+                let _ = refresh_plugin_update_notice(effect, _plugin_context);
 
                 OK
             }
             InstanceChanged(ref mut effect, ref mut in_args) => {
+                if in_args.get_name()? == PLUGIN_UPDATE_GROUP { return OK; }
                 let instance_data: &mut InstanceData = effect.get_instance_data()?;
                 if in_args.get_name()? == "LoadCurrent" {
                     CurrentFileInfo::query(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(self.host_input_sizing_drt.clone()));
@@ -3069,7 +3126,15 @@ impl Execute for GyroflowPlugin {
                         }
                         ParameterType::Text { id, label, hint, hidden } => {
                             let mut param = param_set.param_define_string(id)?;
-                            param.set_string_type(ParamStringType::SingleLine)?;
+                            if id == "PluginUpdateNotice" {
+                                param.set_string_type(ParamStringType::Label)?;
+                                // UI notices must not animate, dirty projects, or add undo steps.
+                                for property in [c"OfxParamPropAnimates", c"OfxParamPropPersistant", c"OfxParamPropEvaluateOnChange", c"OfxParamPropCanUndo"] {
+                                    <i32 as ofx::RawSetter<_>>::set_at(&mut param, property.as_ptr(), 0, &0)?;
+                                }
+                            } else {
+                                param.set_string_type(ParamStringType::SingleLine)?;
+                            }
                             param.set_label(label)?;
                             param.set_hint(hint)?;
                             //param.set_enabled(false)?;
@@ -3128,7 +3193,7 @@ impl Execute for GyroflowPlugin {
                     OK
                 }
 
-                for param in GyroflowPluginBase::get_param_definitions() {
+                for param in arrange_openfx_params(GyroflowPluginBase::get_param_definitions()) {
                     define_param(&mut param_set, param, None)?;
                 }
                 define_param(
@@ -3214,6 +3279,7 @@ impl Execute for GyroflowPlugin {
                 param_set
                     .param_define_page("Main")?
                     .set_children(&[
+                        PLUGIN_UPDATE_GROUP,
                         "ProjectGroup",
                         "AdjustGroup",
                         "KeyframesGroup",
@@ -3235,6 +3301,7 @@ impl Execute for GyroflowPlugin {
 
                 log::info!("Host name: {:?}", _plugin_context.get_host().get_name());
                 log::info!("Host version: {:?}", _plugin_context.get_host().get_version_label());
+                log::info!("Host supports custom parameter UI: {:?}", _plugin_context.get_host().get_supports_custom_interact());
                 log::info!("Host supports OpenGL: {:?}", supports_opengl);
                 log::info!("Host supports OpenCL: {:?}", supports_opencl);
                 log::info!("Host supports CUDA: {:?}", supports_cuda);
@@ -3297,6 +3364,7 @@ impl Execute for GyroflowPlugin {
             }
 
             Load => {
+                update_notice::available();
 				self.gyroflow_plugin.initialize_log("openfx");
                 // Remove DRT temp files left behind by crashed sessions (older than an hour).
                 let swept = sweep_temp_files(&std::env::temp_dir(), std::process::id(), 0, std::time::SystemTime::now());

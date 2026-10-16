@@ -383,6 +383,7 @@ impl AdobePluginGlobal for Plugin {
                 out_data.set_return_msg(&about_msg);
             }
             ae::Command::GlobalSetup => {
+                gyroflow_plugin_base::update_notice::available();
                 out_data.set_out_flag(ae::OutFlags::SendUpdateParamsUi, true);
                 gyroflow_plugin_base::i18n::init();
                 gyroflow_core::gpu::initialize_contexts();
@@ -427,6 +428,7 @@ impl AdobePluginGlobal for Plugin {
                 let _ = extra.dispatch::<ArbString, Params>(Params::ProjectPath);
             }
             ae::Command::GlobalSetdown => {
+                gyroflow_plugin_base::update_notice::shutdown();
                 self.gyroflow.manager_cache.lock().clear();
             }
             ae::Command::GpuDeviceSetup { extra } => {
@@ -865,6 +867,7 @@ impl AdobePluginInstance for CrossThreadInstance {
                 Instance::smart_render(&plugin, extra, true)?;
             }
             ae::Command::Event { mut extra } => {
+                if ui::handle_update_event(plugin.params, &mut extra) { return Ok(()); }
                 match extra.event() {
                     ae::Event::Draw(_)  => { ui::draw(&in_data, plugin.params, &mut extra, self)?; }
                     _ => {}

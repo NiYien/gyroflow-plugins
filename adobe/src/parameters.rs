@@ -84,28 +84,30 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
             if id == "CreateCamera" && !params.in_data().is_after_effects() { return; }
             let p = Params::from_str(id).unwrap();
             if p == Params::LoadCurrent { return; }
-            let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
+            let ui = if p == Params::OpenPluginUpdater { ParamUIFlags::NO_ECW_UI | ParamUIFlags::INVISIBLE }
+                else if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
             params.add_with_flags(p, "", ae::ButtonDef::setup(|f| { f.set_label(label); }), ParamFlag::SUPERVISE | ParamFlag::CANNOT_TIME_VARY, ui).unwrap();
         }
         ParameterType::Text { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
-            let hidden = hidden && p != Params::TranslationStatus;
+            let hidden = hidden && !matches!(p, Params::TranslationStatus | Params::PluginUpdateNotice);
             // The loaded-project name is shown in Adobe via the custom Status panel (ui.rs draws
             // "Project: …"), so the standard LoadedProject text param is a redundant always-empty
             // field here (set_string is a no-op for it — parameters.rs `set_string`). Hide it
             // (NO_ECW_UI), consistent with its already-hidden LoadedPreset/LoadedLens siblings.
             // OpenFX has no custom panel and keeps it visible (the shared param def stays
             // hidden:false there; only Adobe force-hides it, like InputRotation below).
-            let hidden = hidden || id == "LoadedProject";
+            let hidden = hidden || matches!(p, Params::LoadedProject | Params::PluginUpdateNotice);
             params.add_customized(p, label, ae::ArbitraryDef::setup(|f| {
                 f.set_default::<ArbString>(ArbString::default()).unwrap();
             }), |param| {
                 param.set_flags(ae::ParamFlag::CANNOT_TIME_VARY);
                 let mut ui = ae::ParamUIFlags::CONTROL | ae::ParamUIFlags::DO_NOT_ERASE_CONTROL;
+                if p == Params::PluginUpdateNotice { ui |= ae::ParamUIFlags::INVISIBLE; }
                 if hidden { ui |= ae::ParamUIFlags::NO_ECW_UI; }
                 param.set_ui_flags(ui);
                 param.set_ui_width(250);
-                param.set_ui_height(if p == Params::TranslationStatus { 15 } else { 15*4 });
+                param.set_ui_height(if matches!(p, Params::TranslationStatus | Params::PluginUpdateNotice) { 15 } else { 15*4 });
                 -1
             }).unwrap();
         }

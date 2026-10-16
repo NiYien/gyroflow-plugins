@@ -10,6 +10,9 @@ extern "C" {
 
 typedef struct GFFinalCutInstance GFFinalCutInstance;
 
+/* Returns 1 for an update, 0 for current, and -1 when the result is unknown. */
+int32_t gf_finalcut_plugin_update_status(void);
+
 typedef enum GFStatus {
     GF_STATUS_OK = 0,
     GF_STATUS_NULL_POINTER = 1,

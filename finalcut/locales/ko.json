@@ -1,4 +1,7 @@
 {
+  "effect.update.notice": "업데이트가 있습니다. 업데이트 전에 Final Cut Pro를 종료하세요.",
+  "effect.update.open_app": "NiYien 열기",
+  "effect.update.app_missing": "NiYien 앱에서 플러그인을 업데이트하세요.",
   "app.accessibility.authorized_media": "승인된 미디어 폴더: %@",
   "app.accessibility.error": "오류: %@",
   "app.accessibility.next_step": "다음 단계: 저장한 FCPXML을 Final Cut Pro로 가져온 다음 시스템 대화상자에서 대치를 선택하십시오.",

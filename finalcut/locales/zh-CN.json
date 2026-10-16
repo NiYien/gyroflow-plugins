@@ -1,4 +1,7 @@
 {
+  "effect.update.notice": "插件有新版本，更新前请关闭 Final Cut Pro。",
+  "effect.update.open_app": "打开 NiYien",
+  "effect.update.app_missing": "请打开 NiYien 主软件更新插件。",
   "app.accessibility.authorized_media": "已授权的媒体文件夹：%@",
   "app.accessibility.error": "错误：%@",
   "app.accessibility.next_step": "下一步：在 Final Cut Pro 中导入保存的 FCPXML，然后在系统对话框中选择“替换”。",

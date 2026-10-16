@@ -1,4 +1,7 @@
 {
+  "effect.update.notice": "更新があります。更新前に Final Cut Pro を終了してください。",
+  "effect.update.open_app": "NiYien を開く",
+  "effect.update.app_missing": "NiYien アプリでプラグインを更新してください。",
   "app.accessibility.authorized_media": "許可済みメディアフォルダ：%@",
   "app.accessibility.error": "エラー：%@",
   "app.accessibility.next_step": "次の手順：保存した FCPXML を Final Cut Pro に読み込み、システムダイアログで「置き換える」を選択します。",

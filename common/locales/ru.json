@@ -1,4 +1,10 @@
 {
+  "update.available_close_host": "Есть обновление · Сначала закройте {host}",
+  "update.host_editor": "видеоредактор",
+  "update.available": "Доступно обновление плагина",
+  "update.open_app": "Открыть NiYien",
+  "update.close_host": "Перед обновлением закройте {host}.",
+  "update.host_resolve": "DaVinci Resolve",
   "group.project": "Проект Gyroflow(Niyien)",
   "group.adjust": "Параметры",
   "group.keyframes": "Ключевые кадры",

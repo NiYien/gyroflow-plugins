@@ -89,6 +89,7 @@ class FinalCutPackageBuildContractTests(unittest.TestCase):
             module = load_script("verify_finalcut_package_entitlements", VERIFIER)
         effect = {
             "com.apple.security.app-sandbox": True,
+            "com.apple.security.network.client": True,
             "com.apple.security.files.bookmarks.app-scope": True,
             "com.apple.security.files.user-selected.read-only": True,
             "com.apple.security.temporary-exception.files.home-relative-path.read-only": [
@@ -145,7 +146,7 @@ class FinalCutPackageBuildContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             module.verify_entitlement_policy(
                 app,
-                {**effect, "com.apple.security.network.client": True},
+                {**effect, "com.apple.security.network.server": True},
             )
 
 

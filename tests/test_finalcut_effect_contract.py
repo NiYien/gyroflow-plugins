@@ -231,10 +231,14 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
         source = (EFFECT / "GyroflowFinalCutEffect.m").read_text(encoding="utf-8")
         self.assertIn('addStringParameterWithName:@"Instance Identity"', source)
 
-    def test_project_inspector_is_compact_unfilled_and_has_one_action(self):
+    def test_project_inspector_preserves_import_and_offers_optional_update(self):
         source = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
 
-        self.assertIn("NSMakeRect(0, 0, 280, 56)", source)
+        self.assertIn("NSMakeRect(0, 0, 280, 112)", source)
+        self.assertIn("@selector(openUpdateApp:)", source)
+        self.assertIn("gf_finalcut_plugin_update_status() == 1", source)
+        self.assertIn("view.updateButton.hidden = !available", source)
+        self.assertIn("[self.updateTimer invalidate]", source)
         self.assertNotIn("layer.backgroundColor", source)
         self.assertIn("self.layer.borderWidth = 0.0", source)
         self.assertIn('GFLocalized(@"effect.action.load_project"', source)

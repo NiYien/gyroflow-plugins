@@ -1,4 +1,7 @@
 {
+  "effect.update.notice": "外掛有新版本，更新前請關閉 Final Cut Pro。",
+  "effect.update.open_app": "開啟 NiYien",
+  "effect.update.app_missing": "請開啟 NiYien 主程式更新外掛。",
   "app.accessibility.authorized_media": "已授權的媒體檔案夾：%@",
   "app.accessibility.error": "錯誤：%@",
   "app.accessibility.next_step": "下一步：在 Final Cut Pro 中匯入儲存的 FCPXML，然後在系統對話框中選擇「取代」。",

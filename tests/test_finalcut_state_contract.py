@@ -909,11 +909,11 @@ class FinalCutImmutableRenderStateTests(unittest.TestCase):
         self.assertIn("panel.allowsMultipleSelection = NO", view)
         self.assertIn("urls.count == 1", view)
         self.assertNotIn("AVAsset", view)
-        self.assertIn("NSMakeRect(0, 0, 280, 56)", view)
+        self.assertIn("NSMakeRect(0, 0, 280, 112)", view)
         self.assertIn("self.statusLabel.maximumNumberOfLines = 1", view)
         self.assertIn("self.statusLabel.accessibilityValue = detail", view)
         self.assertNotIn("openButton", view)
-        self.assertIn("NSMakeRect(8, 2, 264, 26)", view)
+        self.assertIn("NSMakeRect(8, available ? 2 : 58, width, 26)", view)
         self.assertNotIn("GFEmbeddedProjectOpener", view)
 
     def test_empty_timing_commit_enters_direct_mode(self):

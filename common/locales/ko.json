@@ -1,4 +1,10 @@
 {
+  "update.available_close_host": "업데이트 있음 · 먼저 {host} 종료",
+  "update.host_editor": "편집 프로그램",
+  "update.available": "플러그인 업데이트가 있습니다",
+  "update.open_app": "NiYien 열기",
+  "update.close_host": "업데이트 전에 {host}을(를) 종료하세요.",
+  "update.host_resolve": "DaVinci Resolve",
   "group.project": "Gyroflow(Niyien) 프로젝트",
   "group.adjust": "매개변수 조정",
   "group.keyframes": "키프레임",

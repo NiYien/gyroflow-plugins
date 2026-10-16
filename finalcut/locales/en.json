@@ -1,4 +1,7 @@
 {
+  "effect.update.notice": "Plugin update available. Close Final Cut Pro before updating.",
+  "effect.update.open_app": "Open NiYien",
+  "effect.update.app_missing": "Open the NiYien app to update plugins.",
   "app.accessibility.authorized_media": "Authorized media folder: %@",
   "app.accessibility.error": "Error: %@",
   "app.accessibility.next_step": "Next step: import the saved FCPXML in Final Cut Pro, then choose Replace.",

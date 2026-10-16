@@ -1,4 +1,10 @@
 {
+  "update.available_close_host": "外掛有更新 · 請先關閉{host}",
+  "update.host_editor": "目前的剪輯軟體",
+  "update.available": "外掛有新版本",
+  "update.open_app": "開啟 NiYien",
+  "update.close_host": "更新前請關閉{host}。",
+  "update.host_resolve": "DaVinci Resolve",
   "group.project": "Gyroflow(Niyien) 專案",
   "group.adjust": "調整參數",
   "group.keyframes": "關鍵畫格",

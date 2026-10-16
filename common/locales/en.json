@@ -1,4 +1,10 @@
 {
+  "update.available_close_host": "Update available · Close {host} first",
+  "update.host_editor": "your video editor",
+  "update.available": "Plugin update available",
+  "update.open_app": "Open NiYien",
+  "update.close_host": "Close {host} before updating.",
+  "update.host_resolve": "DaVinci Resolve",
   "group.project": "Gyroflow(Niyien) project",
   "group.adjust": "Adjust parameters",
   "group.keyframes": "Keyframes",

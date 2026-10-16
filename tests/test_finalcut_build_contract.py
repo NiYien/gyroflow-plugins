@@ -391,6 +391,7 @@ class FinalCutIdentityAndEntitlementTests(unittest.TestCase):
             effect_entitlements,
             {
                 "com.apple.security.app-sandbox": True,
+                "com.apple.security.network.client": True,
                 "com.apple.security.files.bookmarks.app-scope": True,
                 "com.apple.security.files.user-selected.read-only": True,
                 "com.apple.security.temporary-exception.files.home-relative-path.read-only": [

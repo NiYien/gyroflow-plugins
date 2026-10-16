@@ -37,6 +37,15 @@ pub use translation_parameters::{GFTranslationInfo, GFTranslationParameters,
     gf_finalcut_instance_get_project_translation_info, gf_finalcut_instance_set_translation_parameters};
 
 pub const FINALCUT_RUST_BRIDGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[unsafe(no_mangle)]
+pub extern "C" fn gf_finalcut_plugin_update_status() -> i32 {
+    match gyroflow_plugin_base::update_notice::available() {
+        Some(true) => 1,
+        Some(false) => 0,
+        None => -1,
+    }
+}
 const PROJECT_PAYLOAD_VERSION: u32 = 1;
 const PROJECT_PAYLOAD_CODEC: &str = "zlib";
 const PROJECT_PAYLOAD_V2_MAGIC: &[u8; 7] = b"GFPRJ2\0";

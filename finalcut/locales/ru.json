@@ -1,4 +1,7 @@
 {
+  "effect.update.notice": "Доступно обновление. Перед обновлением закройте Final Cut Pro.",
+  "effect.update.open_app": "Открыть NiYien",
+  "effect.update.app_missing": "Откройте NiYien для обновления плагинов.",
   "app.accessibility.authorized_media": "Разрешённая папка с медиафайлами: %@",
   "app.accessibility.error": "Ошибка: %@",
   "app.accessibility.next_step": "Далее: импортируйте сохранённый FCPXML в Final Cut Pro и выберите «Заменить» в системном диалоге.",

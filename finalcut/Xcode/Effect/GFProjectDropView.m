@@ -3,6 +3,7 @@
 #import "GFLocalization.h"
 #import "GFProjectStore.h"
 #import "GFSourceResolver.h"
+#import "GyroflowFinalCut.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
@@ -41,6 +42,9 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 @property(nonatomic, copy) GFProjectImportCommitHandler commitHandler;
 @property(nonatomic) NSUInteger importGeneration;
 @property(nonatomic) BOOL importInFlight;
+@property(nonatomic, strong) NSTextField *updateLabel;
+@property(nonatomic, strong) NSButton *updateButton;
+@property(nonatomic, strong) NSTimer *updateTimer;
 @end
 
 @implementation GFProjectDropView
@@ -56,7 +60,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 - (instancetype)initWithProjectStore:(GFProjectStore *)projectStore
                        commitHandler:(GFProjectImportCommitHandler)commitHandler {
-    self = [super initWithFrame:NSMakeRect(0, 0, 280, 56)];
+    self = [super initWithFrame:NSMakeRect(0, 0, 280, 112)];
     if (self == nil) {
         return nil;
     }
@@ -70,7 +74,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.layer.cornerRadius = 4.0;
 
     self.statusLabel = [NSTextField labelWithString:@""];
-    self.statusLabel.frame = NSMakeRect(8, 34, 264, 18);
+    self.statusLabel.frame = NSMakeRect(8, 90, 264, 18);
     self.statusLabel.autoresizingMask = NSViewWidthSizable;
     self.statusLabel.font = [NSFont systemFontOfSize:12.0];
     self.statusLabel.maximumNumberOfLines = 1;
@@ -78,7 +82,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.statusLabel.selectable = YES;
     [self addSubview:self.statusLabel];
 
-    self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 2, 264, 26)];
+    self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 58, 264, 26)];
     self.loadButton.autoresizingMask = NSViewWidthSizable;
     self.loadButton.title = GFLocalized(@"effect.action.load_project", @"Load .gyroflow…");
     self.loadButton.bezelStyle = NSBezelStyleRounded;
@@ -89,10 +93,56 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.loadButton.accessibilityHelp = self.loadButton.toolTip;
     [self addSubview:self.loadButton];
 
+    self.updateLabel = [NSTextField labelWithString:GFLocalized(@"effect.update.notice",
+        @"Plugin update available. Close Final Cut Pro before updating.")];
+    self.updateLabel.frame = NSMakeRect(8, 80, 264, 30);
+    self.updateLabel.autoresizingMask = NSViewWidthSizable;
+    self.updateLabel.font = [NSFont systemFontOfSize:12.0];
+    self.updateLabel.maximumNumberOfLines = 2;
+    self.updateLabel.textColor = NSColor.systemOrangeColor;
+    self.updateLabel.hidden = YES;
+    [self addSubview:self.updateLabel];
+    self.updateButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 52, 264, 26)];
+    self.updateButton.autoresizingMask = NSViewWidthSizable;
+    self.updateButton.title = GFLocalized(@"effect.update.open_app", @"Open NiYien");
+    self.updateButton.bezelStyle = NSBezelStyleRounded;
+    self.updateButton.target = self;
+    self.updateButton.action = @selector(openUpdateApp:);
+    self.updateButton.hidden = YES;
+    [self addSubview:self.updateButton];
+    __weak GFProjectDropView *weakSelf = self;
+    self.updateTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+        GFProjectDropView *view = weakSelf;
+        if (view == nil) { [timer invalidate]; return; }
+        BOOL available = gf_finalcut_plugin_update_status() == 1;
+        view.updateLabel.hidden = !available;
+        view.updateButton.hidden = !available;
+        CGFloat width = MAX(0.0, NSWidth(view.bounds) - 16.0);
+        view.statusLabel.frame = NSMakeRect(8, available ? 32 : 90, width, 18);
+        view.loadButton.frame = NSMakeRect(8, available ? 2 : 58, width, 26);
+    }];
+
     self.accessibilityHelp = GFLocalized(@"effect.inspector.help",
         @"Load a .gyroflow project. Complex edits should be made in Gyroflow, then loaded here.");
     [self refreshStatus];
     return self;
+}
+
+- (void)dealloc {
+    [self.updateTimer invalidate];
+}
+
+- (void)openUpdateApp:(id)sender {
+    (void)sender;
+    NSWorkspace *workspace = NSWorkspace.sharedWorkspace;
+    NSURL *url = [workspace URLForApplicationWithBundleIdentifier:@"com.niyien.gyroflow"];
+    if (url == nil) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = GFLocalized(@"effect.update.app_missing", @"Open the NiYien app to update plugins.");
+        [alert runModal];
+        return;
+    }
+    [workspace openApplicationAtURL:url configuration:NSWorkspaceOpenConfiguration.configuration completionHandler:nil];
 }
 
 - (void)refreshStatus {

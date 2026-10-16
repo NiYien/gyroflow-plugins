@@ -3,6 +3,24 @@ use std::collections::BTreeSet;
 const LOCALES: &[&str] = &["en", "zh-CN", "zh-TW", "ja", "ko", "ru"];
 
 fn main() {
+    println!("cargo:rerun-if-changed=../Cargo.toml");
+    for name in ["GITHUB_REF", "GITHUB_RUN_ID", "GITHUB_RUN_NUMBER"] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    let workspace = std::fs::read_to_string("../Cargo.toml").expect("read workspace version");
+    let version = workspace.split("[workspace.package]").nth(1)
+        .and_then(|section| section.lines().find_map(|line| line.trim().strip_prefix("version = ")))
+        .expect("workspace package version").trim_matches('"');
+    let github_ref = std::env::var("GITHUB_REF").unwrap_or_default();
+    let tag = github_ref.strip_prefix("refs/tags/");
+    let source_ref = tag.map(str::to_owned).or_else(|| {
+        std::env::var("GITHUB_RUN_ID").ok().map(|id| format!("actions-run-{id}"))
+    }).unwrap_or_else(|| "dev".to_owned());
+    let version = tag.map(str::to_owned).unwrap_or_else(|| {
+        std::env::var("GITHUB_RUN_NUMBER").map(|build| format!("{version}.{build}")).unwrap_or_else(|_| version.to_owned())
+    });
+    println!("cargo:rustc-env=NIYIEN_PLUGIN_SOURCE_REF={source_ref}");
+    println!("cargo:rustc-env=NIYIEN_PLUGIN_VERSION={version}");
     println!("cargo:rerun-if-changed=locales");
 
     let read = |name: &str| -> serde_json::Map<String, serde_json::Value> {

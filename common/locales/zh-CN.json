@@ -1,4 +1,10 @@
 {
+  "update.available_close_host": "插件有更新 · 请先关闭{host}",
+  "update.host_editor": "当前剪辑软件",
+  "update.available": "插件有新版本",
+  "update.open_app": "打开 NiYien",
+  "update.close_host": "更新前请关闭{host}。",
+  "update.host_resolve": "达芬奇",
   "group.project": "Gyroflow(Niyien) 项目",
   "group.adjust": "调整参数",
   "group.keyframes": "关键帧",
