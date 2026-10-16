@@ -234,7 +234,7 @@ class FinalCutRenderPolicyTests(unittest.TestCase):
     def test_project_inspector_preserves_import_and_offers_optional_update(self):
         source = (EFFECT / "GFProjectDropView.m").read_text(encoding="utf-8")
 
-        self.assertIn("NSMakeRect(0, 0, 280, 112)", source)
+        self.assertIn("NSMakeRect(0, 0, 280, 128)", source)
         self.assertIn("@selector(openUpdateApp:)", source)
         self.assertIn("gf_finalcut_plugin_update_status() == 1", source)
         self.assertIn("view.updateButton.hidden = !available", source)
