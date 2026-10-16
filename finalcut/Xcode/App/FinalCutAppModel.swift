@@ -178,7 +178,7 @@ final class FinalCutAppModel: ObservableObject {
         synchronizeWorkflow()
         DispatchQueue.global(qos: .userInitiated).async {
             let result = job.run()
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self = self] in
                 guard let self else {
                     return
                 }
@@ -217,7 +217,7 @@ final class FinalCutAppModel: ObservableObject {
         synchronizeWorkflow()
         DispatchQueue.global(qos: .userInitiated).async {
             let result = job.run()
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self = self] in
                 guard let self else {
                     return
                 }
@@ -238,7 +238,7 @@ final class FinalCutAppModel: ObservableObject {
         synchronizeWorkflow()
         DispatchQueue.global(qos: .userInitiated).async {
             let result = job.run()
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self = self] in
                 guard let self else {
                     return
                 }

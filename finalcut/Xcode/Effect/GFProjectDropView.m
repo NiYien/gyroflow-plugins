@@ -60,7 +60,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 - (instancetype)initWithProjectStore:(GFProjectStore *)projectStore
                        commitHandler:(GFProjectImportCommitHandler)commitHandler {
-    self = [super initWithFrame:NSMakeRect(0, 0, 280, 112)];
+    self = [super initWithFrame:NSMakeRect(0, 0, 280, 128)];
     if (self == nil) {
         return nil;
     }
@@ -74,7 +74,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.layer.cornerRadius = 4.0;
 
     self.statusLabel = [NSTextField labelWithString:@""];
-    self.statusLabel.frame = NSMakeRect(8, 90, 264, 18);
+    self.statusLabel.frame = NSMakeRect(8, 106, 264, 18);
     self.statusLabel.autoresizingMask = NSViewWidthSizable;
     self.statusLabel.font = [NSFont systemFontOfSize:12.0];
     self.statusLabel.maximumNumberOfLines = 1;
@@ -82,7 +82,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.statusLabel.selectable = YES;
     [self addSubview:self.statusLabel];
 
-    self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 58, 264, 26)];
+    self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 74, 264, 26)];
     self.loadButton.autoresizingMask = NSViewWidthSizable;
     self.loadButton.title = GFLocalized(@"effect.action.load_project", @"Load .gyroflow…");
     self.loadButton.bezelStyle = NSBezelStyleRounded;
@@ -93,12 +93,12 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.loadButton.accessibilityHelp = self.loadButton.toolTip;
     [self addSubview:self.loadButton];
 
-    self.updateLabel = [NSTextField labelWithString:GFLocalized(@"effect.update.notice",
+    self.updateLabel = [NSTextField wrappingLabelWithString:GFLocalized(@"effect.update.notice",
         @"Plugin update available. Close Final Cut Pro before updating.")];
-    self.updateLabel.frame = NSMakeRect(8, 80, 264, 30);
+    self.updateLabel.frame = NSMakeRect(8, 80, 264, 46);
     self.updateLabel.autoresizingMask = NSViewWidthSizable;
     self.updateLabel.font = [NSFont systemFontOfSize:12.0];
-    self.updateLabel.maximumNumberOfLines = 2;
+    self.updateLabel.maximumNumberOfLines = 3;
     self.updateLabel.textColor = NSColor.systemOrangeColor;
     self.updateLabel.hidden = YES;
     [self addSubview:self.updateLabel];
@@ -118,8 +118,8 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
         view.updateLabel.hidden = !available;
         view.updateButton.hidden = !available;
         CGFloat width = MAX(0.0, NSWidth(view.bounds) - 16.0);
-        view.statusLabel.frame = NSMakeRect(8, available ? 32 : 90, width, 18);
-        view.loadButton.frame = NSMakeRect(8, available ? 2 : 58, width, 26);
+        view.statusLabel.frame = NSMakeRect(8, available ? 32 : 106, width, 18);
+        view.loadButton.frame = NSMakeRect(8, available ? 2 : 74, width, 26);
     }];
 
     self.accessibilityHelp = GFLocalized(@"effect.inspector.help",
