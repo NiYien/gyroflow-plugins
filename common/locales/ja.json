@@ -143,7 +143,7 @@
   "frei0r.plugin.explanation": "Gyroflow(Niyien) 動画手ぶれ補正",
   "frei0r.hint.timestamp_scale": "入力タイムスタンプのスケール",
 
-  "label.translation_enabled": "並進手ぶれ補正（実験機能）",
+  "label.translation_enabled": "並進手ぶれ補正",
   "hint.translation_enabled": "プロジェクトに保存された並進解析を使用します。無効にしても解析結果は保持されます。",
   "label.translation_auto": "自動パラメーター",
   "hint.translation_auto": "基準レイヤーと滑らかさを自動選択します。手動設定は保持されます。",

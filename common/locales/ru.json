@@ -143,7 +143,7 @@
   "frei0r.plugin.explanation": "Стабилизация видео Gyroflow(Niyien)",
   "frei0r.hint.timestamp_scale": "Масштаб входной временной метки",
 
-  "label.translation_enabled": "Стабилизация смещения (эксперимент)",
+  "label.translation_enabled": "Стабилизация смещения",
   "hint.translation_enabled": "Использует анализ смещения, сохранённый в проекте. При отключении результаты сохраняются.",
   "label.translation_auto": "Автоматические параметры",
   "hint.translation_auto": "Автоматически выбирает опорный слой и плавность. Ручные значения сохраняются.",

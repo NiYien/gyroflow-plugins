@@ -9904,37 +9904,37 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Translation stabilization (experimental)"
+            "value": "Translation stabilization"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "並進手ぶれ補正（実験機能）"
+            "value": "並進手ぶれ補正"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "이동 흔들림 보정 (실험 기능)"
+            "value": "이동 흔들림 보정"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Стабилизация смещения (эксперимент)"
+            "value": "Стабилизация смещения"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "位移防抖（实验性功能）"
+            "value": "位移防抖"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "位移防抖（實驗性功能）"
+            "value": "位移防抖"
           }
         }
       }

@@ -53,7 +53,7 @@
     if (self == nil) { return nil; }
     self.infoHandler = infoHandler;
     self.commitHandler = commitHandler;
-    self.enabledButton = [self checkbox:GFLocalized(@"effect.translation.enabled", @"Translation (experimental)") y:190];
+    self.enabledButton = [self checkbox:GFLocalized(@"effect.translation.enabled", @"Translation stabilization") y:190];
     self.enabledButton.toolTip = GFLocalized(@"effect.translation.help", @"Use the saved translation analysis. Disabling keeps the analysis.");
     self.automaticButton = [self checkbox:GFLocalized(@"effect.translation.automatic", @"Automatic parameters") y:164];
     self.referenceLabel = [self labelAtY:140];
