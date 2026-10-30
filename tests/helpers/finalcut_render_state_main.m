@@ -108,6 +108,7 @@ int main(void) {
             sourceTimeScale:(GFTime){.numerator = 1001, .denominator = 1000}];
         state = [[GFRenderState alloc] initWithState:state translationSettings:@"saved-translation"
             projectIdentity:@"fixture-translation-identity"];
+        state = [[GFRenderState alloc] initWithState:state uniformSourceTiming:@"uniform-timing-fixture" domain:2];
         NSError *error = nil;
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:state
                                             requiringSecureCoding:YES
@@ -282,9 +283,10 @@ int main(void) {
         NSDictionary *result = @{
             @"directClockNormalized" : @(CMTimeCompare(normalized, CMTimeMake(7007, 3000)) == 0),
             @"invalidClockRejected" : @(!CMTIME_IS_VALID(invalidClock)),
+            @"uniformRoundTrip" : @([roundTrip.uniformSourceTiming isEqualToString:@"uniform-timing-fixture"] && roundTrip.uniformDomain == 2),
             @"legacyV2DefaultsToAutomatic" : @(legacyState.schemaVersion == 2 && legacyState.hostOptions.input_orientation == 0 && legacyState.hostOptions.sizing == 0 && legacyState.parameters.fov == 1.25 && legacyState.sourceTimeScale.numerator == 1 && legacyState.sourceTimeScale.denominator == 1),
             @"secureRoundTrip" : @(
-                roundTrip.schemaVersion == 5 &&
+                roundTrip.schemaVersion == 6 &&
                 roundTrip.sourceTimeScale.numerator == 1001 &&
                 roundTrip.sourceTimeScale.denominator == 1000 &&
                 roundTrip.hostOptions.input_orientation == 2 &&

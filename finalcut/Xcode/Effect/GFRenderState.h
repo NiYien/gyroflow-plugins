@@ -20,6 +20,8 @@ typedef NS_ENUM(NSInteger, GFRenderMode) {
 @property(nonatomic, readonly) NSString *projectDisplayName;
 @property(nonatomic, readonly) NSString *projectContentHash;
 @property(nonatomic, readonly) NSString *timingPayload;
+@property(nonatomic, readonly) NSString *uniformSourceTiming;
+@property(nonatomic, readonly) NSInteger uniformDomain;
 @property(nonatomic, readonly) GFRenderMode mode;
 @property(nonatomic, readonly) GFRenderParameters parameters;
 @property(nonatomic, readonly) NSString *translationSettings;
@@ -47,6 +49,7 @@ typedef NS_ENUM(NSInteger, GFRenderMode) {
 - (instancetype)initWithState:(GFRenderState *)state translationSettings:(NSString *)settings
                projectIdentity:(NSString *)projectIdentity;
 - (instancetype)initWithState:(GFRenderState *)state hostOptions:(GFHostOptions)options sourceTimeScale:(GFTime)scale;
+- (instancetype)initWithState:(GFRenderState *)state uniformSourceTiming:(NSString *)metadata domain:(NSInteger)domain;
 - (instancetype)init NS_UNAVAILABLE;
 
 @end

@@ -233,5 +233,14 @@
   "effect.host.auto_orientation": "자동 (프로젝트 방향)",
   "effect.host.auto_sizing": "자동 (맞춤)",
   "effect.translation.save_failed": "이동 보정 설정을 저장할 수 없습니다",
-  "effect.translation.invalid": "이동 보정 설정이 유효하지 않습니다"
+  "effect.translation.invalid": "이동 보정 설정이 유효하지 않습니다",
+  "effect.uniform.cancel": "취소",
+  "effect.uniform.changed": "원본을 읽는 동안 프로젝트 또는 설정이 변경되었습니다. 다시 시도하세요.",
+  "effect.uniform.detail": "정상 속도의 59.94p → 29.97p용입니다. Final Cut과 동일한 샘플링 방식을 선택하세요. 원본 프레임률 복합 클립은 내부 Floor를 사용합니다. 일치하는 원본 영상을 한 번 선택하면 타이밍이 이 효과에 저장됩니다. 저해상도 탐색과 속도 변경은 지원하지 않습니다.",
+  "effect.uniform.failed": "샘플링 정렬이 변경되지 않았습니다",
+  "effect.uniform.floor": "내림（Floor）",
+  "effect.uniform.nearest": "가장 가까운 프레임（Nearest）",
+  "effect.uniform.off": "끄기",
+  "effect.uniform.original": "이 .gyroflow 프로젝트와 일치하는 원본 영상을 선택하세요.",
+  "effect.uniform.title": "59.94p 샘플링 정렬"
 }

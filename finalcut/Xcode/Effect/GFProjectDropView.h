@@ -9,6 +9,7 @@ typedef BOOL (^GFProjectImportCommitHandler)(GFProjectImportCandidate *candidate
 
 - (instancetype)initWithProjectStore:(GFProjectStore *)projectStore
                        commitHandler:(GFProjectImportCommitHandler)commitHandler;
+@property(nonatomic, copy) void (^samplingHandler)(NSView *sender);
 - (void)refreshStatus;
 
 @end

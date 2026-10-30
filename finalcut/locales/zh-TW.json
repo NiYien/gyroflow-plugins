@@ -233,5 +233,14 @@
   "effect.host.auto_orientation": "自動（工程方向）",
   "effect.host.auto_sizing": "自動（適合）",
   "effect.translation.save_failed": "無法儲存位移參數",
-  "effect.translation.invalid": "位移參數無效"
+  "effect.translation.invalid": "位移參數無效",
+  "effect.uniform.cancel": "取消",
+  "effect.uniform.changed": "讀取原片時工程或設定已變更，請重試。",
+  "effect.uniform.detail": "僅用於正常速度的 59.94p → 29.97p。選擇與 FCP 一致的取樣方式；原生影格率複合片段按內部 Floor 處理。首次選擇相符原片，時間戳記儲存在此效果中。不涵蓋低解析度瀏覽及變速。",
+  "effect.uniform.failed": "未變更取樣對齊設定",
+  "effect.uniform.floor": "向下取整（Floor）",
+  "effect.uniform.nearest": "最近的影格（Nearest）",
+  "effect.uniform.off": "關閉",
+  "effect.uniform.original": "選擇與此 .gyroflow 工程相符的原片。",
+  "effect.uniform.title": "59.94p 取樣對齊"
 }

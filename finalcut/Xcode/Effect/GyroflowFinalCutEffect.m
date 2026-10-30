@@ -9,6 +9,7 @@
 #import "GFProjectDropView.h"
 #import "GFProjectStore.h"
 #import "GFRenderCache.h"
+#import "GFUniformSourceTiming.h"
 #import "GFRenderDiagnostics.h"
 #import "GFRenderPolicy.h"
 #import "GFTranslationView.h"
@@ -100,7 +101,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         (long long)input.duration.numerator,
         (long long)input.duration.denominator,
         (long)state.mode];
-    return [NSString stringWithFormat:@"%@|%u|%u|%lld/%lld|%@|%@", identity, state.hostOptions.input_orientation, state.hostOptions.sizing, (long long)state.sourceTimeScale.numerator, (long long)state.sourceTimeScale.denominator, state.translationProjectIdentity, state.translationSettings];
+    return [NSString stringWithFormat:@"%@|%u|%u|%lld/%lld|%@|%@|%ld|%@", identity, state.hostOptions.input_orientation, state.hostOptions.sizing, (long long)state.sourceTimeScale.numerator, (long long)state.sourceTimeScale.denominator, state.translationProjectIdentity, state.translationSettings, (long)state.uniformDomain, state.uniformSourceTiming];
 }
 
 @interface GFMetalDeviceResources : NSObject
@@ -122,6 +123,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
 @property(nonatomic, copy) NSString *cachedPluginStateIdentity;
 @property(nonatomic, copy) NSData *cachedPluginStateData;
 @property(nonatomic, weak) GFProjectDropView *projectView;
+@property(nonatomic) NSUInteger uniformEditGeneration;
 @property(nonatomic, weak) GFTranslationView *translationView;
 @property(nonatomic) GFTranslationInfo translationInfo;
 @property(atomic, copy) NSString *translationSettings;
@@ -328,6 +330,9 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                         kFxParameterFlag_USE_FULL_VIEW_WIDTH | kFxParameterFlag_HIDDEN)];
     ok = ok && [parameters addStringParameterWithName:@"Translation Settings" parameterID:kGFTranslationSettings
         defaultValue:@"" parameterFlags:(kFxParameterFlag_HIDDEN | kFxParameterFlag_NOT_ANIMATABLE)];
+    ok = ok && [parameters addStringParameterWithName:GFLocalized(@"effect.uniform.title", @"59.94p sampling alignment")
+        parameterID:kGFUniformSourceTiming defaultValue:@""
+        parameterFlags:(kFxParameterFlag_HIDDEN | kFxParameterFlag_NOT_ANIMATABLE)];
     if (!ok && error != NULL) {
         *error = GFFxError(GFLocalized(
             @"effect.error.parameters_create",
@@ -390,6 +395,97 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     return YES;
 }
 
+
+- (NSDictionary *)uniformSnapshot:(NSView *)view {
+    id<FxCustomParameterActionAPI_v4> action = [self.apiManager apiForProtocol:@protocol(FxCustomParameterActionAPI_v4)];
+    if (!action) return nil;
+    [action startAction:view];
+    @try {
+        NSString *hash = nil;
+        NSString *payload = [self.parameterCommitter persistedProjectPayloadWithHash:&hash error:nil];
+        if (payload.length == 0 || hash.length != 64) return nil;
+        NSData *bytes = [payload dataUsingEncoding:NSASCIIStringEncoding];
+        GFOwnedBytes decoded = {0}; GFError *error = NULL;
+        if (gf_finalcut_project_payload_decode(bytes.bytes,bytes.length,&decoded,&error) != GF_STATUS_OK) {
+            gf_finalcut_owned_bytes_free(&decoded);
+            if (error) gf_finalcut_error_free(error); return nil;
+        }
+        NSData *data = [NSData dataWithBytes:decoded.data length:decoded.len];
+        gf_finalcut_owned_bytes_free(&decoded);
+        if (error) gf_finalcut_error_free(error);
+        return @{@"data":data,@"hash":hash,@"metadata":[self stringValueForParameter:kGFUniformSourceTiming]};
+    } @finally { [action endAction:view]; }
+}
+- (BOOL)commitUniformString:(NSString *)text expected:(NSDictionary *)expected view:(NSView *)view {
+    id<FxCustomParameterActionAPI_v4> action = [self.apiManager apiForProtocol:@protocol(FxCustomParameterActionAPI_v4)];
+    if (!action) return NO;
+    [action startAction:view];
+    @try {
+        NSString *hash = nil;
+        [self.parameterCommitter persistedProjectPayloadWithHash:&hash error:nil];
+        NSString *previous = [self stringValueForParameter:kGFUniformSourceTiming];
+        if (![hash isEqual:expected[@"hash"]] || ![previous isEqual:expected[@"metadata"]]) return NO;
+        id<FxParameterSettingAPI_v5> setter = [self.apiManager apiForProtocol:@protocol(FxParameterSettingAPI_v5)];
+        BOOL ok = [setter setStringParameterValue:text toParameter:kGFUniformSourceTiming];
+        ok = ok && [[self stringValueForParameter:kGFUniformSourceTiming] isEqualToString:text];
+        if (!ok) [setter setStringParameterValue:previous toParameter:kGFUniformSourceTiming];
+        return ok;
+    } @finally { [action endAction:view]; }
+}
+- (void)showUniformFailure:(NSError *)error {
+    NSAlert *failure = [NSAlert new];
+    failure.messageText = GFLocalized(@"effect.uniform.failed",@"Sampling alignment was not changed");
+    failure.informativeText = error.localizedDescription ?: GFLocalized(@"effect.uniform.changed",@"The project or settings changed while reading the source. Try again.");
+    [failure runModal];
+}
+- (void)configureUniformSampling:(NSView *)view {
+    NSDictionary *snapshot = [self uniformSnapshot:view];
+    if (!snapshot) return;
+    NSUInteger generation = ++self.uniformEditGeneration;
+    GFUniformSourceTiming *current = [GFUniformSourceTiming timingFromString:snapshot[@"metadata"] projectHash:snapshot[@"hash"]];
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = GFLocalized(@"effect.uniform.title",@"59.94p sampling alignment");
+    NSString *detail = GFLocalized(@"effect.uniform.detail",@"For 59.94p → 29.97p at normal speed. Choose the same sampling method as Final Cut. Native-rate compounds use their inner Floor sampling. Select the matching original video once; its timing is saved in this effect. Low-resolution browsing and retiming are not covered.");
+    alert.informativeText = current ? [NSString stringWithFormat:@"%@\n%@: %@",detail,
+        current.samplingMode == 1 ? @"Floor" : @"Nearest",current.sourceName] : detail;
+    [alert addButtonWithTitle:GFLocalized(@"effect.uniform.floor",@"Floor")];
+    [alert addButtonWithTitle:GFLocalized(@"effect.uniform.nearest",@"Nearest")];
+    [alert addButtonWithTitle:GFLocalized(@"effect.uniform.off",@"Off")];
+    [alert addButtonWithTitle:GFLocalized(@"effect.uniform.cancel",@"Cancel")];
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertThirdButtonReturn) {
+        if (![self commitUniformString:@"" expected:snapshot view:view]) [self showUniformFailure:nil];
+        return;
+    }
+    if (response != NSAlertFirstButtonReturn && response != NSAlertSecondButtonReturn) return;
+    NSInteger mode = response == NSAlertFirstButtonReturn ? 1 : 2;
+    if (current) {
+        if (![self commitUniformString:[current stringWithMode:mode] expected:snapshot view:view]) [self showUniformFailure:nil];
+        return;
+    }
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = NO; panel.allowsMultipleSelection = NO;
+    panel.message = GFLocalized(@"effect.uniform.original",@"Select the original video matching this .gyroflow project.");
+    id project = [NSJSONSerialization JSONObjectWithData:snapshot[@"data"] options:0 error:nil];
+    NSString *file = [project isKindOfClass:NSDictionary.class] && [project[@"videofile"] isKindOfClass:NSString.class] ? project[@"videofile"] : nil;
+    NSURL *suggested = file ? [NSURL URLWithString:file] : nil;
+    if (suggested.isFileURL) { panel.directoryURL = suggested.URLByDeletingLastPathComponent; panel.nameFieldStringValue = suggested.lastPathComponent; }
+    if ([panel runModal] != NSModalResponseOK || !panel.URL.isFileURL) return;
+    NSURL *url = panel.URL; BOOL scoped = [url startAccessingSecurityScopedResource];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        NSError *error = nil;
+        NSString *metadata = [GFUniformSourceTiming prepareURL:url projectData:snapshot[@"data"] projectHash:snapshot[@"hash"] mode:mode error:&error];
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strong = weakSelf;
+            if (!strong || strong.uniformEditGeneration != generation || strong.projectView != view) return;
+            BOOL ok = metadata && [strong commitUniformString:metadata expected:snapshot view:view];
+            if (!ok) [strong showUniformFailure:error];
+        });
+    });
+}
+
 - (NSView *)createViewForParameterID:(UInt32)parameterID {
     if (parameterID == kGFTranslationControl) {
         __weak GyroflowFinalCutEffect *weakSelf = self;
@@ -434,6 +530,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
                }];
     self.projectView = view;
     [self updateTranslationVisibility];
+    view.samplingHandler = ^(NSView *sender) { [weakSelf configureUniformSampling:sender]; };
     [view refreshStatus];
     return view;
 }
@@ -687,6 +784,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
     if (![retrieval getIntValue:&hostSizing fromParameter:kGFHostSizing atTime:renderTime]) { hostSizing = 0; }
     GFHostOptions hostOptions = {.input_orientation = (uint32_t)inputOrientation, .sizing = (uint32_t)hostSizing};
     CMTime nativeFrameDuration = kCMTimeInvalid;
+    CMTime uniformTimelineFrame = kCMTimeInvalid;
     GFTime sourceTimeScale = {.numerator = 1, .denominator = 1};
     if (timing != nil && mode == GFRenderModeDirect) {
         [timing frameDuration:&nativeFrameDuration];
@@ -694,10 +792,17 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             .numerator = (int64_t)[timing timelineFpsDenominatorForEffect:self],
             .denominator = (int64_t)[timing timelineFpsNumeratorForEffect:self],
         };
+        uniformTimelineFrame = CMTimeMake(timelineFrameDuration.numerator, (int32_t)timelineFrameDuration.denominator);
         sourceTimeScale = gf_finalcut_native_rate_scale(
             GFTimeFromCMTime(nativeFrameDuration), timelineFrameDuration);
     }
+
     state = [[GFRenderState alloc] initWithState:state hostOptions:hostOptions sourceTimeScale:sourceTimeScale];
+    NSString *uniformString = mode == GFRenderModeDirect ? [self stringValueForParameter:kGFUniformSourceTiming] : @"";
+    GFUniformSourceTiming *uniform = [GFUniformSourceTiming timingFromString:uniformString projectHash:state.projectContentHash];
+    NSInteger uniformDomain = [uniform domainForHostFrame:nativeFrameDuration timelineFrame:uniformTimelineFrame
+        inputDuration:inputDuration scale:sourceTimeScale];
+    state = [[GFRenderState alloc] initWithState:state uniformSourceTiming:uniform ? uniformString : @"" domain:uniformDomain];
     NSString *translationSettings = [self stringValueForParameter:kGFTranslationSettings];
     NSString *translationIdentity = self.parameterCommitter.currentProjectIdentity;
     state = [[GFRenderState alloc] initWithState:state translationSettings:translationSettings
@@ -899,6 +1004,7 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
         return NO;
     }
 
+
     GFError *bridgeError = NULL;
     GFStatus status = snapshot.preparationStatus;
     NSString *translationError = nil;
@@ -927,6 +1033,9 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             GFTime scale = snapshot.state.sourceTimeScale;
             CMTime hostTime = CMTIME_IS_NUMERIC(mediaTime) ? mediaTime : renderTime;
             mediaTime = GFDirectSourceTime(hostTime, origin, scale);
+            GFUniformSourceTiming *uniform = [GFUniformSourceTiming timingFromString:snapshot.state.uniformSourceTiming
+                projectHash:snapshot.state.projectContentHash];
+            if (uniform && snapshot.state.uniformDomain != 0) mediaTime = [uniform sourceTime:mediaTime domain:snapshot.state.uniformDomain];
         }
         GFMetalRenderRequestV2 request = {
             .version = 2, .struct_size = sizeof(GFMetalRenderRequestV2),
@@ -945,7 +1054,10 @@ static NSString *GFRenderStateArchiveIdentity(GFRenderState *state) {
             .effect_bounds = snapshot.state.effectBounds,
             .input_bounds = snapshot.state.inputBounds,
         };
+
         status = gf_finalcut_instance_render_metal_v2(snapshot.instance, &request, &bridgeError);
+
+
     }
     GFRenderDisposition disposition = GFRenderDispositionForStatus(status);
     if (disposition == GF_RENDER_DISPOSITION_PROCESSED) {

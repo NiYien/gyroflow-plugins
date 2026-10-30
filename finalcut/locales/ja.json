@@ -233,5 +233,14 @@
   "effect.host.auto_orientation": "自動（プロジェクトの向き）",
   "effect.host.auto_sizing": "自動（フィット）",
   "effect.translation.save_failed": "並進パラメーターを保存できません",
-  "effect.translation.invalid": "並進パラメーターが無効です"
+  "effect.translation.invalid": "並進パラメーターが無効です",
+  "effect.uniform.cancel": "キャンセル",
+  "effect.uniform.changed": "読み取り中に設定が変更されました。もう一度お試しください。",
+  "effect.uniform.detail": "通常速度の 59.94p → 29.97p 用です。Final Cut と同じサンプリング方式を選択してください。ネイティブレートの複合クリップは内部の Floor を使います。対応する元動画を一度選ぶと、その時刻情報がこのエフェクトに保存されます。低解像度ブラウズと速度変更は対象外です。",
+  "effect.uniform.failed": "サンプリング整合は変更されませんでした",
+  "effect.uniform.floor": "切り捨て（Floor）",
+  "effect.uniform.nearest": "最近傍（Nearest）",
+  "effect.uniform.off": "オフ",
+  "effect.uniform.original": "この .gyroflow プロジェクトに対応する元動画を選択してください。",
+  "effect.uniform.title": "59.94p サンプリング整合"
 }
