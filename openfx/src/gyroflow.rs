@@ -38,6 +38,8 @@ struct HostInputSizingCacheEntry {
 #[derive(Default)]
 struct GyroflowPlugin {
     gyroflow_plugin: GyroflowPluginBase,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    cuda_stream_negotiated: bool,
     // Lock contention here is minimal: written when a fuscript query completes, read once per
     // CreateInstance and once per render (an age comparison, no query).
     host_input_sizing_cache: parking_lot::Mutex<Option<HostInputSizingCacheEntry>>,
@@ -609,7 +611,7 @@ fn format_trim_ranges_s(ranges: &[(f64, f64)]) -> String {
 // frame. CUDA + CPU cover Resolve on Windows/Linux (NVIDIA path confirmed live:
 // `in_src=cuda(dev=0)`); OpenCL/Metal/OpenGL deliberately unsupported until a
 // live setup exists to verify them.
-fn passthrough_copy_source_to_output(buffers: &mut Buffers) -> std::result::Result<(), &'static str> {
+fn passthrough_copy_source_to_output(buffers: &mut Buffers, _host_stream: Option<usize>) -> std::result::Result<(), &'static str> {
     let (sw, sh, ss) = buffers.input.size;
     let (ow, oh, os) = buffers.output.size;
     if sw != ow || sh != oh || ss != os {
@@ -629,15 +631,14 @@ fn passthrough_copy_source_to_output(buffers: &mut Buffers) -> std::result::Resu
         }
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         (BufferSource::CUDABuffer { buffer: src }, BufferSource::CUDABuffer { buffer: dst }) => {
-            cuda_passthrough::memcpy_dtod(*dst as usize, *src as usize, bytes)
+            cuda_passthrough::memcpy_dtod(*dst as usize, *src as usize, bytes, _host_stream)
         }
         _ => Err("unsupported buffer backend for passthrough"),
     }
 }
 
 // Minimal CUDA driver-API surface for the passthrough copy. Device-to-device,
-// synchronized on the default stream before returning (the host owns any wider
-// synchronization, same contract as the stabilized render path).
+// queued on the supplied host stream, or synchronized for legacy hosts.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod cuda_passthrough {
     use std::sync::OnceLock;
@@ -645,6 +646,7 @@ mod cuda_passthrough {
     type CUresult = i32;
     struct Api {
         memcpy_dtod: unsafe extern "system" fn(dst: usize, src: usize, byte_count: usize) -> CUresult,
+        memcpy_dtod_async: unsafe extern "system" fn(dst: usize, src: usize, byte_count: usize, stream: usize) -> CUresult,
         stream_sync: unsafe extern "system" fn(stream: usize) -> CUresult,
         _lib: libloading::Library,
     }
@@ -663,13 +665,19 @@ mod cuda_passthrough {
             #[cfg(target_os = "linux")]
             let lib = libloading::Library::new("libcuda.so.1").ok()?;
             let memcpy_dtod = *lib.get(b"cuMemcpyDtoD_v2\0").ok()?;
+            let memcpy_dtod_async = *lib.get(b"cuMemcpyDtoDAsync_v2\0").ok()?;
             let stream_sync = *lib.get(b"cuStreamSynchronize\0").ok()?;
-            Some(Api { memcpy_dtod, stream_sync, _lib: lib })
+            Some(Api { memcpy_dtod, memcpy_dtod_async, stream_sync, _lib: lib })
         }).as_ref()
     }
 
-    pub fn memcpy_dtod(dst: usize, src: usize, bytes: usize) -> std::result::Result<(), &'static str> {
+    pub fn memcpy_dtod(dst: usize, src: usize, bytes: usize, host_stream: Option<usize>) -> std::result::Result<(), &'static str> {
         let api = api().ok_or("CUDA driver library unavailable")?;
+        if let Some(stream) = host_stream {
+            return if unsafe { (api.memcpy_dtod_async)(dst, src, bytes, stream) } == 0 {
+                Ok(())
+            } else { Err("host stream CUDA copy failed") };
+        }
         // The host render thread arrives with its CUDA context current (the
         // same assumption the stabilized render path has always made).
         let res = unsafe { (api.memcpy_dtod)(dst, src, bytes) };
@@ -1888,6 +1896,18 @@ impl Execute for GyroflowPlugin {
             Render(ref mut effect, ref in_args) => {
                 let _time = std::time::Instant::now();
 
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                let host_cuda_stream = if self.cuda_stream_negotiated
+                    && in_args.get_cuda_enabled().unwrap_or_default() {
+                    let value: std::result::Result<*mut std::ffi::c_void, _> =
+                        RawGetter::get_at(in_args, c"OfxImageEffectPropCudaStream".as_ptr(), 0);
+                    value.ok().map(|p| p as usize)
+                } else { None };
+                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+                let host_cuda_stream = None;
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                let _host_stream_scope = gyroflow_plugin_base::cuda_native::HostStreamGuard::new(host_cuda_stream);
+
                 let time = in_args.get_time()?;
                 let instance_data: &mut InstanceData = effect.get_instance_data()?;
 
@@ -2588,7 +2608,7 @@ impl Execute for GyroflowPlugin {
                     // A failed copy (mismatched geometry, unsupported backend) falls
                     // back to the pre-D7 path below — widen + stabilized render.
                     if host_trim_render_passthrough {
-                        match passthrough_copy_source_to_output(&mut buffers) {
+                        match passthrough_copy_source_to_output(&mut buffers, host_cuda_stream) {
                             Ok(()) => { return OK; }
                             Err(reason) => {
                                 log::warn!("host trim passthrough copy unavailable ({reason}) — falling back to widened stabilized render");
@@ -3315,6 +3335,16 @@ impl Execute for GyroflowPlugin {
 
                 let mut effect_properties: EffectDescriptor = effect.properties()?;
                 effect_properties.set_grouping("Warp")?;
+
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                if supports_cuda && gyroflow_plugin_base::cuda_native::available() {
+                    let support: std::result::Result<String, _> = RawGetter::get_at(
+                        &_plugin_context.get_host(), c"OfxImageEffectPropCudaStreamSupported".as_ptr(), 0);
+                    if support.as_deref().ok() == Some("true") {
+                        RawSetter::set_at(&mut effect_properties, c"OfxImageEffectPropCudaStreamSupported".as_ptr(), 0, "true")?;
+                        self.cuda_stream_negotiated = true;
+                    }
+                }
 
                 effect_properties.set_label(gyroflow_plugin_base::t!("ofx.plugin.label"))?;
                 effect_properties.set_short_label(gyroflow_plugin_base::t!("ofx.plugin.short_label"))?;
@@ -4381,18 +4411,18 @@ mod tests {
         let mut src = vec![7u8; 4 * 2 * 16];
         let mut dst = vec![0u8; 4 * 2 * 16];
         let mut buffers = make_buffers(&mut src, &mut dst, (4, 2, 64), (4, 2, 64));
-        assert!(passthrough_copy_source_to_output(&mut buffers).is_ok());
+        assert!(passthrough_copy_source_to_output(&mut buffers, None).is_ok());
         assert!(dst.iter().all(|&b| b == 7));
         // Geometry mismatch refuses instead of guessing.
         let mut src = vec![7u8; 4 * 2 * 16];
         let mut dst = vec![0u8; 4 * 4 * 16];
         let mut buffers = make_buffers(&mut src, &mut dst, (4, 2, 64), (4, 4, 64));
-        assert!(passthrough_copy_source_to_output(&mut buffers).is_err());
+        assert!(passthrough_copy_source_to_output(&mut buffers, None).is_err());
         assert!(dst.iter().all(|&b| b == 0));
         // Undersized backing slice refuses.
         let mut src = vec![7u8; 10];
         let mut dst = vec![0u8; 4 * 2 * 16];
         let mut buffers = make_buffers(&mut src, &mut dst, (4, 2, 64), (4, 2, 64));
-        assert!(passthrough_copy_source_to_output(&mut buffers).is_err());
+        assert!(passthrough_copy_source_to_output(&mut buffers, None).is_err());
     }
 }
