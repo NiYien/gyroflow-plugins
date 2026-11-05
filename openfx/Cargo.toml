@@ -20,5 +20,8 @@ zip = { version = "8.6", default-features = false, features = ["deflate-flate2"]
 flate2 = "1"
 roxmltree = "0.21"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11", "Win32_Security_Cryptography"] }
+
 [build-dependencies]
 winres = "0.1"

@@ -143,7 +143,7 @@ fn host_horizon_settings_survive_eviction_purge_and_reopen() {
             match rebuild {
                 "lru_eviction" => {
                     for n in 0..8 {
-                        cache.lock().put(format!("another-clip-{n}"), Arc::new(StabilizationManager::default()));
+                        cache.lock().put(format!("another-clip-{n}"), LoadedManager::from_unadapted_test_manager(Arc::new(StabilizationManager::default())));
                     }
                     assert_eq!(instance.managers.len(), 1);
                 },

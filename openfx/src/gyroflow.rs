@@ -229,6 +229,52 @@ pub fn frame_from_timetype(time: TimeType) -> f64 {
     }
 }
 
+fn parameter_frame(time: TimeType, is_jianying: bool, host_fps: f64) -> f64 {
+    if is_jianying {
+        let microseconds = match &time {
+            TimeType::FrameOrMicrosecond((_, Some(us))) | TimeType::Microseconds(us) => Some(*us as f64),
+            TimeType::Milliseconds(ms) => Some(*ms * 1000.0),
+            _ => None,
+        };
+        if let Some(us) = microseconds { return us / 1_000_000.0 * host_fps; }
+    }
+    frame_from_timetype(time)
+}
+
+fn prepare_jianying_gpu(stab: &StabilizationManager, buffers: &Buffers) -> Result<()> {
+    if !std::env::var("NO_WGPU").unwrap_or_default().is_empty() {
+        log::error!(target: "jianying_ofx", "Jianying requires WGPU; remove NO_WGPU from the host environment");
+        return Err(Error::InvalidValue);
+    }
+    let mut stabilization = stab.stabilization.write();
+    if stabilization.initialized_backend.get_hash() != stabilization.get_current_checksum(buffers)
+        || stabilization.pending_device_change.is_some() {
+        // Select through the existing device API without probing OpenCL or changing host environment.
+        let devices = prepare_processing_device_infos(wgpu::WgpuWrapper::list_devices());
+        let Some((device, _)) = select_processing_device(&devices, "", "") else {
+            log::error!(target: "jianying_ofx", "No hardware WGPU adapter is available for Jianying");
+            return Err(Error::InvalidValue);
+        };
+        *GPU_LIST.write() = devices.iter().map(|device| device.list_name.clone()).collect();
+        stabilization.set_device(device.raw_index as isize);
+        log::debug!(target: "jianying_ofx", "GPU selected: {}", device.list_name);
+    }
+    Ok(())
+}
+
+fn update_synchronization_status(plugin: &mut GyroflowPluginBaseInstance, params: &mut dyn GyroflowPluginParams, stab: &StabilizationManager) {
+    let synchronized = {
+        let gyro = stab.gyro.read();
+        let metadata = gyro.file_metadata.read();
+        metadata.has_accurate_timestamps || !gyro.get_offsets().is_empty()
+    };
+    if synchronized {
+        plugin.set_status(params, t!("status.ok"), t!("status.ok"), true);
+    } else {
+        plugin.set_status(params, t!("status.not_synced"), t!("status.not_synced_hint"), false);
+    }
+}
+
 /// Diagnostic kill-switch for the anamorphic physical-aspect band guesses
 /// (ofx-anamorphic-band-guess). `GYROFLOW_OFX_ANAMORPHIC_BAND=0|off|false`
 /// restores the stretch-blind (pre-change) input/output band guesses.
@@ -543,16 +589,22 @@ pub fn parse_mismatch_mode(s: &str) -> Option<HostInputSizing> {
 // plugins-host-timeline-trim (out-of-window passthrough): source-domain timestamp
 // for an Edit/Color-page render request. Shared by Render and IsIdentity so the
 // passthrough verdict can never drift from the timestamp Render actually uses.
-// Exactly the historical Render math: timeline time -> source microseconds via
-// speed_stretch, with the mixed-fps variant flooring to the frame grid. The
+// Timeline time -> source microseconds via speed_stretch. Mixed-fps requests
+// keep the historical floor except for Jianying's microsecond quantization. The
 // Render-only SrcFrame override is deliberately NOT part of this function —
 // IsIdentity has no access to that in-arg, which is why its boundary slack must
 // stay <= the widen guard's slack (see the IsIdentity arm).
-fn ofx_source_timestamp_us(time: f64, src_fps: f64, fps: f64, speed_stretch: f64) -> i64 {
+pub(crate) fn ofx_source_timestamp_us(time: f64, src_fps: f64, fps: f64, speed_stretch: f64, is_jianying: bool) -> i64 {
     let mut timestamp_us = ((time / src_fps * 1_000_000.0) * speed_stretch).round() as i64;
     if (src_fps - fps).abs() > 0.01 {
         let frame = (time / src_fps) * fps * speed_stretch;
-        timestamp_us = (frame.floor() * (1_000_000.0 / fps)).round() as i64;
+        // Jianying quantizes source times to integer microseconds before reporting OFX frame time.
+        let frame = if is_jianying && (frame - frame.round()).abs() <= fps * speed_stretch * 1e-6 {
+            frame.round()
+        } else {
+            frame.floor()
+        };
+        timestamp_us = (frame * (1_000_000.0 / fps)).round() as i64;
     }
     timestamp_us
 }
@@ -611,7 +663,7 @@ fn format_trim_ranges_s(ranges: &[(f64, f64)]) -> String {
 // frame. CUDA + CPU cover Resolve on Windows/Linux (NVIDIA path confirmed live:
 // `in_src=cuda(dev=0)`); OpenCL/Metal/OpenGL deliberately unsupported until a
 // live setup exists to verify them.
-fn passthrough_copy_source_to_output(buffers: &mut Buffers, _host_stream: Option<usize>) -> std::result::Result<(), &'static str> {
+pub(crate) fn passthrough_copy_source_to_output(buffers: &mut Buffers, _host_stream: Option<usize>) -> std::result::Result<(), &'static str> {
     let (sw, sh, ss) = buffers.input.size;
     let (ow, oh, os) = buffers.output.size;
     if sw != ow || sh != oh || ss != os {
@@ -632,6 +684,24 @@ fn passthrough_copy_source_to_output(buffers: &mut Buffers, _host_stream: Option
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         (BufferSource::CUDABuffer { buffer: src }, BufferSource::CUDABuffer { buffer: dst }) => {
             cuda_passthrough::memcpy_dtod(*dst as usize, *src as usize, bytes, _host_stream)
+        }
+        #[cfg(target_os = "windows")]
+        (BufferSource::DirectX11 { texture: src, device: src_device, device_context: src_context },
+         BufferSource::DirectX11 { texture: dst, device: dst_device, device_context: dst_context }) => {
+            use windows::{core::Interface, Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D}};
+            if src_device != dst_device || src_context != dst_context {
+                return Err("DirectX11 passthrough requires one device and context");
+            }
+            unsafe {
+                let device = ID3D11Device::from_raw_borrowed(dst_device).ok_or("missing DirectX11 device")?;
+                let context = ID3D11DeviceContext::from_raw_borrowed(dst_context).ok_or("missing DirectX11 context")?;
+                let source = ID3D11Texture2D::from_raw_borrowed(src).ok_or("missing DirectX11 source")?;
+                let output = ID3D11Texture2D::from_raw_borrowed(dst).ok_or("missing DirectX11 output")?;
+                let fence = wgpu_interop_directx::DirectX11Fence::new(device).map_err(|_| "DirectX11 passthrough fence creation failed")?;
+                context.CopyResource(output, source);
+                fence.synchronize(context).map_err(|_| "DirectX11 passthrough synchronization failed")?;
+            }
+            Ok(())
         }
         _ => Err("unsupported buffer backend for passthrough"),
     }
@@ -967,35 +1037,68 @@ define_params!(ParamHandler {
         ZoomMode              => zoom_mode:                ParamHandle<Int>,
     ],
 
-    get_string:  _s p    { Ok(p.get_value()?) },
-    set_string:  _s p, v { Ok(p.set_value(v.into())?) },
-    get_bool:    _s p    { Ok(p.get_value() ?) },
-    set_bool:    _s p, v { Ok(p.set_value(v)?) },
-    get_f64:     _s p    { Ok(p.get_value() ?) },
-    set_f64:     _s p, v { Ok(p.set_value(v)?) },
-    get_i32:     _s p    { Ok(p.get_value() ?) },
-    set_i32:     _s p, v { Ok(p.set_value(v)?) },
-    set_label:   _s p, l { Ok(p.set_label(l)?) },
-    set_hint:    _s p, h { Ok(p.set_hint(h) ?) },
-    set_enabled: _s p, e { if p.get_enabled()? != e { p.set_enabled(e)?; } Ok(()) },
-    set_visible: _s p, v { if p.get_secret()? == v { p.set_secret(!v)?; } Ok(()) },
-    get_bool_at_time: _s p, t    { Ok(p.get_value_at_time(frame_from_timetype(t))?) },
-    get_f64_at_time:  _s p, t    { Ok(p.get_value_at_time(frame_from_timetype(t))?) },
-    set_f64_at_time:  _s p, t, v { Ok(p.set_value_at_time(frame_from_timetype(t), v)?) },
+    get_string:  s p    {
+        if s.buffer_host_writes {
+            if let Some(value) = s.pending.peek_string(p) { return Ok(value); }
+        }
+        Ok(match s.render_time {
+            Some(time) => p.get_value_at_time(time)?,
+            None => p.get_value()?,
+        })
+    },
+    set_string:  s p, v {
+        if s.buffer_host_writes {
+            s.pending.defer_string(p, v.to_owned())?;
+        } else {
+            s.pending.forget(p);
+            if !s.is_jianying || p.get_value()? != v { p.set_value(v.into())?; }
+        }
+        Ok(())
+    },
+    get_bool:    s p { if s.buffer_host_writes { if let Some(v) = s.pending.peek_bool(p) { return Ok(v); } } Ok(p.get_value()?) },
+    set_bool:    s p, v { if s.buffer_host_writes { s.pending.defer_bool(p, v)?; } else { s.pending.forget(p); if !s.is_jianying || p.get_value()? != v { p.set_value(v)?; } } Ok(()) },
+    get_f64:     s p { if s.buffer_host_writes { if let Some(v) = s.pending.peek_f64(p) { return Ok(v); } } Ok(p.get_value()?) },
+    set_f64:     s p, v { if s.buffer_host_writes { s.pending.defer_f64(p, v)?; } else { s.pending.forget(p); if !s.is_jianying || p.get_value()? != v { p.set_value(v)?; } } Ok(()) },
+    get_i32:     s p { if s.buffer_host_writes { if let Some(v) = s.pending.peek_i32(p) { return Ok(v); } } Ok(p.get_value()?) },
+    set_i32:     s p, v { if s.buffer_host_writes { s.pending.defer_i32(p, v)?; } else { s.pending.forget(p); if !s.is_jianying || p.get_value()? != v { p.set_value(v)?; } } Ok(()) },
+    set_label:   s p, l { if s.buffer_host_writes { s.pending.defer_label(p, l)?; } else if !s.is_jianying || p.get_label()? != l { p.set_label(l)?; } Ok(()) },
+    set_hint:    s p, h { if s.buffer_host_writes { s.pending.defer_hint(p, h)?; } else if !s.is_jianying || p.get_hint()? != h { p.set_hint(h)?; } Ok(()) },
+    set_enabled: s p, e { if s.buffer_host_writes { s.pending.defer_enabled(p, e)?; } else if p.get_enabled()? != e { p.set_enabled(e)?; } Ok(()) },
+    set_visible: s p, v { if s.buffer_host_writes { s.pending.defer_visible(p, v)?; } else if p.get_secret()? == v { p.set_secret(!v)?; } Ok(()) },
+    get_bool_at_time: s p, t { if s.buffer_host_writes { if let Some(v) = s.pending.peek_bool(p) { return Ok(v); } } Ok(p.get_value_at_time(parameter_frame(t, s.is_jianying, s.host_fps))?) },
+    get_f64_at_time:  s p, t { if s.buffer_host_writes { if let Some(v) = s.pending.peek_f64(p) { return Ok(v); } } Ok(p.get_value_at_time(parameter_frame(t, s.is_jianying, s.host_fps))?) },
+    set_f64_at_time: s p, t, v {
+        if s.buffer_host_writes { return Err("Host keyframes must be initialized before Render".into()); }
+        s.pending.forget(p);
+        Ok(p.set_value_at_time(parameter_frame(t, s.is_jianying, s.host_fps), v)?)
+    },
     is_keyframed: _s p { p.get_num_keys().unwrap_or_default() > 0 },
-    get_keyframes: _s p {
+    get_keyframes: s p {
         let num_keys = p.get_num_keys().unwrap_or_default();
         let mut ret = Vec::with_capacity(num_keys as usize);
         for i in 0..num_keys {
             if let Ok(time) = p.get_key_time(i) {
                 if let Ok(val) = p.get_value_at_time(time) {
-                    ret.push((TimeType::Frame(time), val));
+                    let key_time = if s.is_jianying {
+                        TimeType::FrameOrMicrosecond((Some(time), Some((time / s.host_fps * 1_000_000.0).round() as i64)))
+                    } else { TimeType::Frame(time) };
+                    ret.push((key_time, val));
                 }
             }
         }
         ret
     },
-    clear_keyframes: _s p { Ok(p.delete_all_keys()?) },
+    clear_keyframes: s p {
+        if s.buffer_host_writes { return Err("Host keyframes must be initialized before Render".into()); }
+        s.pending.forget(p);
+        Ok(p.delete_all_keys()?)
+    },
+
+    render_time: Option<f64>,
+    is_jianying: bool,
+    host_fps: f64,
+    buffer_host_writes: bool,
+    pending: super::pending_host_values::PendingHostValues,
 });
 
 struct InstanceData {
@@ -1003,6 +1106,9 @@ struct InstanceData {
     output_clip: ClipInstance,
 
     params: ParamHandler,
+    jianying_protocol: super::jianying_protocol::Protocol,
+    #[cfg(target_os = "windows")]
+    jianying_autoload: super::jianying_autoload::State,
     // Host-side manual-edit flags for each of the 5 paste-preservable params. These ride
     // across copy/paste, so they carry "B manually edited this" intent into A's instance.
     // No plugin-private shadow exists: by design, paste from B (where B did not manually
@@ -1098,7 +1204,31 @@ struct InstanceData {
 }
 
 impl InstanceData {
-    fn stab_manager(&mut self, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, output_rect: RectI, loading_pending_video_file: bool) -> Result<Arc<StabilizationManager>> {
+    fn prepare_jianying(&mut self, manager_cache: &ManagerCache) -> Result<()> {
+        let previous_time = self.params.fields.render_time.replace(self.jianying_protocol.time);
+        let result = (|| {
+            if self.params.project_path.get_value_at_time(self.jianying_protocol.time)?.is_empty() {
+                self.plugin.clear_stab(manager_cache);
+                self.plugin.update_loaded_state(&mut self.params, false);
+                for param in [Params::LoadedProject, Params::LoadedLens, Params::LoadedPreset] {
+                    let _ = self.params.set_string(param, "");
+                }
+                return Ok(());
+            }
+            let host_fps = self.source_clip.get_frame_rate()?;
+            if !host_fps.is_finite() || host_fps <= 0.0 { return Err(Error::InvalidValue); }
+            self.params.fields.host_fps = host_fps;
+            // The timeline dimensions are not known until the host supplies an image.
+            // A project import does not need them; the first Render fills timeline_size.
+            let stab = self.stab_manager(manager_cache, RectI { x1: 0, y1: 0, x2: 0, y2: 0 }, false)?;
+            update_synchronization_status(&mut self.plugin, &mut self.params, &stab);
+            Ok(())
+        })();
+        self.params.fields.render_time = previous_time;
+        result
+    }
+
+    fn stab_manager(&mut self, manager_cache: &ManagerCache, output_rect: RectI, loading_pending_video_file: bool) -> Result<Arc<StabilizationManager>> {
         let out_size = ((output_rect.x2 - output_rect.x1) as usize, (output_rect.y2 - output_rect.y1) as usize);
 
         // If `InstanceChanged(ProjectPath)` saw an external write (paste) since last render,
@@ -1801,10 +1931,295 @@ fn refresh_plugin_update_notice(effect: &ImageEffectHandle, context: &PluginCont
     Ok(())
 }
 
+fn discover_jianying_project(effect: &mut ImageEffectHandle) -> Result<Option<String>> {
+    #[cfg(target_os = "windows")]
+    {
+        {
+            let instance: &mut InstanceData = effect.get_instance_data()?;
+            if !instance.params.project_path.get_value()?.is_empty()
+                || (instance.params.include_project_data.get_value()? && !instance.params.project_data.get_value()?.is_empty()) {
+                instance.jianying_autoload.stop();
+                return Ok(None);
+            }
+        }
+        let properties: EffectInstance = effect.properties()?;
+        let source: Result<String> = RawGetter::get_at(&properties, c"NiYienJianyingSourcePath".as_ptr(), 0);
+        let instance: &mut InstanceData = effect.get_instance_data()?;
+        return Ok(instance.jianying_autoload.candidate(source.as_deref().unwrap_or_default()).map(str::to_owned));
+    }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = effect; Ok(None) }
+}
+
+impl GyroflowPlugin {
+    fn commit_jianying(&mut self, context: &PluginContext, effect: &mut ImageEffectHandle, plan: Option<super::jianying_protocol::Commit>) -> Result<Int> {
+        let previous_buffer_mode = {
+            let instance: &mut InstanceData = effect.get_instance_data()?;
+            if instance.jianying_protocol.committing { return OK; }
+            instance.jianying_protocol.committing = true;
+            std::mem::replace(&mut instance.params.fields.buffer_host_writes, false)
+        };
+        let result = (|| {
+            let autoload_project = discover_jianying_project(effect)?;
+            {
+                let instance: &mut InstanceData = effect.get_instance_data()?;
+                if instance.jianying_protocol.binding_changed()? {
+                    instance.params.fields.pending.clear();
+                } else {
+                    instance.params.fields.pending.flush()?;
+                }
+                // Identity allocation is separate from an explicit request to reload defaults.
+                let reload = instance.plugin.reload_values_from_project;
+                let mut id = if instance.jianying_protocol.source_replaced_without_new_identity()? {
+                    instance.plugin.clear_stab(&self.gyroflow_plugin.manager_cache);
+                    String::new()
+                } else { instance.params.instance_id.get_value()? };
+                instance.plugin.initialize_instance_id(&mut id);
+                instance.plugin.reload_values_from_project = reload;
+                instance.params.set_string(Params::InstanceId, &id).map_err(|_| Error::InvalidAction)?;
+                if let Some(project) = &autoload_project {
+                    instance.params.set_string(Params::ProjectPath, project).map_err(|_| Error::InvalidAction)?;
+                    #[cfg(target_os = "windows")]
+                    instance.jianying_autoload.stop();
+                    instance.plugin.reload_values_from_project = true;
+                    log::info!(target: "jianying_ofx", "Automatically adopted verified exact project: {project}");
+                }
+            }
+            if autoload_project.is_some() || plan.as_ref().is_some_and(|p| p.binding_changed) {
+                process_parameter_change(self, context, effect, "ProjectPath", Change::PluginEdited)?;
+            }
+            effect.get_instance_data::<InstanceData>()?.prepare_jianying(&self.gyroflow_plugin.manager_cache)?;
+            if let Some(plan) = plan {
+                if !plan.initial && !plan.binding_changed {
+                    for param in plan.changes {
+                        if !super::jianying_protocol::Protocol::is_display(param)
+                            && !matches!(param, Params::ProjectPath | Params::ProjectData | Params::InstanceId | Params::TranslationInitialized) {
+                            process_parameter_change(self, context, effect, &format!("{param:?}"), Change::UserEdited)?;
+                        }
+                    }
+                }
+                for command in plan.commands {
+                    log::info!(target: "jianying_ofx", "committing button pulse: {:?}", command.param);
+                    let result = process_parameter_change(self, context, effect, &format!("{:?}", command.param), Change::UserEdited);
+                    command.acknowledge()?;
+                    result?;
+                }
+            }
+            {
+                let instance: &mut InstanceData = effect.get_instance_data()?;
+                instance.prepare_jianying(&self.gyroflow_plugin.manager_cache)?;
+                instance.jianying_protocol.finish()?;
+                // UI JSON overlays descriptor values. Publish derived text even if the instance
+                // already held it (for example, after CreateInstance without a UI callback).
+                for parameter in [&instance.params.status, &instance.params.loaded_project, &instance.params.loaded_lens,
+                    &instance.params.loaded_preset, &instance.params.translation_status] {
+                    parameter.set_value(parameter.get_value()?)?;
+                }
+            }
+            let _ = refresh_plugin_update_notice(effect, context);
+            OK
+        })();
+        let instance: &mut InstanceData = effect.get_instance_data()?;
+        instance.params.fields.buffer_host_writes = previous_buffer_mode;
+        instance.jianying_protocol.committing = false;
+        result
+    }
+}
+
+fn process_parameter_change(this: &mut GyroflowPlugin, _plugin_context: &PluginContext, effect: &mut ImageEffectHandle, name: &str, reason: Change) -> Result<Int> {
+                if name == PLUGIN_UPDATE_GROUP { return OK; }
+                let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                if name == "LoadCurrent" {
+                    CurrentFileInfo::query(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(this.host_input_sizing_drt.clone()));
+                }
+                // §8.2: re-query fuscript on ReloadProject so a user that just toggled Resolve's
+                // mismatched-resolution setting between renders can have the new value picked up
+                // without re-clicking "LoadCurrent". Silent — ReloadProject is a quiet refresh,
+                // we don't want a dialog if fuscript happens to fail. Also clear the
+                // idempotency marker so the resolved mode change is honored on the next render
+                // without waiting for a stab rebuild.
+                if name == "ReloadProject" && CurrentFileInfo::is_available() {
+                    CurrentFileInfo::query_silent(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(this.host_input_sizing_drt.clone()));
+                    instance_data.applied_host_input_sizing = None;
+                }
+                // §2.5 + §7.2: handle the OFX-only HostInputSizing dropdown before the
+                // FromStr-into-`Params` lookup (it's intentionally NOT in the common enum).
+                // The UI dropdown is hidden (`set_secret(true)`) but the param is still defined so
+                // paste round-trips serialize it. Clear `applied_host_input_sizing` so the next
+                // render re-applies with the new mode (otherwise the idempotency guard would skip
+                // the apply and the lens/size baked for the previous mode would persist).
+                // Paste shadow is NOT cleared — `HostInputSizing` is OpenFX-only and was never
+                // on the paste-preservable list.
+                if name == "HostInputSizing" {
+                    instance_data.applied_host_input_sizing = None;
+                    if reason == Change::UserEdited {
+                        log::info!(target: "host_input_sizing",
+                            "HostInputSizing changed by user; will re-evaluate on next render");
+                    }
+                    return OK;
+                }
+                // Hidden persistence param. Plugin-initiated writes (mirror block in Render)
+                // and Resolve-initiated writes (paste/.drp restore) both end up here. Either
+                // way the param is pure storage — the runtime mismatch_mode comes from the
+                // global cache / hidden-field fallback at CreateInstance — so this event has
+                // no work to do beyond suppressing the `Unknown param name` log line below.
+                if name == "DetectedMismatchMode" || name == "DetectedHostTrim" {
+                    return OK;
+                }
+                if name == "Source" || name == "Output" || name == "ResolveUseAlphaForTrackCompositing" {
+                    log::info!("InstanceChanged {:?} {:?}", name, reason);
+                    return OK;
+                }
+
+                if let Ok(param) = std::str::FromStr::from_str(name) {
+                    if param == Params::ProjectPath && _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro") {
+                        instance_data.plugin.param_changed(&mut instance_data.params, &this.gyroflow_plugin.manager_cache, param, false)
+                            .map_err(|_| Error::InvalidAction)?;
+                        instance_data.project_video_rotation = None;
+                        return OK;
+                    }
+                    if param == Params::OutputSizeToTimeline {
+                        let rect = instance_data.source_clip.get_region_of_definition(0.0)?;
+                        instance_data.plugin.timeline_size = ((rect.x2 - rect.x1) as usize, (rect.y2 - rect.y1) as usize);
+                    }
+                    if matches!(
+                        param,
+                        Params::ProjectPath | Params::ReloadProject | Params::LoadCurrent | Params::OpenRecentProject | Params::Browse
+                    ) {
+                        instance_data.project_video_rotation = None;
+                    }
+                    // Live paste detection: when a Resolve "paste node attributes" lands B's
+                    // ProjectPath onto this (A's) instance, the host fires `InstanceChanged(
+                    // ProjectPath, Plugin)`. Plugin-initiated writes pre-register their value in
+                    // `expected_internal_project_path`, so a value that doesn't match has come
+                    // from outside (paste). We mark `paste_detected` and defer the actual
+                    // snapshot + reload to the next `stab_manager` call so all the other pasted
+                    // params have settled into host first.
+                    // NOTE: only read host.ProjectPath inside this branch to keep the FFI surface
+                    // tight — calling `get_string(ProjectPath)` on every InstanceChanged (even for
+                    // non-ProjectPath params) is what triggered Resolve's AV crash earlier.
+                    if param == Params::ProjectPath {
+                        let current_pp = instance_data
+                            .params
+                            .get_string(Params::ProjectPath)
+                            .unwrap_or_default();
+                        if instance_data.expected_internal_project_path.as_deref() == Some(current_pp.as_str()) {
+                            instance_data.expected_internal_project_path = None;
+                        } else if !current_pp.is_empty() {
+                            instance_data.paste_detected = true;
+                        }
+                    }
+                    if clear_paste_shadow_for_explicit_reload(param) {
+                        // Explicit user request to re-derive A from disk: clear all five host
+                        // manual-edit flags so the next paste correctly sees "no manual edits"
+                        // and the reload's project default applies cleanly.
+                        let _ = instance_data.input_rotation_manually_edited.set_value(false);
+                        let _ = instance_data.smoothness_manually_edited.set_value(false);
+                        let _ = instance_data.lens_correction_strength_manually_edited.set_value(false);
+                        let _ = instance_data.horizon_lock_amount_manually_edited.set_value(false);
+                        let _ = instance_data.zoom_mode_manually_edited.set_value(false);
+                    }
+
+                    if reason == Change::UserEdited {
+                        // The user dragged a slider or picked a value for one of the five
+                        // paste-preservable params: set the host flag so when this node is
+                        // later copy/pasted *out* (A becomes the "B" source for another node C),
+                        // the manual-edit intent propagates through paste.
+                        match param {
+                            Params::Smoothness                => { let _ = instance_data.smoothness_manually_edited.set_value(true); }
+                            Params::LensCorrectionStrength    => { let _ = instance_data.lens_correction_strength_manually_edited.set_value(true); }
+                            Params::HorizonLockAmount         => { let _ = instance_data.horizon_lock_amount_manually_edited.set_value(true); }
+                            Params::ZoomMode | Params::UseDynamicZoom | Params::UseStaticZoom => { let _ = instance_data.zoom_mode_manually_edited.set_value(true); }
+                            Params::InputRotation             => { let _ = instance_data.input_rotation_manually_edited.set_value(true); }
+                            _ => {}
+                        }
+                    }
+
+                    instance_data.plugin.param_changed(&mut instance_data.params, &this.gyroflow_plugin.manager_cache, param, reason == Change::UserEdited).map_err(|e| {
+                        log::error!("param_changed error: {e:?}");
+                        Error::InvalidAction
+                    })?;
+                    // Browse / OpenRecentProject both internally call `set_string(ProjectPath, new)`
+                    // via common::param_changed. The host then fires another InstanceChanged for
+                    // ProjectPath — we pre-register the new value here so that followup event
+                    // is consumed by the `expected_internal_project_path` discriminator instead of
+                    // being misclassified as a paste. Only read ProjectPath when we know one of
+                    // these buttons just ran, otherwise we'd be calling get_string for every event.
+                    if matches!(param, Params::Browse | Params::OpenRecentProject) {
+                        let new_pp = instance_data
+                            .params
+                            .get_string(Params::ProjectPath)
+                            .unwrap_or_default();
+                        if !new_pp.is_empty() {
+                            if _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro") {
+                                log::info!(target: "jianying_ofx", "Project path set by {param:?}: {new_pp}");
+                            }
+                            instance_data.expected_internal_project_path = Some(new_pp);
+                        }
+                    }
+                    if param == Params::InputRotation {
+                        let project_rotation = openfx_project_rotation(
+                            &mut instance_data.project_video_rotation,
+                            instance_data.plugin.original_project_rotation,
+                            instance_data.params.get_f64(Params::Rotation).unwrap_or_default(),
+                        );
+                        // Undo any FillCrop/CenterCrop/Stretch mutation first: the rotation
+                        // override must operate on the clean baseline, and the snapshot-clearing
+                        // below would otherwise adopt the mode-mutated state as the new baseline
+                        // (baking in a crop computed for the pre-rotation aspect).
+                        instance_data.restore_host_input_sizing_baseline();
+                        if apply_openfx_input_rotation_override_to_managers(
+                            instance_data.is_fusion_page,
+                            project_rotation,
+                            &mut instance_data.params,
+                            &mut instance_data.plugin.managers,
+                        ).map_err(|e| {
+                            log::error!("input rotation override error: {e:?}");
+                            Error::InvalidAction
+                        })? {
+                            let use_gyroflows_keyframes = instance_data.params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
+                            let num_frames = instance_data.plugin.num_frames;
+                            let fps = instance_data.plugin.fps.max(1.0);
+                            instance_data.plugin.cache_keyframes(&instance_data.params, use_gyroflows_keyframes, num_frames, fps);
+                        }
+                        // InputRotation changes `stab.params.video_rotation` AND swaps
+                        // `stab.params.output_size` via `apply_openfx_input_rotation_override_to_managers`.
+                        // After the first param edit `ever_changed` is true, so subsequent
+                        // InputRotation changes do NOT trigger `clear_stab` — the override is
+                        // applied in-place on the existing stab Arc that the next render will
+                        // reuse (same_stab=true). The stale `pre_mode_output_size` snapshot from
+                        // before the override would then drive `apply`'s restore branch to revert
+                        // the swap, leaving `output_size` back to the pre-rotation horizontal
+                        // value while `video_rotation` stays at 90 — visible as picture offset
+                        // (Fit mode) or wrong crop direction (FillCrop / CenterCrop). Clearing
+                        // the snapshots forces the next apply to re-snapshot from the freshly
+                        // overridden state so restore is a no-op for the rotation override.
+                        instance_data.applied_host_input_sizing = None;
+                        instance_data.last_applied_stab = None;
+                        instance_data.pre_mode_size = None;
+                        instance_data.pre_mode_output_size = None;
+                        instance_data.pre_mode_camera_matrix = None;
+                        instance_data.pre_mode_calib_dimension = None;
+                    }
+                } else {
+                    let name = name;
+                    // Hidden paste-preserve shadow params (*ManuallyEdited) intentionally have no
+                    // handler arm — they only exist for snapshot/merge; keep them out of the
+                    // error log (pre-existing noise: "Unknown param name: InputRotationManuallyEdited").
+                    if !name.ends_with("ManuallyEdited") {
+                        log::error!("Unknown param name: {:?}", name);
+                    }
+                }
+
+                OK
+
+}
+
 impl Execute for GyroflowPlugin {
     #[allow(clippy::float_cmp)]
     fn execute(&mut self, _plugin_context: &PluginContext, action: &mut Action) -> Result<Int> {
         use Action::*;
+        let is_jianying = _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro");
 
         if matches!(action, Unload) { update_notice::shutdown(); }
         if let InstanceChanged(ref mut effect, _) | GetClipPreferences(ref mut effect, _) = *action {
@@ -1829,7 +2244,19 @@ impl Execute for GyroflowPlugin {
                 // path; this line settles the host-behavior question per session.
                 static ISIDENTITY_SEEN: std::sync::Once = std::sync::Once::new();
                 ISIDENTITY_SEEN.call_once(|| log::info!("IsIdentity action dispatched by host"));
+                let is_jianying = _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro");
+                // Jianying can skip Render entirely for an unbound identity. Its next
+                // non-identity process sends a legal End before Render, where binding is adopted.
+                if is_jianying && discover_jianying_project(effect)?.is_some() { return REPLY_DEFAULT; }
                 let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                if is_jianying {
+                    let time = in_args.get_time()?;
+                    if instance_data.params.project_path.get_value_at_time(time)?.is_empty() {
+                        out_args.set_name(&image_effect_simple_source_clip_name())?;
+                        out_args.set_time(time)?;
+                        return OK;
+                    }
+                }
                 // The Fusion page has no timeline item; the env gates keep both
                 // rollback contracts (HOST_TRIM=0 / KEEP_PROJECT_TRIM=1) intact —
                 // with either active this arm must behave as if it did not exist.
@@ -1865,7 +2292,7 @@ impl Execute for GyroflowPlugin {
                 if speed_stretch != 1.0 {
                     return REPLY_DEFAULT;
                 }
-                let timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch);
+                let timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch, is_jianying);
                 if stab.params.read().get_source_timestamp_at_ramped_timestamp(timestamp_us) != timestamp_us {
                     return REPLY_DEFAULT;
                 }
@@ -1894,6 +2321,15 @@ impl Execute for GyroflowPlugin {
             }
 
             Render(ref mut effect, ref in_args) => {
+                if is_jianying {
+                    let instance: &mut InstanceData = effect.get_instance_data()?;
+                    let host_fps = instance.source_clip.get_frame_rate()?;
+                    if !host_fps.is_finite() || host_fps <= 0.0 { return Err(Error::InvalidValue); }
+                    instance.params.fields.host_fps = host_fps;
+                    instance.jianying_protocol.time = in_args.get_time()?;
+                    instance.params.fields.buffer_host_writes = true;
+                }
+                let result = (|| -> Result<Int> {
                 let _time = std::time::Instant::now();
 
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -1910,6 +2346,11 @@ impl Execute for GyroflowPlugin {
 
                 let time = in_args.get_time()?;
                 let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                let is_jianying = _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro");
+                if is_jianying {
+                    static FIRST: std::sync::Once = std::sync::Once::new();
+                    FIRST.call_once(|| log::info!(target: "jianying_ofx", "Render: OpenGL={:?} CUDA={:?} Metal={:?} OpenCL={:?}", in_args.get_opengl_enabled(), in_args.get_cuda_enabled(), in_args.get_metal_enabled(), in_args.get_opencl_enabled()));
+                }
 
                 if let Some(path) = instance_data.file_path.take() {
                     let project_path = instance_data.params.get_string(Params::ProjectPath).unwrap_or_default();
@@ -2080,15 +2521,32 @@ impl Execute for GyroflowPlugin {
                 // until the FlipX trigger fires another render with fuscript ready.
 
                 let output_image = if in_args.get_opengl_enabled().unwrap_or_default() {
-                    instance_data.output_clip.load_texture_mut(time, None)?
+                    instance_data.output_clip.load_texture_mut(time, None)
                 } else {
-                    instance_data.output_clip.get_image_mut(time)?
+                    instance_data.output_clip.get_image_mut(time)
                 };
+                let output_image = output_image.inspect_err(|error| {
+                    if is_jianying {
+                        static FIRST: std::sync::Once = std::sync::Once::new();
+                        FIRST.call_once(|| log::warn!(target: "jianying_ofx", "Fetching output image failed: {error:?}"));
+                    }
+                })?;
                 let output_image = output_image.borrow_mut();
 
-                let output_rect: RectI = output_image.get_region_of_definition()?;
+                let output_rect: RectI = if is_jianying {
+                    output_image.get_region_of_definition().or_else(|error| {
+                        static FIRST: std::sync::Once = std::sync::Once::new();
+                        FIRST.call_once(|| log::warn!(target: "jianying_ofx", "Output region unavailable: {error:?}; using image bounds"));
+                        output_image.get_bounds()
+                    })?
+                } else {
+                    output_image.get_region_of_definition()?
+                };
 
-                let stab = instance_data.stab_manager(&self.gyroflow_plugin.manager_cache, output_rect, loading_pending_video_file)?;
+                instance_data.params.fields.render_time = is_jianying.then_some(time);
+                let stab = instance_data.stab_manager(&self.gyroflow_plugin.manager_cache, output_rect, loading_pending_video_file);
+                instance_data.params.fields.render_time = None;
+                let stab = stab?;
 
                 // plugins-host-timeline-trim: the stabilization window follows the host
                 // item's source bounds when the item is actually trimmed; an untrimmed
@@ -2305,11 +2763,6 @@ impl Execute for GyroflowPlugin {
                     live_stretch,
                     raw_stretch,
                 );
-                let (has_accurate_timestamps, has_offsets) = {
-                    let gyro = stab.gyro.read();
-                    let md = gyro.file_metadata.read();
-                    (md.has_accurate_timestamps, !gyro.get_offsets().is_empty())
-                };
 
                 let mut speed_stretch = 1.0;
                 let mut time_adj = 0.0;
@@ -2321,16 +2774,12 @@ impl Execute for GyroflowPlugin {
                     }
                 }
 
-                if !has_accurate_timestamps && !has_offsets {
-                    instance_data.plugin.set_status(&mut instance_data.params, gyroflow_plugin_base::t!("status.not_synced"), gyroflow_plugin_base::t!("status.not_synced_hint"), false);
-                } else {
-                    instance_data.plugin.set_status(&mut instance_data.params, gyroflow_plugin_base::t!("status.ok"), gyroflow_plugin_base::t!("status.ok"), true);
-                }
+                update_synchronization_status(&mut instance_data.plugin, &mut instance_data.params, &stab);
 
                 let mut time = time;
                 //let time_adj = if instance_data.is_fusion_page { instance_data.params.fusion_start_frame.get_value().unwrap_or_default() } else { 0.0 };
                 time -= time_adj;
-                let mut timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch);
+                let mut timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch, is_jianying);
 
                 // log::info!("fps: {fps:?}, src_fps: {src_fps:?}, speed_stretch: {speed_stretch:.6}, time: {time:?}, timestamp_us: {timestamp_us:?}");
 
@@ -2343,7 +2792,7 @@ impl Execute for GyroflowPlugin {
 
                 if source_timestamp_us != timestamp_us {
                     time = (source_timestamp_us as f64 / speed_stretch / 1_000_000.0 * src_fps).round();
-                    timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch);
+                    timestamp_us = ofx_source_timestamp_us(time, src_fps, fps, speed_stretch, is_jianying);
                 }
 
                 // plugins-host-timeline-trim D7: passthrough verdict on the FINAL
@@ -2380,10 +2829,15 @@ impl Execute for GyroflowPlugin {
                 let source_clip_pixel_aspect_ratio = instance_data.source_clip.get_pixel_aspect_ratio().ok();
                 let source_image_pixel_aspect_ratio = source_image.get_pixel_aspect_ratio().ok();
 
-                let source_rect: RectI = source_image.get_region_of_definition()?;
+                let source_rect: RectI = if is_jianying {
+                    source_image.get_region_of_definition().or_else(|_| source_image.get_bounds())?
+                } else {
+                    source_image.get_region_of_definition()?
+                };
 
-                let src_stride = source_image.get_row_bytes()? as usize;
-                let out_stride = output_image.get_row_bytes()? as usize;
+                let open_gl = in_args.get_opengl_enabled().unwrap_or_default();
+                let src_stride = if is_jianying && open_gl { 0 } else { source_image.get_row_bytes()? as usize };
+                let out_stride = if is_jianying && open_gl { 0 } else { output_image.get_row_bytes()? as usize };
                 let mut src_size = ((source_rect.x2 - source_rect.x1) as usize, (source_rect.y2 - source_rect.y1) as usize, src_stride);
                 let mut out_size = ((output_rect.x2 - output_rect.x1) as usize, (output_rect.y2 - output_rect.y1) as usize, out_stride);
 
@@ -2520,8 +2974,33 @@ impl Execute for GyroflowPlugin {
                 // log::debug!("src_size: {src_size:?} | src_rect: {src_rect:?}");
                 // log::debug!("out_size: {out_size:?} | out_rect: {out_rect:?}");
 
+                let directx_enabled: i32 = RawGetter::get_at(in_args, c"NiYienImageEffectPropD3D11Enabled".as_ptr(), 0).unwrap_or(0);
                 let buffers =
-                    if in_args.get_opencl_enabled().unwrap_or_default() {
+                    if is_jianying && directx_enabled != 0 {
+                        #[cfg(not(target_os = "windows"))]
+                        { None }
+                        #[cfg(target_os = "windows")]
+                        {
+                            use std::ffi::c_void;
+                            let src_texture: *mut c_void = RawGetter::get_at(&*source_image, c"NiYienImagePropD3D11Texture".as_ptr(), 0)?;
+                            let src_device: *mut c_void = RawGetter::get_at(&*source_image, c"NiYienImagePropD3D11Device".as_ptr(), 0)?;
+                            let src_context: *mut c_void = RawGetter::get_at(&*source_image, c"NiYienImagePropD3D11DeviceContext".as_ptr(), 0)?;
+                            let out_texture: *mut c_void = RawGetter::get_at(&*output_image, c"NiYienImagePropD3D11Texture".as_ptr(), 0)?;
+                            let out_device: *mut c_void = RawGetter::get_at(&*output_image, c"NiYienImagePropD3D11Device".as_ptr(), 0)?;
+                            let out_context: *mut c_void = RawGetter::get_at(&*output_image, c"NiYienImagePropD3D11DeviceContext".as_ptr(), 0)?;
+                            if [src_texture, src_device, src_context, out_texture, out_device, out_context].iter().any(|p| p.is_null()) {
+                                return FAILED;
+                            }
+                            static FIRST_DIRECTX: std::sync::Once = std::sync::Once::new();
+                            FIRST_DIRECTX.call_once(|| log::info!(target: "jianying_ofx", "DirectX11 buffers: src_size={src_size:?} out_size={out_size:?}"));
+                            // The wrapper supplies non-shared textures; the core copies through its cached shared textures.
+                            Some((
+                                BufferSource::DirectX11 { texture: src_texture, device: src_device, device_context: src_context },
+                                BufferSource::DirectX11 { texture: out_texture, device: out_device, device_context: out_context },
+                                true
+                            ))
+                        }
+                    } else if in_args.get_opencl_enabled().unwrap_or_default() {
                         use std::ffi::c_void;
                         let queue = in_args.get_opencl_command_queue()? as *mut c_void;
                         Some((
@@ -2627,6 +3106,8 @@ impl Execute for GyroflowPlugin {
                         gyroflow_plugin_base::widen_host_trim_for_render(&stab, timestamp_us);
                     }
 
+                    if is_jianying { prepare_jianying_gpu(&stab, &buffers)?; }
+
                     let processed = match output_image.get_pixel_depth()? {
                         BitDepth::None  => { return FAILED; },
                         BitDepth::Byte  => stab.process_pixels::<RGBA8>  (timestamp_us, None, &mut buffers),
@@ -2635,7 +3116,11 @@ impl Execute for GyroflowPlugin {
                         BitDepth::Float => stab.process_pixels::<RGBAf>  (timestamp_us, None, &mut buffers)
                     };
                     match processed {
-                        Ok(_) => {
+                        Ok(info) => {
+                            if is_jianying && !info.backend.eq_ignore_ascii_case("wgpu") {
+                                log::error!(target: "jianying_ofx", "Jianying requires WGPU; processing returned backend={}", info.backend);
+                                return FAILED;
+                            }
                             // log::info!("Rendered | {}x{} in {:.2}ms: {:?}", src_size.0, src_size.1, _time.elapsed().as_micros() as f64 / 1000.0, _);
                             OK
                         },
@@ -2647,6 +3132,19 @@ impl Execute for GyroflowPlugin {
                 } else {
                     FAILED
                 }
+                })();
+                if is_jianying {
+                    let pending = {
+                        let instance: &mut InstanceData = effect.get_instance_data()?;
+                        instance.params.fields.buffer_host_writes = false;
+                        !instance.params.fields.pending.is_empty()
+                    };
+                    if pending {
+                        let mut properties: EffectInstance = effect.properties()?;
+                        <i32 as RawSetter<_>>::set_at(&mut properties, c"OfxPropParamSetNeedsSyncing".as_ptr(), 0, &1)?;
+                    }
+                }
+                result
             }
 
             CreateInstance(ref mut effect) => {
@@ -2657,6 +3155,9 @@ impl Execute for GyroflowPlugin {
                 let output_clip = effect.get_output_clip()?;
 
                 let mut instance_data = InstanceData {
+                    jianying_protocol: if is_jianying { super::jianying_protocol::Protocol::new(&param_set)? } else { Default::default() },
+                    #[cfg(target_os = "windows")]
+                    jianying_autoload: Default::default(),
                     source_clip,
                     output_clip,
                     supports_output_size: true,
@@ -2743,7 +3244,7 @@ impl Execute for GyroflowPlugin {
                         ever_changed:                false,
                         opencl_disabled:             false,
                         cache_keyframes_every_frame: true,
-                        framebuffer_inverted:        true,
+                        framebuffer_inverted:        _plugin_context.get_host().get_name().as_deref().ok() != Some("com.lemon.lvpro"),
                         anamorphic_adjust_size:      true,
                         always_set_input_rotation:   false,
                         auto_disable_stretch:        true,
@@ -2788,8 +3289,10 @@ impl Execute for GyroflowPlugin {
                     pre_mode_calib_dimension:         None,
                     host_input_sizing_stretch_warned: false,
                 };
+                instance_data.params.fields.is_jianying = is_jianying;
                 let mut instance_id = instance_data.params.get_string(Params::InstanceId).unwrap_or_default();
                 instance_data.plugin.initialize_instance_id(&mut instance_id);
+                if is_jianying { instance_data.plugin.reload_values_from_project = false; }
                 let _ = instance_data.params.set_string(Params::InstanceId, &instance_id);
 
                 let props: EffectInstance = effect.properties()?;
@@ -2898,190 +3401,43 @@ impl Execute for GyroflowPlugin {
                 }
 
                 effect.set_instance_data(instance_data)?;
+                if is_jianying {
+                    self.commit_jianying(_plugin_context, effect, None)?;
+                }
                 let _ = refresh_plugin_update_notice(effect, _plugin_context);
 
                 OK
             }
-            InstanceChanged(ref mut effect, ref mut in_args) => {
-                if in_args.get_name()? == PLUGIN_UPDATE_GROUP { return OK; }
-                let instance_data: &mut InstanceData = effect.get_instance_data()?;
-                if in_args.get_name()? == "LoadCurrent" {
-                    CurrentFileInfo::query(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(self.host_input_sizing_drt.clone()));
-                }
-                // §8.2: re-query fuscript on ReloadProject so a user that just toggled Resolve's
-                // mismatched-resolution setting between renders can have the new value picked up
-                // without re-clicking "LoadCurrent". Silent — ReloadProject is a quiet refresh,
-                // we don't want a dialog if fuscript happens to fail. Also clear the
-                // idempotency marker so the resolved mode change is honored on the next render
-                // without waiting for a stab rebuild.
-                if in_args.get_name()? == "ReloadProject" && CurrentFileInfo::is_available() {
-                    CurrentFileInfo::query_silent(instance_data.current_file_info.clone(), instance_data.current_file_info_pending.clone(), Some(self.host_input_sizing_drt.clone()));
-                    instance_data.applied_host_input_sizing = None;
-                }
-                // §2.5 + §7.2: handle the OFX-only HostInputSizing dropdown before the
-                // FromStr-into-`Params` lookup (it's intentionally NOT in the common enum).
-                // The UI dropdown is hidden (`set_secret(true)`) but the param is still defined so
-                // paste round-trips serialize it. Clear `applied_host_input_sizing` so the next
-                // render re-applies with the new mode (otherwise the idempotency guard would skip
-                // the apply and the lens/size baked for the previous mode would persist).
-                // Paste shadow is NOT cleared — `HostInputSizing` is OpenFX-only and was never
-                // on the paste-preservable list.
-                if in_args.get_name()? == "HostInputSizing" {
-                    instance_data.applied_host_input_sizing = None;
-                    if in_args.get_change_reason()? == Change::UserEdited {
-                        log::info!(target: "host_input_sizing",
-                            "HostInputSizing changed by user; will re-evaluate on next render");
-                    }
-                    return OK;
-                }
-                // Hidden persistence param. Plugin-initiated writes (mirror block in Render)
-                // and Resolve-initiated writes (paste/.drp restore) both end up here. Either
-                // way the param is pure storage — the runtime mismatch_mode comes from the
-                // global cache / hidden-field fallback at CreateInstance — so this event has
-                // no work to do beyond suppressing the `Unknown param name` log line below.
-                if in_args.get_name()? == "DetectedMismatchMode" || in_args.get_name()? == "DetectedHostTrim" {
-                    return OK;
-                }
-                if in_args.get_name()? == "Source" || in_args.get_name()? == "Output" || in_args.get_name()? == "ResolveUseAlphaForTrackCompositing" {
-                    log::info!("InstanceChanged {:?} {:?}", in_args.get_name()?, in_args.get_change_reason()?);
-                    return OK;
-                }
-
-                if let Ok(param) = std::str::FromStr::from_str(in_args.get_name()?.as_str()) {
-                    if param == Params::OutputSizeToTimeline {
-                        let rect = instance_data.source_clip.get_region_of_definition(0.0)?;
-                        instance_data.plugin.timeline_size = ((rect.x2 - rect.x1) as usize, (rect.y2 - rect.y1) as usize);
-                    }
-                    if matches!(
-                        param,
-                        Params::ProjectPath | Params::ReloadProject | Params::LoadCurrent | Params::OpenRecentProject | Params::Browse
-                    ) {
-                        instance_data.project_video_rotation = None;
-                    }
-                    // Live paste detection: when a Resolve "paste node attributes" lands B's
-                    // ProjectPath onto this (A's) instance, the host fires `InstanceChanged(
-                    // ProjectPath, Plugin)`. Plugin-initiated writes pre-register their value in
-                    // `expected_internal_project_path`, so a value that doesn't match has come
-                    // from outside (paste). We mark `paste_detected` and defer the actual
-                    // snapshot + reload to the next `stab_manager` call so all the other pasted
-                    // params have settled into host first.
-                    // NOTE: only read host.ProjectPath inside this branch to keep the FFI surface
-                    // tight — calling `get_string(ProjectPath)` on every InstanceChanged (even for
-                    // non-ProjectPath params) is what triggered Resolve's AV crash earlier.
-                    if param == Params::ProjectPath {
-                        let current_pp = instance_data
-                            .params
-                            .get_string(Params::ProjectPath)
-                            .unwrap_or_default();
-                        if instance_data.expected_internal_project_path.as_deref() == Some(current_pp.as_str()) {
-                            instance_data.expected_internal_project_path = None;
-                        } else if !current_pp.is_empty() {
-                            instance_data.paste_detected = true;
-                        }
-                    }
-                    if clear_paste_shadow_for_explicit_reload(param) {
-                        // Explicit user request to re-derive A from disk: clear all five host
-                        // manual-edit flags so the next paste correctly sees "no manual edits"
-                        // and the reload's project default applies cleanly.
-                        let _ = instance_data.input_rotation_manually_edited.set_value(false);
-                        let _ = instance_data.smoothness_manually_edited.set_value(false);
-                        let _ = instance_data.lens_correction_strength_manually_edited.set_value(false);
-                        let _ = instance_data.horizon_lock_amount_manually_edited.set_value(false);
-                        let _ = instance_data.zoom_mode_manually_edited.set_value(false);
-                    }
-
-                    if in_args.get_change_reason()? == Change::UserEdited {
-                        // The user dragged a slider or picked a value for one of the five
-                        // paste-preservable params: set the host flag so when this node is
-                        // later copy/pasted *out* (A becomes the "B" source for another node C),
-                        // the manual-edit intent propagates through paste.
-                        match param {
-                            Params::Smoothness                => { let _ = instance_data.smoothness_manually_edited.set_value(true); }
-                            Params::LensCorrectionStrength    => { let _ = instance_data.lens_correction_strength_manually_edited.set_value(true); }
-                            Params::HorizonLockAmount         => { let _ = instance_data.horizon_lock_amount_manually_edited.set_value(true); }
-                            Params::ZoomMode | Params::UseDynamicZoom | Params::UseStaticZoom => { let _ = instance_data.zoom_mode_manually_edited.set_value(true); }
-                            Params::InputRotation             => { let _ = instance_data.input_rotation_manually_edited.set_value(true); }
-                            _ => {}
-                        }
-                    }
-
-                    instance_data.plugin.param_changed(&mut instance_data.params, &self.gyroflow_plugin.manager_cache, param, in_args.get_change_reason()? == Change::UserEdited).map_err(|e| {
-                        log::error!("param_changed error: {e:?}");
-                        Error::InvalidAction
-                    })?;
-                    // Browse / OpenRecentProject both internally call `set_string(ProjectPath, new)`
-                    // via common::param_changed. The host then fires another InstanceChanged for
-                    // ProjectPath — we pre-register the new value here so that followup event
-                    // is consumed by the `expected_internal_project_path` discriminator instead of
-                    // being misclassified as a paste. Only read ProjectPath when we know one of
-                    // these buttons just ran, otherwise we'd be calling get_string for every event.
-                    if matches!(param, Params::Browse | Params::OpenRecentProject) {
-                        let new_pp = instance_data
-                            .params
-                            .get_string(Params::ProjectPath)
-                            .unwrap_or_default();
-                        if !new_pp.is_empty() {
-                            instance_data.expected_internal_project_path = Some(new_pp);
-                        }
-                    }
-                    if param == Params::InputRotation {
-                        let project_rotation = openfx_project_rotation(
-                            &mut instance_data.project_video_rotation,
-                            instance_data.plugin.original_project_rotation,
-                            instance_data.params.get_f64(Params::Rotation).unwrap_or_default(),
-                        );
-                        // Undo any FillCrop/CenterCrop/Stretch mutation first: the rotation
-                        // override must operate on the clean baseline, and the snapshot-clearing
-                        // below would otherwise adopt the mode-mutated state as the new baseline
-                        // (baking in a crop computed for the pre-rotation aspect).
-                        instance_data.restore_host_input_sizing_baseline();
-                        if apply_openfx_input_rotation_override_to_managers(
-                            instance_data.is_fusion_page,
-                            project_rotation,
-                            &mut instance_data.params,
-                            &mut instance_data.plugin.managers,
-                        ).map_err(|e| {
-                            log::error!("input rotation override error: {e:?}");
-                            Error::InvalidAction
-                        })? {
-                            let use_gyroflows_keyframes = instance_data.params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
-                            let num_frames = instance_data.plugin.num_frames;
-                            let fps = instance_data.plugin.fps.max(1.0);
-                            instance_data.plugin.cache_keyframes(&instance_data.params, use_gyroflows_keyframes, num_frames, fps);
-                        }
-                        // InputRotation changes `stab.params.video_rotation` AND swaps
-                        // `stab.params.output_size` via `apply_openfx_input_rotation_override_to_managers`.
-                        // After the first param edit `ever_changed` is true, so subsequent
-                        // InputRotation changes do NOT trigger `clear_stab` — the override is
-                        // applied in-place on the existing stab Arc that the next render will
-                        // reuse (same_stab=true). The stale `pre_mode_output_size` snapshot from
-                        // before the override would then drive `apply`'s restore branch to revert
-                        // the swap, leaving `output_size` back to the pre-rotation horizontal
-                        // value while `video_rotation` stays at 90 — visible as picture offset
-                        // (Fit mode) or wrong crop direction (FillCrop / CenterCrop). Clearing
-                        // the snapshots forces the next apply to re-snapshot from the freshly
-                        // overridden state so restore is a no-op for the rotation override.
-                        instance_data.applied_host_input_sizing = None;
-                        instance_data.last_applied_stab = None;
-                        instance_data.pre_mode_size = None;
-                        instance_data.pre_mode_output_size = None;
-                        instance_data.pre_mode_camera_matrix = None;
-                        instance_data.pre_mode_calib_dimension = None;
-                    }
-                } else {
-                    let name = in_args.get_name()?;
-                    // Hidden paste-preserve shadow params (*ManuallyEdited) intentionally have no
-                    // handler arm — they only exist for snapshot/merge; keep them out of the
-                    // error log (pre-existing noise: "Unknown param name: InputRotationManuallyEdited").
-                    if !name.ends_with("ManuallyEdited") {
-                        log::error!("Unknown param name: {:?}", name);
-                    }
-                }
-
+            BeginInstanceChanged(ref mut effect, _) => {
+                if !is_jianying { return REPLY_DEFAULT; }
+                effect.get_instance_data::<InstanceData>()?.jianying_protocol.begin()?;
                 OK
+            }
+            InstanceChanged(ref mut effect, ref mut in_args) => {
+                let name = in_args.get_name()?;
+                let reason = in_args.get_change_reason()?;
+                if is_jianying {
+                    effect.get_instance_data::<InstanceData>()?.jianying_protocol.changed(&name, reason, in_args.get_time()?);
+                    OK
+                } else {
+                    process_parameter_change(self, _plugin_context, effect, &name, reason)
+                }
+            }
+            EndInstanceChanged(ref mut effect, _) => {
+                if !is_jianying { return REPLY_DEFAULT; }
+                let plan = effect.get_instance_data::<InstanceData>()?.jianying_protocol.end()?;
+                if let Some(plan) = plan { self.commit_jianying(_plugin_context, effect, Some(plan)) } else { OK }
+            }
+            SyncPrivateData(ref mut effect) => {
+                if !is_jianying { return REPLY_DEFAULT; }
+                if effect.get_instance_data::<InstanceData>()?.jianying_protocol.committing { return OK; }
+                self.commit_jianying(_plugin_context, effect, None)
             }
 
             GetRegionOfDefinition(ref mut effect, ref in_args, ref mut out_args) => {
+                if _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro") {
+                    return REPLY_DEFAULT;
+                }
                 let time = in_args.get_time()?;
                 let instance_data = effect.get_instance_data::<InstanceData>()?;
                 let rod = instance_data.source_clip.get_region_of_definition(time)?;
@@ -3213,8 +3569,20 @@ impl Execute for GyroflowPlugin {
                     OK
                 }
 
-                for param in arrange_openfx_params(GyroflowPluginBase::get_param_definitions()) {
+                let definitions = arrange_openfx_params(GyroflowPluginBase::get_param_definitions());
+                let definitions = if is_jianying { super::jianying_protocol::arrange_definitions(definitions) } else { definitions };
+                let mut page_children = if is_jianying { super::jianying_protocol::page_children(&definitions) } else { Vec::new() };
+                for param in definitions {
                     define_param(&mut param_set, param, None)?;
+                }
+                if is_jianying {
+                    for name in ["Status", "LoadedProject", "LoadedLens", "LoadedPreset", "TranslationStatus"] {
+                        let mut parameter = param_set.parameter::<String>(name)?;
+                        <str as RawSetter<_>>::set_at(&mut parameter, c"OfxParamPropStringMode".as_ptr(), 0, "OfxParamStringIsLabel")?;
+                        for property in [c"OfxParamPropAnimates", c"OfxParamPropEvaluateOnChange", c"OfxParamPropCanUndo"] {
+                            <i32 as RawSetter<_>>::set_at(&mut parameter, property.as_ptr(), 0, &0)?;
+                        }
+                    }
                 }
                 define_param(
                     &mut param_set,
@@ -3296,23 +3664,41 @@ impl Execute for GyroflowPlugin {
                     let _ = param.set_script_name("HostInputSizing");
                 }
 
-                param_set
-                    .param_define_page("Main")?
-                    .set_children(&[
+                if is_jianying {
+                    page_children.extend([
+                        "DetectedHostTrim", "DetectedMismatchMode", "HostInputSizing",
+                        "InputRotationManuallyEdited", "SmoothnessManuallyEdited",
+                        "LensCorrectionStrengthManuallyEdited", "HorizonLockAmountManuallyEdited",
+                        "ZoomModeManuallyEdited",
+                    ]);
+                    page_children.retain(|name| param_set.parameter::<String>(name).is_ok());
+                    param_set.param_define_page("Main")?.set_children(&page_children)?;
+                } else {
+                    param_set.param_define_page("Main")?.set_children(&[
                         PLUGIN_UPDATE_GROUP,
                         "ProjectGroup",
                         "AdjustGroup",
                         "KeyframesGroup",
                         "ToggleOverview", "DontDrawOutside", "IncludeProjectData",
                     ])?;
+                }
 
                 OK
             }
 
-            OpenGLContextAttached(ref mut _effect) => { self.gyroflow_plugin.initialize_gpu_context();   OK },
+            OpenGLContextAttached(ref mut _effect) => {
+                if !is_jianying { self.gyroflow_plugin.initialize_gpu_context(); }
+                OK
+            },
             OpenGLContextDetached(ref mut _effect) => { self.gyroflow_plugin.deinitialize_gpu_context(); OK },
 
             Describe(ref mut effect) => {
+                #[cfg(not(target_os = "windows"))]
+                if is_jianying {
+                    log::error!(target: "jianying_ofx", "The Jianying adapter is currently supported only on Windows; macOS requires separate host and GPU validation");
+                    // ofx-rs does not expose kOfxStatErrUnsupported from the pinned OpenFX headers.
+                    return Ok(5);
+                }
                 gyroflow_plugin_base::i18n::init();
                 let supports_opencl = _plugin_context.get_host().get_opencl_render_supported().unwrap_or_default() == "true";
                 let supports_opengl = _plugin_context.get_host().get_opengl_render_supported().unwrap_or_default() == "true";
@@ -3326,7 +3712,7 @@ impl Execute for GyroflowPlugin {
                 log::info!("Host supports OpenCL: {:?}", supports_opencl);
                 log::info!("Host supports CUDA: {:?}", supports_cuda);
                 log::info!("Host supports Metal: {:?}", supports_metal);
-                if !supports_opencl && !supports_opengl {
+                if !is_jianying && !supports_opencl && !supports_opengl {
                     unsafe { std::env::set_var("NO_OPENCL", "1") };
                 }
                 if _plugin_context.get_host().get_name().as_deref().ok() == Some("com.vegascreativesoftware.vegas") {
@@ -3359,6 +3745,18 @@ impl Execute for GyroflowPlugin {
                 effect_properties.set_render_thread_safety(ImageEffectRender::FullySafe)?;
                 effect_properties.set_supports_multi_resolution(true)?;
                 effect_properties.set_temporal_clip_access(true)?;
+
+                if _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro") {
+                    let angle = c"OfxImageEffectPropAngleRenderSupported".as_ptr();
+                    let value: Result<String> = RawGetter::get_at(&_plugin_context.get_host(), angle, 0);
+                    let set = RawSetter::set_at(&mut effect_properties, angle, 0, "false");
+                    log::info!(target: "jianying_ofx", "ANGLE render capability: host={value:?}, effect={set:?}");
+                    effect_properties.set_opengl_render_supported("false")?;
+                    effect_properties.set_opencl_render_supported("false")?;
+                    effect_properties.set_cuda_render_supported("false")?;
+                    effect_properties.set_metal_render_supported("false")?;
+                    return OK;
+                }
 
                 if supports_opengl && !supports_opencl && !supports_cuda && !supports_metal {
                     // We'll initialize the devices in OpenGLContextAttached
@@ -3395,7 +3793,7 @@ impl Execute for GyroflowPlugin {
 
             Load => {
                 update_notice::available();
-				self.gyroflow_plugin.initialize_log("openfx");
+                self.gyroflow_plugin.initialize_log("openfx");
                 // Remove DRT temp files left behind by crashed sessions (older than an hour).
                 let swept = sweep_temp_files(&std::env::temp_dir(), std::process::id(), 0, std::time::SystemTime::now());
                 log::debug!(target: "host_input_sizing", "host_input_sizing: swept {swept} stale DRT temp file(s) at load");
@@ -4343,13 +4741,58 @@ mod tests {
     // timestamp/speed helpers must reproduce the historical Render math —
     // IsIdentity's verdict is only safe while both paths agree.
     #[test]
+    fn parameter_frame_uses_host_clock_for_jianying_keyframes() {
+        let project_key = TimeType::FrameOrMicrosecond((Some(90.0), Some(1_500_000)));
+        assert_eq!(parameter_frame(project_key.clone(), true, 30.0), 45.0);
+        assert_eq!(parameter_frame(project_key, false, 30.0), 90.0);
+        let sampled_frame = TimeType::FrameOrMicrosecond((Some(60.0), Some(1_001_000)));
+        assert!((parameter_frame(sampled_frame.clone(), true, 30.0) - 30.03).abs() < 1e-12);
+        assert_eq!(parameter_frame(sampled_frame, false, 30.0), 60.0);
+        assert_eq!(parameter_frame(TimeType::Frame(30.53049), true, 30.0), 30.53049);
+    }
+
+    #[test]
     fn ofx_source_timestamp_matches_render_math() {
         // Same-fps path: plain round of time/src_fps.
-        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 1.0), 2_000_000);
+        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 1.0, false), 2_000_000);
         // Mixed-fps path (|src_fps - fps| > 0.01): floor to the target frame grid.
-        assert_eq!(ofx_source_timestamp_us(50.0, 50.0, 25.0, 1.0), 1_000_000);
+        assert_eq!(ofx_source_timestamp_us(50.0, 50.0, 25.0, 1.0, false), 1_000_000);
         // speed_stretch scales the source time.
-        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 2.0), 4_000_000);
+        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 2.0, false), 4_000_000);
+    }
+
+    #[test]
+    fn ofx_source_timestamp_jianying_quantized_capture_times() {
+        let fps = 60_000.0 / 1001.0;
+        // Frame indices 61, 121, 181 and 241 were matched independently against captured source images.
+        for (time, expected, legacy) in [
+            (30.53049, 1_017_683, 1_001_000),
+            (60.56049, 2_018_683, 2_002_000),
+            (90.59049, 3_019_683, 3_003_000),
+            (120.62049, 4_020_683, 4_004_000),
+        ] {
+            assert_eq!(ofx_source_timestamp_us(time, 30.0, fps, 1.0, true), expected);
+            assert_eq!(ofx_source_timestamp_us(time, 30.0, fps, 1.0, false), legacy);
+        }
+    }
+
+    #[test]
+    fn ofx_source_timestamp_jianying_only_snaps_microsecond_quantization() {
+        for speed in [0.5, 1.0, 2.0] {
+            let at = 30.0 / speed;
+            // Half a microsecond is inside the host quantization error; two microseconds is outside.
+            assert_eq!(ofx_source_timestamp_us(at - 30.0 * 0.5e-6, 30.0, 60.0, speed, true), 1_000_000);
+            assert_eq!(ofx_source_timestamp_us(at + 30.0 * 0.5e-6, 30.0, 60.0, speed, true), 1_000_000);
+            assert_eq!(ofx_source_timestamp_us(at - 30.0 * 2.0e-6, 30.0, 60.0, speed, true), 983_333);
+            assert_eq!(ofx_source_timestamp_us(at - 30.0 * 0.5e-6, 30.0, 60.0, speed, false), 983_333);
+        }
+        assert_eq!(ofx_source_timestamp_us(30.49, 30.0, 60.0, 1.0, true), 1_000_000);
+        assert_eq!(ofx_source_timestamp_us(-30.0 * 0.5e-6, 30.0, 60.0, 1.0, true), 0);
+        assert_eq!(ofx_source_timestamp_us(-30.0 * 2.0e-6, 30.0, 60.0, 1.0, true), -16_667);
+        assert_eq!(ofx_source_timestamp_us(30.53049, 30.0, 30.0, 1.0, true), 1_017_683);
+        assert_eq!(ofx_source_timestamp_us(30.53049, 30.0, 30.0, 1.0, false), 1_017_683);
+        // A rounded request beyond the media tail stays beyond the tail; this helper does not clamp it.
+        assert_eq!(ofx_source_timestamp_us(300.5 - 30.0 * 0.5e-6, 30.0, 60.0, 1.0, true), 10_016_667);
     }
 
     #[test]

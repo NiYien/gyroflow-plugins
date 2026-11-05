@@ -68,6 +68,14 @@ jobs:
           just install-deps
           just deploy
 
+      - name: Verify Jianying package (Windows)
+        if: ${{ matrix.targets.type == 'windows' }}
+        env:
+          GYROFLOW_JIANYING_TEST_CORE: ${{ github.workspace }}/target/deploy/gyroflow_ofx.dll
+        run: |
+          python -m unittest tests.test_jianying_package tests.test_jianying_protocol
+          python scripts/build_jianying_package.py --verify target/GyroflowNiyien-Jianying-windows.zip --openfx-package target/GyroflowNiyien-OpenFX-windows.zip
+
       - name: Check macOS signing retries
         if: ${{ matrix.targets.type == 'macos' }}
         run: python3 -m unittest discover -s tests -p test_codesign_with_retry.py
@@ -114,6 +122,12 @@ jobs:
         with:
           name: GyroflowNiyien-OpenFX-${{ matrix.targets.type }}
           path: target/GyroflowNiyien-OpenFX*
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.targets.type == 'windows' }}
+        with:
+          name: GyroflowNiyien-Jianying-windows
+          path: target/GyroflowNiyien-Jianying-windows.zip
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.targets.type == 'windows' }}
         with:
@@ -180,6 +194,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release_artifacts/GyroflowNiyien-OpenFX-windows.zip
+            release_artifacts/GyroflowNiyien-Jianying-windows.zip
             release_artifacts/GyroflowNiyien-OpenFX-linux.zip
             release_artifacts/GyroflowNiyien-OpenFX-macos.dmg
             release_artifacts/GyroflowNiyien-OpenFX-macos.zip

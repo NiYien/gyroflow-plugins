@@ -19,6 +19,9 @@ adobe *param:
 ofx *param:
     just -f openfx/Justfile {{param}}
 
+jianying *param:
+    just -f jianying/Justfile {{param}}
+
 frei0r *param:
     just -f frei0r/Justfile {{param}}
 
@@ -29,6 +32,7 @@ finalcut-deploy:
 deploy:
     {{ if os() == "linux" { "echo 'Skipping Adobe deploy on Linux'" } else { "just -f adobe/Justfile deploy" } }}
     just -f openfx/Justfile deploy
+    {{ if os() == "windows" { "just -f jianying/Justfile package \"" + CARGO_TARGET_DIR + "/deploy/gyroflow_ofx.dll\"" } else { "echo 'Jianying is currently Windows-only'" } }}
     just -f frei0r/Justfile deploy
 
 update:

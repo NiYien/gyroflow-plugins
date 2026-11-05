@@ -67,7 +67,14 @@ pub fn update_ui(params: &mut dyn GyroflowPluginParams, stab: Option<&Stabilizat
         let gyro = s.gyro.read();
         let result = gyro.optical_translation.as_ref()?;
         let ui = *s.optical_ui.read();
-        Some((ui.translation_enabled, ui.translation_settings.auto, result.applies))
+        // A first edit can invalidate the shared manager before the next render applies host values.
+        let (enabled, auto) = if params.get_bool(Params::TranslationInitialized).unwrap_or(false) {
+            (params.get_bool(Params::TranslationEnabled).unwrap_or(ui.translation_enabled),
+             params.get_bool(Params::TranslationAuto).unwrap_or(ui.translation_settings.auto))
+        } else {
+            (ui.translation_enabled, ui.translation_settings.auto)
+        };
+        Some((enabled, auto, result.applies))
     });
     for param in CONTROLS {
         let _ = params.set_visible(param, state.is_some());

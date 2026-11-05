@@ -1,0 +1,9 @@
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+[windows]
+deploy:
+    python "{{justfile_directory()}}/../scripts/build_jianying_package.py"
+
+[windows]
+package core:
+    python "{{justfile_directory()}}/../scripts/build_jianying_package.py" --core "{{core}}"

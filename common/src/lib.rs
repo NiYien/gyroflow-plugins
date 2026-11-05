@@ -1,5 +1,7 @@
 pub mod i18n;
 pub mod update_notice;
+mod loaded_manager;
+pub use loaded_manager::{LoadedContext, LoadedManager, ManagerCache};
 
 use lru::LruCache;
 use parking_lot::{ Mutex, RwLock };
@@ -12,6 +14,7 @@ pub use gyroflow_core;
 pub use rfd;
 pub use parking_lot;
 pub use lru;
+pub use serde_json;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -393,7 +396,7 @@ pub struct GyroflowPluginBase {
     // We should cache managers globally because it's common to have the effect applied to the same clip and cut the clip into multiple pieces
     // We don't want to create a new manager for each piece of the same clip
     // Cache key is specific enough
-    pub manager_cache: Mutex<LruCache<String, Arc<StabilizationManager>>>,
+    pub manager_cache: ManagerCache,
 
     pub context_initialized: bool,
 }
@@ -1205,6 +1208,30 @@ pub fn infer_host_media_prerotation(
 }
 
 impl GyroflowPluginBaseInstance {
+    fn adopt_loaded_context(&mut self, context: &LoadedContext) {
+        self.original_video_size = context.original_video_size;
+        self.original_output_size = context.original_output_size;
+        self.original_project_rotation = context.original_project_rotation;
+        self.original_project_trim_ranges.clone_from(&context.original_project_trim_ranges);
+        self.container_media_rotation = context.container_media_rotation;
+        self.num_frames = context.num_frames;
+        self.fps = context.fps;
+        self.has_motion = context.has_motion;
+    }
+
+    fn publish_loaded_names(&self, context: &LoadedContext, params: &mut dyn GyroflowPluginParams) -> PluginResult<()> {
+        for (param, value) in [
+            (Params::LoadedProject, context.loaded_project.as_str()),
+            (Params::LoadedLens, context.loaded_lens.as_str()),
+            (Params::LoadedPreset, context.loaded_preset.as_deref().unwrap_or_default()),
+        ] {
+            if params.get_string(param).ok().as_deref() != Some(value) {
+                params.set_string(param, value)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn update_loaded_state(&mut self, params: &mut dyn GyroflowPluginParams, loaded: bool) {
         let _ = params.set_enabled(Params::Fov, loaded);
         let _ = params.set_enabled(Params::Smoothness, loaded);
@@ -1398,7 +1425,7 @@ impl GyroflowPluginBaseInstance {
         apply_input_rotation_to_stab(project_rotation, input_rotation_index, output_size, stab)
     }
 
-    pub fn stab_manager(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, out_size: (usize, usize), open_gyroflow_if_no_data: bool) -> PluginResult<Arc<StabilizationManager>> {
+    pub fn stab_manager(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &ManagerCache, out_size: (usize, usize), open_gyroflow_if_no_data: bool) -> PluginResult<Arc<StabilizationManager>> {
         let mut disable_stretch = params.get_bool(Params::DisableStretch)?;
 
         let instance_id = params.get_string(Params::InstanceId)?;
@@ -1417,12 +1444,18 @@ impl GyroflowPluginBaseInstance {
         // A render worker may still hold the previous manager after clear_stab.
         // An explicit reload must read the project instead of reusing that manager.
         let cloned = if self.reload_values_from_project { None }
-            else { manager_cache.lock().get(&key).map(Arc::clone) };
-        let stab = if let Some(stab) = cloned {
-            // Cache it in this instance as well
-            if !self.managers.contains(&key) {
+            else { manager_cache.lock().get(&key).cloned() };
+        let stab = if let Some(loaded) = cloned {
+            let stab = loaded.manager;
+            self.adopt_loaded_context(&loaded.context);
+            // The same key may now refer to a replacement published by an explicit reload.
+            if self.managers.peek(&key).map_or(true, |cached| !Arc::ptr_eq(cached, &stab)) {
+                let use_gyroflows_keyframes = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
+                self.cache_keyframes(params, use_gyroflows_keyframes, self.num_frames, self.fps.max(1.0));
                 self.managers.put(key.to_owned(), stab.clone());
+                self.update_loaded_state(params, loaded.context.loaded);
             }
+            self.publish_loaded_names(&loaded.context, params)?;
             self.set_keyframe_provider(&stab);
             translation::load(params, &stab, false)?;
             if translation::apply(params, &stab)? { stab.recompute_blocking(); }
@@ -1432,13 +1465,14 @@ impl GyroflowPluginBaseInstance {
             log::info!("new stab manager for key: {key}");
             // Re-derived below from the source of this build; must not leak across project switches.
             self.container_media_rotation = None;
+            self.original_project_trim_ranges.clear();
             let mut stab = StabilizationManager::default();
             {
                 // Find first lens profile database with loaded profiles
                 let lock = manager_cache.lock();
                 for (_, v) in lock.iter() {
-                    if v.lens_profile_db.read().loaded {
-                        stab.lens_profile_db = v.lens_profile_db.clone();
+                    if v.manager.lens_profile_db.read().loaded {
+                        stab.lens_profile_db = v.manager.lens_profile_db.clone();
                         break;
                     }
                 }
@@ -1524,7 +1558,6 @@ impl GyroflowPluginBaseInstance {
                             params.set_i32(Params::InputRotation, input_rotation_index_from_deg(r))?;
                             stab.params.write().video_rotation = r;
                         }
-                        params.set_string(Params::LoadedProject, &filesystem::get_filename(&filesystem::path_to_url(&path)))?;
                         if !stab.gyro.read().file_metadata.read().has_accurate_timestamps && open_gyroflow_if_no_data {
                             GyroflowPluginBase::open_gyroflow(params.get_string(Params::ProjectPath).ok().as_deref());
                         }
@@ -1591,7 +1624,6 @@ impl GyroflowPluginBaseInstance {
                     msg
                 })?;
                 self.original_project_trim_ranges = clear_imported_project_trim(&stab);
-                params.set_string(Params::LoadedProject, &filesystem::get_filename(&filesystem::path_to_url(&path)))?;
 
                 if self.always_set_input_rotation {
                     // Container-rotation probe. The source video is NOT required here — frames come
@@ -1680,10 +1712,6 @@ impl GyroflowPluginBaseInstance {
                     let keyframes = stab.keyframes.read();
                     let all_keys = keyframes.get_all_keys();
                     params.set_bool(Params::UseGyroflowsKeyframes, !all_keys.is_empty())?;
-                    if let Some(name) = stab.input_file.read().preset_name.clone() {
-                        params.set_string(Params::LoadedPreset, &name)?;
-                    }
-                    params.set_string(Params::LoadedLens, &stab.lens.read().get_display_name())?;
 
                     // Auto-enable DisableStretch if the loaded lens has anamorphic stretch != 1.
                     // Gated by reload_values_from_project (true only on first load / project reload / new lens),
@@ -1703,7 +1731,7 @@ impl GyroflowPluginBaseInstance {
                                         for (ts, v) in keys {
                                             let ts = if k == &KeyframeType::VideoSpeed { gf_params.get_source_timestamp_at_ramped_timestamp(*ts) } else { *ts };
                                             let time = (((ts as f64 / 1000.0) * gf_params.fps) / 1000.0).round();
-                                            params.set_f64_at_time($name, TimeType::Frame(time), v.value * $scale)?;
+                                            params.set_f64_at_time($name, TimeType::FrameOrMicrosecond((Some(time), Some(ts))), v.value * $scale)?;
                                         }
                                     };
                                 }
@@ -1732,7 +1760,11 @@ impl GyroflowPluginBaseInstance {
                 loaded
             };
 
-            self.update_loaded_state(params, loaded);
+            // Preserve the imported context before host geometry and trim adaptation mutate the manager.
+            let loaded_context = Arc::new(LoadedContext::from_import(self, &stab, &path, loaded));
+            self.adopt_loaded_context(&loaded_context);
+            self.publish_loaded_names(&loaded_context, params)?;
+            self.update_loaded_state(params, loaded_context.loaded);
 
             // §11.3: snapshot compute-params inputs immediately after import #1
             // and before the OFX-side mutation block. Captured here (vs inside
@@ -1940,7 +1972,7 @@ impl GyroflowPluginBaseInstance {
             // Successful build — clear any throttle record so a fixed project reloads immediately.
             clear_not_found(&path);
             // Insert to static global cache
-            manager_cache.lock().put(key.to_owned(), stab.clone());
+            manager_cache.lock().put(key.to_owned(), LoadedManager { manager: stab.clone(), context: loaded_context });
             // Cache it in this instance as well
             self.managers.put(key.to_owned(), stab.clone());
 
@@ -1950,7 +1982,7 @@ impl GyroflowPluginBaseInstance {
         Ok(stab)
     }
 
-    pub fn clear_stab(&mut self, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>) {
+    pub fn clear_stab(&mut self, manager_cache: &ManagerCache) {
         let local_keys = self.managers.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
         self.managers.clear();
 
@@ -1958,7 +1990,7 @@ impl GyroflowPluginBaseInstance {
         let mut lock = manager_cache.lock();
         for key in local_keys {
             if let Some(v) = lock.get(&key) {
-                if Arc::strong_count(v) == 1 {
+                if Arc::strong_count(&v.manager) == 1 {
                     lock.pop(&key);
                 }
             }
@@ -1997,7 +2029,7 @@ impl GyroflowPluginBaseInstance {
         }
     }
 
-    pub fn param_changed(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &Mutex<LruCache<String, Arc<StabilizationManager>>>, param: Params, user_edited: bool) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn param_changed(&mut self, params: &mut dyn GyroflowPluginParams, manager_cache: &ManagerCache, param: Params, user_edited: bool) -> Result<(), Box<dyn std::error::Error>> {
         let param = if user_edited {
             if let Some(mode) = zoom_mode_from_action(param) {
                 params.set_i32(Params::ZoomMode, mode)?;
@@ -2012,6 +2044,8 @@ impl GyroflowPluginBaseInstance {
             if !new_path.is_empty() {
                 params.set_string(Params::ProjectPath, &new_path)?;
                 self.reload_values_from_project = true;
+                self.clear_stab(manager_cache);
+                translation::update_ui(params, None);
             }
         }
         if param == Params::LoadLens {
@@ -2047,6 +2081,7 @@ impl GyroflowPluginBaseInstance {
                 params.set_string(Params::ProjectPath, &last_project)?;
                 self.reload_values_from_project = true;
                 self.clear_stab(&manager_cache);
+                translation::update_ui(params, None);
             }
         }
         if param == Params::ProjectPath || param == Params::ReloadProject || param == Params::LoadCurrent || param == Params::DontDrawOutside {
@@ -2054,6 +2089,9 @@ impl GyroflowPluginBaseInstance {
                 self.reload_values_from_project = true;
             }
             self.clear_stab(&manager_cache);
+            if matches!(param, Params::ProjectPath | Params::LoadCurrent) {
+                translation::update_ui(params, None);
+            }
         }
         if param == Params::IncludeProjectData {
             let path = params.get_string(Params::ProjectPath)?;
@@ -2115,6 +2153,10 @@ impl GyroflowPluginBaseInstance {
 
                     params.set_string(Params::Status, t!("status.calculating"))?;
                     if !self.ever_changed {
+                        // Invalidating a shared manager does not remove this project's measured translation.
+                        if let Some((_, stab)) = self.managers.peek_lru() {
+                            translation::update_ui(params, Some(stab));
+                        }
                         self.ever_changed = true;
                         params.set_string(Params::InstanceId, &format!("{}", fastrand::u64(..)))?;
                         self.clear_stab(manager_cache);
@@ -2179,8 +2221,6 @@ impl GyroflowPluginBaseInstance {
             }
             if let Some((_, stab)) = self.managers.peek_lru() {
                 translation::update_ui(params, Some(stab));
-            } else {
-                translation::update_ui(params, None);
             }
         }
 
@@ -2830,7 +2870,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct TestParams {
         strings: BTreeMap<Params, String>,
         bools: BTreeMap<Params, bool>,
@@ -2838,15 +2878,19 @@ mod tests {
         i32s: BTreeMap<Params, i32>,
         visible: BTreeMap<Params, bool>,
         enabled: BTreeMap<Params, bool>,
+        value_writes: Vec<Params>,
+        enabled_writes: Vec<Params>,
+        label_writes: Vec<Params>,
     }
 
     impl GyroflowPluginParams for TestParams {
         fn set_visible(&mut self, param: Params, visible: bool) -> PluginResult<()> { self.visible.insert(param, visible); Ok(()) }
-        fn set_enabled(&mut self, param: Params, enabled: bool) -> PluginResult<()> { self.enabled.insert(param, enabled); Ok(()) }
-        fn set_label(&mut self, _param: Params, _label: &str) -> PluginResult<()> { Ok(()) }
+        fn set_enabled(&mut self, param: Params, enabled: bool) -> PluginResult<()> { self.enabled.insert(param, enabled); self.enabled_writes.push(param); Ok(()) }
+        fn set_label(&mut self, param: Params, _label: &str) -> PluginResult<()> { self.label_writes.push(param); Ok(()) }
         fn set_hint(&mut self, _param: Params, _hint: &str) -> PluginResult<()> { Ok(()) }
 
         fn set_f64(&mut self, param: Params, value: f64) -> PluginResult<()> {
+            self.value_writes.push(param);
             self.f64s.insert(param, value);
             Ok(())
         }
@@ -2857,6 +2901,7 @@ mod tests {
             self.get_f64(param)
         }
         fn set_bool(&mut self, param: Params, value: bool) -> PluginResult<()> {
+            self.value_writes.push(param);
             self.bools.insert(param, value);
             Ok(())
         }
@@ -2867,6 +2912,7 @@ mod tests {
             self.get_bool(param)
         }
         fn set_string(&mut self, param: Params, value: &str) -> PluginResult<()> {
+            self.value_writes.push(param);
             self.strings.insert(param, value.to_owned());
             Ok(())
         }
@@ -2874,6 +2920,7 @@ mod tests {
             Ok(self.strings.get(&param).cloned().unwrap_or_default())
         }
         fn set_i32(&mut self, param: Params, value: i32) -> PluginResult<()> {
+            self.value_writes.push(param);
             self.i32s.insert(param, value);
             Ok(())
         }
@@ -2889,11 +2936,11 @@ mod tests {
         }
     }
 
-    fn cache_with_instance_manager(instance: &mut GyroflowPluginBaseInstance) -> Mutex<LruCache<String, Arc<StabilizationManager>>> {
+    fn cache_with_instance_manager(instance: &mut GyroflowPluginBaseInstance) -> ManagerCache {
         let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(1).unwrap()));
         let stab = Arc::new(StabilizationManager::default());
         instance.managers.put("cached".to_owned(), stab.clone());
-        cache.lock().put("cached".to_owned(), stab);
+        cache.lock().put("cached".to_owned(), LoadedManager::from_unadapted_test_manager(stab));
         cache
     }
 
@@ -2932,9 +2979,46 @@ mod tests {
         translation::load(&mut params, &without, true).unwrap();
         assert!(!params.get_bool(Params::TranslationInitialized).unwrap());
         assert!(!translation::apply(&params, &without).unwrap());
-        translation::update_ui(&mut params, Some(&translation_control_fixture()));
+        let with = translation_control_fixture();
+        translation::load(&mut params, &with, true).unwrap();
+        translation::update_ui(&mut params, Some(&with));
         assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
         translation::update_ui(&mut params, Some(&without));
+        assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
+    }
+
+    #[test]
+    fn translation_controls_first_edit_preserves_visibility_without_mutating_shared_manager() {
+        let shared = Arc::new(translation_control_fixture());
+        let before = *shared.optical_ui.read();
+        let mut instance = GyroflowPluginBaseInstance { reload_values_from_project: false, ..Default::default() };
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        instance.managers.put("shared".into(), shared.clone());
+        cache.lock().put("shared".into(), LoadedManager::from_unadapted_test_manager(shared.clone()));
+        let mut params = TestParams::default();
+        params.set_string(Params::ProjectPath, "translation.gyroflow").unwrap();
+        params.set_string(Params::InstanceId, "shared").unwrap();
+        translation::load(&mut params, &shared, true).unwrap();
+        translation::update_ui(&mut params, Some(&shared));
+
+        params.set_bool(Params::TranslationEnabled, false).unwrap();
+        instance.param_changed(&mut params, &cache, Params::TranslationEnabled, true).unwrap();
+
+        assert!(instance.ever_changed && instance.managers.is_empty());
+        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert!(params.enabled[&Params::TranslationEnabled]);
+        assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
+        assert_eq!(params.get_string(Params::TranslationStatus).unwrap(), t!("status.translation_disabled"));
+        assert_eq!(*shared.optical_ui.read(), before);
+
+        instance.param_changed(&mut params, &cache, Params::ProjectData, true).unwrap();
+        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
+
+        params.set_string(Params::ProjectPath, "").unwrap();
+        instance.param_changed(&mut params, &cache, Params::ProjectPath, true).unwrap();
+        assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
+        assert!(instance.stab_manager(&mut params, &cache, (0, 0), false).is_err());
         assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
     }
 
@@ -3013,10 +3097,23 @@ mod tests {
         let frame = (stab.params.read().frame_count / 2).min(300);
         let timestamp = gyroflow_core::timestamp_at_frame(frame as i32, stab.params.read().fps);
         let original = FrameTransform::at_timestamp(&ComputeParams::from_manager(&stab), timestamp, frame).matrices;
+        assert!(!instance.ever_changed);
         params.set_bool(Params::TranslationEnabled, false).unwrap();
         instance.param_changed(&mut params, &cache, Params::TranslationEnabled, true).unwrap();
+        assert!(instance.managers.is_empty());
+        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert!(params.enabled[&Params::TranslationEnabled]);
+        assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
+        assert_eq!(params.get_string(Params::TranslationStatus).unwrap(), t!("status.translation_disabled"));
+        assert_eq!(*stab.optical_ui.read(), project_translation_settings);
+        instance.param_changed(&mut params, &cache, Params::ProjectData, true).unwrap();
+        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
         let disabled = instance.stab_manager(&mut params, &cache, (0, 0), false).unwrap();
         disabled.recompute_blocking();
+        assert!(!params.get_bool(Params::TranslationEnabled).unwrap());
+        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
         assert!(!disabled.gyro.read().optical_translation.as_ref().unwrap().is_active());
         let off = FrameTransform::at_timestamp(&ComputeParams::from_manager(&disabled), timestamp, frame).matrices;
         assert_ne!(original, off);
@@ -3222,6 +3319,7 @@ mod tests {
     }
 
     include!("host_keyframes_tests.rs");
+    include!("loaded_context_tests.rs");
 
     // Equal-state fast path: an un-mutated manager must not request either
     // smoothing or zoom invalidation.

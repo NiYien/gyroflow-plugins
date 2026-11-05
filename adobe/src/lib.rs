@@ -887,7 +887,7 @@ impl Drop for Plugin {
         {
             let mut lock = self.gyroflow.manager_cache.lock();
             for (_, v) in lock.iter() {
-                log::info!("arc count: {}", Arc::strong_count(v));
+                log::info!("arc count: {}", Arc::strong_count(&v.manager));
             }
             lock.clear();
         }

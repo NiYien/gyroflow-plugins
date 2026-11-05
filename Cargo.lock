@@ -1478,6 +1478,7 @@ dependencies = [
  "ofx",
  "regex",
  "roxmltree",
+ "windows 0.62.2",
  "winres",
  "zip",
 ]
