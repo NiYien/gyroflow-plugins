@@ -143,7 +143,7 @@
   "frei0r.plugin.explanation": "Gyroflow(Niyien) video stabilization",
   "frei0r.hint.timestamp_scale": "Scale for the input timestamp",
 
-  "label.translation_enabled": "Translation stabilization (experimental)",
+  "label.translation_enabled": "Translation stabilization",
   "hint.translation_enabled": "Use the translation analysis saved in the project. Disabling keeps the analysis for later use.",
   "label.translation_auto": "Automatic parameters",
   "hint.translation_auto": "Automatically choose the reference layer and smoothness. Manual values are retained.",

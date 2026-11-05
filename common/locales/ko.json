@@ -143,7 +143,7 @@
   "frei0r.plugin.explanation": "Gyroflow(Niyien) 영상 안정화",
   "frei0r.hint.timestamp_scale": "입력 타임스탬프 스케일",
 
-  "label.translation_enabled": "이동 흔들림 보정 (실험 기능)",
+  "label.translation_enabled": "이동 흔들림 보정",
   "hint.translation_enabled": "프로젝트에 저장된 이동 분석 결과를 사용합니다. 꺼도 분석 결과는 유지됩니다.",
   "label.translation_auto": "자동 매개변수",
   "hint.translation_auto": "기준 레이어와 부드러움을 자동으로 선택합니다. 수동 설정은 유지됩니다.",

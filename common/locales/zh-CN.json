@@ -143,7 +143,7 @@
   "frei0r.plugin.explanation": "Gyroflow(Niyien) 视频稳定",
   "frei0r.hint.timestamp_scale": "输入时间戳的缩放",
 
-  "label.translation_enabled": "位移防抖（实验性功能）",
+  "label.translation_enabled": "位移防抖",
   "hint.translation_enabled": "使用工程保存的位移分析结果。关闭后保留分析结果，方便再次开启。",
   "label.translation_auto": "自动参数",
   "hint.translation_auto": "自动选择参考层和平滑度，保留手动设置的值。",

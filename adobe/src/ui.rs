@@ -193,7 +193,7 @@ pub fn handle_update_event(params: &ae::Parameters<Params>, event: &mut ae::Even
             let key = info.as_ref().keycode;
             let code = key & 0xffff;
             if key & (1 << 31) != 0 { code == u32::from(b' ') }
-            else { [ae::sys::PF_ControlCode_Space, ae::sys::PF_ControlCode_Return, ae::sys::PF_ControlCode_Enter].contains(&(code as i32)) }
+            else { [ae::sys::PF_ControlCode_Space, ae::sys::PF_ControlCode_Return, ae::sys::PF_ControlCode_Enter].contains(&(code as _)) }
         }
         ae::Event::AdjustCursor(_) if update_button_hit(event.current_frame(), event.screen_point()) => {
             event.set_cursor(ae::CursorType::FingerPointer);
