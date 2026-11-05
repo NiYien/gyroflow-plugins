@@ -242,14 +242,5 @@
   "effect.host.auto_orientation": "Авто (поворот проекта)",
   "effect.host.auto_sizing": "Авто (вписать)",
   "effect.translation.save_failed": "Не удалось сохранить параметры смещения",
-  "effect.translation.invalid": "Недопустимые параметры смещения",
-  "effect.uniform.cancel": "Отмена",
-  "effect.uniform.changed": "При чтении исходника проект или настройки изменились. Повторите попытку.",
-  "effect.uniform.detail": "Для 59.94p → 29.97p при обычной скорости. Выберите метод выборки как в Final Cut. Составные клипы с исходной частотой используют внутренний Floor. Один раз выберите соответствующий исходник: его временные метки сохранятся в эффекте. Просмотр в низком разрешении и изменение скорости не поддерживаются.",
-  "effect.uniform.failed": "Выравнивание не изменено",
-  "effect.uniform.floor": "Вниз（Floor）",
-  "effect.uniform.nearest": "Ближайший（Nearest）",
-  "effect.uniform.off": "Выкл.",
-  "effect.uniform.original": "Выберите исходное видео для этого проекта .gyroflow.",
-  "effect.uniform.title": "Выравнивание выборки 59.94p"
+  "effect.translation.invalid": "Недопустимые параметры смещения"
 }

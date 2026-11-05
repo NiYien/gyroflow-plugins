@@ -1,7 +1,7 @@
 #import "GFRenderState.h"
 #import <CommonCrypto/CommonDigest.h>
 
-static const NSInteger kGFRenderStateSchema = 6;
+static const NSInteger kGFRenderStateSchema = 5;
 
 CMTime GFDirectSourceTime(CMTime hostTime, GFTime origin, GFTime scale) {
     if (!CMTIME_IS_NUMERIC(hostTime) || origin.denominator <= 0 || origin.denominator > INT32_MAX ||
@@ -31,8 +31,6 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
 @property(nonatomic, readwrite) NSString *projectDisplayName;
 @property(nonatomic, readwrite) NSString *projectContentHash;
 @property(nonatomic, readwrite) NSString *timingPayload;
-@property(nonatomic, readwrite) NSString *uniformSourceTiming;
-@property(nonatomic, readwrite) NSInteger uniformDomain;
 @property(nonatomic, readwrite) GFRenderMode mode;
 @property(nonatomic, readwrite) GFRenderParameters parameters;
 @property(nonatomic, readwrite) NSString *translationSettings;
@@ -84,7 +82,6 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
             ? [projectContentHash copy]
             : GFRenderStatePayloadHash(projectPayload);
         self.timingPayload = [timingPayload copy];
-        self.uniformSourceTiming = @"";
         self.mode = mode;
         self.parameters = parameters;
         self.translationSettings = @"";
@@ -112,8 +109,6 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
     if (self != nil) {
         self.hostOptions = options;
         self.sourceTimeScale = scale;
-        self.uniformSourceTiming = state.uniformSourceTiming;
-        self.uniformDomain = state.uniformDomain;
         self.translationSettings = state.translationSettings;
         self.translationProjectIdentity = state.translationProjectIdentity;
     }
@@ -127,12 +122,6 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
         self.translationSettings = [settings copy];
         self.translationProjectIdentity = [projectIdentity copy];
     }
-    return self;
-}
-
-- (instancetype)initWithState:(GFRenderState *)state uniformSourceTiming:(NSString *)metadata domain:(NSInteger)domain {
-    self = [self initWithState:state hostOptions:state.hostOptions sourceTimeScale:state.sourceTimeScale];
-    if (self) { self.uniformSourceTiming = [metadata copy]; self.uniformDomain = domain; }
     return self;
 }
 
@@ -220,17 +209,10 @@ static NSString *GFRenderStatePayloadHash(NSString *payload) {
         ? [coder decodeObjectOfClass:NSString.class forKey:@"translationProjectIdentity"] : @"";
     if (state.translationSettings == nil || state.translationSettings.length > 4096 ||
         state.translationProjectIdentity == nil || state.translationProjectIdentity.length > 128) { return nil; }
-    state.uniformSourceTiming = schema >= 6
-        ? [coder decodeObjectOfClass:NSString.class forKey:@"uniformSourceTiming"] : @"";
-    state.uniformDomain = schema >= 6 ? [coder decodeIntegerForKey:@"uniformDomain"] : 0;
-    if (!state.uniformSourceTiming || state.uniformSourceTiming.length > 416 * 1024 ||
-        state.uniformDomain < 0 || state.uniformDomain > 2) return nil;
     return state;
 }
 
 - (void)encodeWithCoder:(NSCoder *)coder {
-    [coder encodeObject:self.uniformSourceTiming forKey:@"uniformSourceTiming"];
-    [coder encodeInteger:self.uniformDomain forKey:@"uniformDomain"];
     [coder encodeObject:self.translationSettings forKey:@"translationSettings"];
     [coder encodeObject:self.translationProjectIdentity forKey:@"translationProjectIdentity"];
     [coder encodeInt64:self.sourceTimeScale.numerator forKey:@"sourceTimeScaleNumerator"];

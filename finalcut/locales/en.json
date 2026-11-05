@@ -236,14 +236,5 @@
   "effect.host.auto_orientation": "Automatic (project orientation)",
   "effect.host.auto_sizing": "Automatic (fit)",
   "effect.translation.save_failed": "Unable to save translation settings",
-  "effect.translation.invalid": "Invalid translation settings",
-  "effect.uniform.cancel": "Cancel",
-  "effect.uniform.changed": "The project or settings changed while reading the source. Try again.",
-  "effect.uniform.detail": "For 59.94p → 29.97p at normal speed. Choose the same sampling method as Final Cut. Native-rate compounds use their inner Floor sampling. Select the matching original video once; its timing is saved in this effect. Low-resolution browsing and retiming are not covered.",
-  "effect.uniform.failed": "Sampling alignment was not changed",
-  "effect.uniform.floor": "Floor",
-  "effect.uniform.nearest": "Nearest",
-  "effect.uniform.off": "Off",
-  "effect.uniform.original": "Select the original video matching this .gyroflow project.",
-  "effect.uniform.title": "59.94p sampling alignment"
+  "effect.translation.invalid": "Invalid translation settings"
 }

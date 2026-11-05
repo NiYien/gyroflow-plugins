@@ -37,7 +37,6 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
 
 @interface GFProjectDropView ()
 @property(nonatomic, strong) NSButton *loadButton;
-@property(nonatomic, strong) NSButton *samplingButton;
 @property(nonatomic, strong) NSTextField *statusLabel;
 @property(nonatomic, strong) GFProjectStore *projectStore;
 @property(nonatomic, copy) GFProjectImportCommitHandler commitHandler;
@@ -83,16 +82,6 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     self.statusLabel.selectable = YES;
     [self addSubview:self.statusLabel];
 
-    self.samplingButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(248, 104, 24, 22)];
-    self.samplingButton.title = @"⚙";
-    self.samplingButton.bezelStyle = NSBezelStyleRounded;
-    self.samplingButton.target = self;
-    self.samplingButton.action = @selector(configureSampling:);
-    self.samplingButton.toolTip = GFLocalized(@"effect.uniform.title", @"59.94p sampling alignment");
-    self.samplingButton.accessibilityLabel = self.samplingButton.toolTip;
-    self.samplingButton.autoresizingMask = NSViewMinXMargin;
-    [self addSubview:self.samplingButton];
-
     self.loadButton = [[GFImportButton alloc] initWithFrame:NSMakeRect(8, 74, 264, 26)];
     self.loadButton.autoresizingMask = NSViewWidthSizable;
     self.loadButton.title = GFLocalized(@"effect.action.load_project", @"Load .gyroflow…");
@@ -129,8 +118,7 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
         view.updateLabel.hidden = !available;
         view.updateButton.hidden = !available;
         CGFloat width = MAX(0.0, NSWidth(view.bounds) - 16.0);
-        view.statusLabel.frame = NSMakeRect(8, available ? 32 : 106, MAX(0.0,width-28), 18);
-        view.samplingButton.frame = NSMakeRect(MAX(8.0,NSWidth(view.bounds)-32), available ? 30 : 104,24,22);
+        view.statusLabel.frame = NSMakeRect(8, available ? 32 : 106, width, 18);
         view.loadButton.frame = NSMakeRect(8, available ? 2 : 74, width, 26);
     }];
 
@@ -138,10 +126,6 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
         @"Load a .gyroflow project. Complex edits should be made in Gyroflow, then loaded here.");
     [self refreshStatus];
     return self;
-}
-
-- (void)configureSampling:(id)sender {
-    if (self.samplingHandler) self.samplingHandler(self);
 }
 
 - (void)dealloc {
@@ -175,7 +159,6 @@ static NSArray<NSPasteboardType> *GFFCPXMLPasteboardTypes(void) {
     }
     self.statusLabel.textColor = loaded && self.projectStore.renderWarning != nil ? NSColor.systemOrangeColor : NSColor.labelColor;
     self.loadButton.enabled = !self.importInFlight;
-    self.samplingButton.enabled = loaded && !self.importInFlight;
     self.statusLabel.accessibilityLabel = self.statusLabel.stringValue;
     self.accessibilityLabel = self.statusLabel.stringValue;
     [self showStatusDetail:self.projectStore.renderWarning ?: self.projectStore.status];
