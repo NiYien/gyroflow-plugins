@@ -42,7 +42,7 @@ class JianyingPackageTests(unittest.TestCase):
             info = plistlib.loads(contents[builder.BUNDLE + "/Contents/Info.plist"])
             self.assertEqual(info["CFBundleIdentifier"], builder.PLUGIN_ID)
             self.assertEqual(info["CFBundleExecutable"], builder.WRAPPER)
-            self.assertEqual(info["CFBundleName"], "Gyroflow 剪映")
+            self.assertEqual(info["CFBundleName"], "Gyroflow")
             self.assertEqual(info["CFBundleVersion"], "1.11")
             filename = builder.BUNDLE + "/Contents/Win64/gyroflow_ofx.dll"
             contents[filename] = b"corrupted shared core"

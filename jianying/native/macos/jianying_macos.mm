@@ -842,7 +842,7 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
         OfxPropertySetHandle descriptor = nullptr;
         if (images->getPropertySet(effect, &descriptor) == kOfxStatOK)
             for (auto key : {kOfxPropLabel, kOfxPropShortLabel, kOfxPropLongLabel})
-                properties->propSetString(descriptor, key, 0, "Gyroflow 剪映");
+                properties->propSetString(descriptor, key, 0, "Gyroflow");
         report("candidate_describe host=com.lemon.lvpro metal_only=1 framebuffer_inverted=0 orientation_validation=pending");
     }
     if (same(action, kOfxImageEffectActionDescribeInContext) && status == kOfxStatOK) define_diagnostic_mode(effect);

@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
                 "Unknown non-Metal action must still forward the original inner status");
         require(invoke(kOfxActionDescribe) == kOfxStatOK, "Describe forwarding");
         const char* label = nullptr;
-        require(get_string(handle(effect.props), kOfxPropLabel, 0, &label) == kOfxStatOK && std::string(label) == "Gyroflow 剪映", "Product display label");
+        require(get_string(handle(effect.props), kOfxPropLabel, 0, &label) == kOfxStatOK && std::string(label) == "Gyroflow", "Product display label");
         require(invoke(kOfxImageEffectActionDescribeInContext) == kOfxStatOK, "InContext forwarding");
         auto& diagnostic = effect.parameters.at("DiagnosticMode");
         require(diagnostic.type == kOfxParamTypeChoice, "DiagnosticMode identity");

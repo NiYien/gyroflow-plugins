@@ -549,7 +549,7 @@ static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHan
     OfxStatus status = render && host_gl ? texture_render(effect,in,time,mode) : render && mode != 0 ? diagnostic_render(effect,in,time,mode) : inner->mainEntry(action,handle,in,out);
     if (!std::strcmp(action,kOfxActionDescribe) && status == kOfxStatOK) {
         OfxPropertySetHandle props = nullptr; image->getPropertySet(effect,&props);
-        for (auto key : {kOfxPropLabel,kOfxPropShortLabel,kOfxPropLongLabel}) prop->propSetString(props,key,0,"Gyroflow 剪映");
+        for (auto key : {kOfxPropLabel,kOfxPropShortLabel,kOfxPropLongLabel}) prop->propSetString(props,key,0,"Gyroflow");
         const char* depth[] = {kOfxBitDepthByte}; prop->propSetStringN(props,kOfxImageEffectPropSupportedPixelDepths,1,depth);
         for (auto key : {"OfxImageEffectPropOpenGLRenderSupported","OfxImageEffectPropOpenCLRenderSupported","OfxImageEffectPropCudaRenderSupported","OfxImageEffectPropMetalRenderSupported","OfxImageEffectPropAngleRenderSupported"}) prop->propSetString(props,key,0,"false");
         // Jianying prefers desktop OpenGL over ANGLE when both are advertised.

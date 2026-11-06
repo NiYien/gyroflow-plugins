@@ -3789,9 +3789,9 @@ impl Execute for GyroflowPlugin {
                     let _ = jianying_macos::framebuffer_inverted(_plugin_context)?;
                     let mut descriptor: EffectDescriptor = effect.properties()?;
                     descriptor.set_grouping("Warp")?;
-                    descriptor.set_label("Gyroflow 剪映")?;
-                    descriptor.set_short_label("Gyroflow 剪映")?;
-                    descriptor.set_long_label("Gyroflow 剪映")?;
+                    descriptor.set_label("Gyroflow")?;
+                    descriptor.set_short_label("Gyroflow")?;
+                    descriptor.set_long_label("Gyroflow")?;
                     descriptor.set_supported_pixel_depths(&[BitDepth::Byte])?;
                     descriptor.set_supported_contexts(&[ImageEffectContext::Filter])?;
                     descriptor.set_supports_tiles(false)?;

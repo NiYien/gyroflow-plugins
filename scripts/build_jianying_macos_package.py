@@ -183,7 +183,7 @@ def build(core, output, headers, version, build_receipt, openfx_package,
     validate_browser_png((resources / ICON_PNG).read_bytes())
     numeric = re.split(r"[-+]", version)[0]
     info = {"CFBundleIdentifier": candidate.PLUGIN_ID, "CFBundleExecutable": WRAPPER,
-            "CFBundleName": "Gyroflow 剪映", "CFBundlePackageType": "BNDL",
+            "CFBundleName": "Gyroflow", "CFBundlePackageType": "BNDL",
             "CFBundleVersion": numeric, "CFBundleShortVersionString": numeric,
             "NiYienPackageVersion": version, "LSMinimumSystemVersion": "11.0"}
     (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps(info))

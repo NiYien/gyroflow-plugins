@@ -307,7 +307,7 @@ def build(core, output, headers, version, local_core_provenance=None):
     run("codesign", "--force", "--sign", "-", str(wrapper))
     shutil.copy2(ROOT / "LICENSE", resources / "LICENSE")
     info = {"CFBundleIdentifier": PLUGIN_ID, "CFBundleExecutable": WRAPPER,
-            "CFBundleName": "Gyroflow 剪映", "CFBundlePackageType": "BNDL",
+            "CFBundleName": "Gyroflow", "CFBundlePackageType": "BNDL",
             "CFBundleVersion": short_version, "CFBundleShortVersionString": short_version,
             "NiYienPackageVersion": version,
             "LSMinimumSystemVersion": "11.0"}
