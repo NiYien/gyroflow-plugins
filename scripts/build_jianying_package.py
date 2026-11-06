@@ -193,7 +193,7 @@ def main():
                "version": manifest["version"], "ofx_version": [1, 11],
                "core_sha256": sha256(core), "wrapper_sha256": sha256(wrapper),
                "native_sources": {path.relative_to(ROOT).as_posix(): sha256(path)
-                                  for path in sorted((ROOT / "jianying/native").glob("*"))},
+                                  for path in sorted((ROOT / "jianying/native").glob("*")) if path.is_file()},
                "host_verified": False}
     (output / "jianying-build-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))

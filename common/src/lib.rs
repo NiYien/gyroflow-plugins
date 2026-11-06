@@ -1,3 +1,6 @@
+pub mod sampling_policy;
+pub use sampling_policy::FragmentSamplingPolicy;
+
 pub mod i18n;
 pub mod update_notice;
 mod loaded_manager;

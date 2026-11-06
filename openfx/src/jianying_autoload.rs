@@ -16,6 +16,10 @@ impl State {
         self.candidates.entry(input.to_owned()).or_insert_with(|| resolve(input)).as_deref()
     }
 
+    pub(crate) fn needs_source_bootstrap(&self) -> bool {
+        !self.stopped && self.candidates.is_empty()
+    }
+
     pub(crate) fn stop(&mut self) {
         self.stopped = true;
         self.candidates.clear();
@@ -45,7 +49,19 @@ fn md5_hex(bytes: &[u8]) -> Option<String> {
     Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn md5_hex(bytes: &[u8]) -> Option<String> {
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn CC_MD5(data: *const std::ffi::c_void, length: u32, digest: *mut u8) -> *mut u8;
+    }
+    let length = u32::try_from(bytes.len()).ok()?;
+    let mut digest = [0u8; 16];
+    if unsafe { CC_MD5(bytes.as_ptr().cast(), length, digest.as_mut_ptr()) }.is_null() { return None; }
+    Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn md5_hex(_bytes: &[u8]) -> Option<String> { None }
 
 fn metadata_matches(metadata: &fs::Metadata, sidecar: &Value, size: &str, modified: &str) -> Option<bool> {
@@ -83,7 +99,7 @@ fn resolve(input: &str) -> Option<String> {
     project_path.to_str().map(str::to_owned)
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -137,7 +153,7 @@ mod tests {
         assert!(source_url.starts_with("file:///"));
         assert!(source_url.contains("%20"));
         let candidate = state.candidate(&source_url).expect("The exact project for the file URL must resolve");
-        // A file URL removes the Windows verbatim prefix without changing file identity.
+        // A file URL preserves the source identity across native path representations.
         assert_eq!(fs::canonicalize(candidate).unwrap(), fs::canonicalize(project).unwrap());
     }
 

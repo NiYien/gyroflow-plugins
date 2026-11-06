@@ -10,6 +10,10 @@ build = "build.rs"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# This precision experiment is independent of platform/host admission.
+integer-fragment-sampling = []
+
 [dependencies]
 gyroflow-plugin-base = { path = "../common" }
 ofx = "0.3"

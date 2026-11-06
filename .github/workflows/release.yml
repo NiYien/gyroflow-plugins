@@ -78,7 +78,9 @@ jobs:
 
       - name: Check macOS signing retries
         if: ${{ matrix.targets.type == 'macos' }}
-        run: python3 -m unittest discover -s tests -p test_codesign_with_retry.py
+        run: |
+          python3 -m unittest discover -s tests -p test_codesign_with_retry.py
+          python3 -m unittest tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt
 
       - name: Build plugins (macOS)
         if: ${{ matrix.targets.type == 'macos' }}
@@ -86,7 +88,11 @@ jobs:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
         run: |
           just install-deps
+          just ofx --command cargo test --locked -p gyroflow-plugin-base -p gyroflow-ofx sampling
+          just ofx --command cargo test --locked -p gyroflow-ofx mac_icon
           just deploy
+          python3 scripts/build_jianying_macos_package.py --verify target/GyroflowNiyien-Jianying-macos.zip --openfx-package target/GyroflowNiyien-OpenFX-macos.zip
+          xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-Jianying-macos.zip
           xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-OpenFX-macos.dmg
           xcrun stapler staple --verbose ${{ github.workspace }}/target/GyroflowNiyien-OpenFX-macos.dmg
           xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-Adobe-macos.dmg
@@ -127,6 +133,12 @@ jobs:
         with:
           name: GyroflowNiyien-Jianying-windows
           path: target/GyroflowNiyien-Jianying-windows.zip
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: ${{ matrix.targets.type == 'macos' }}
+        with:
+          name: GyroflowNiyien-Jianying-macos
+          path: target/GyroflowNiyien-Jianying-macos.zip
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: ${{ matrix.targets.type == 'windows' }}
@@ -195,6 +207,7 @@ jobs:
           files: |
             release_artifacts/GyroflowNiyien-OpenFX-windows.zip
             release_artifacts/GyroflowNiyien-Jianying-windows.zip
+            release_artifacts/GyroflowNiyien-Jianying-macos.zip
             release_artifacts/GyroflowNiyien-OpenFX-linux.zip
             release_artifacts/GyroflowNiyien-OpenFX-macos.dmg
             release_artifacts/GyroflowNiyien-OpenFX-macos.zip

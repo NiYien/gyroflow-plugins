@@ -32,8 +32,18 @@ finalcut-deploy:
 deploy:
     {{ if os() == "linux" { "echo 'Skipping Adobe deploy on Linux'" } else { "just -f adobe/Justfile deploy" } }}
     just -f openfx/Justfile deploy
-    {{ if os() == "windows" { "just -f jianying/Justfile package \"" + CARGO_TARGET_DIR + "/deploy/gyroflow_ofx.dll\"" } else { "echo 'Jianying is currently Windows-only'" } }}
+    {{ if os() == "windows" { "just -f jianying/Justfile package \"" + CARGO_TARGET_DIR + "/deploy/gyroflow_ofx.dll\"" } else { if os() == "macos" { "just jianying-macos-deploy" } else { "echo 'Jianying is unavailable on Linux'" } } }}
     just -f frei0r/Justfile deploy
+
+[macos]
+jianying-macos-deploy:
+    #!/bin/bash
+    set -euo pipefail
+    ofx="{{CARGO_TARGET_DIR}}/gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle"
+    version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$ofx/Contents/Info.plist")
+    stage=$(mktemp -d "{{CARGO_TARGET_DIR}}/jianying-macos.XXXXXX")
+    python3 scripts/build_jianying_macos_package.py --core "$ofx/Contents/MacOS/GyroflowNiyien.ofx" --output-dir "$stage/package" --version "$version" --build-receipt "{{CARGO_TARGET_DIR}}/jianying-macos-core-receipt.json" --openfx-package "{{CARGO_TARGET_DIR}}/GyroflowNiyien-OpenFX-macos.zip" --signing-identity "$SIGNING_FINGERPRINT"
+    cp "$stage/package/GyroflowNiyien-Jianying-macos.zip" "{{CARGO_TARGET_DIR}}/GyroflowNiyien-Jianying-macos.zip"
 
 update:
     cd common/ ; cargo update
