@@ -39,18 +39,6 @@ pub(super) fn source_provider_enabled(context: &PluginContext) -> bool {
     marker.ok() == Some(1)
 }
 
-fn configure_icon_paths(mut set: impl FnMut(usize, &str) -> Result<()>) {
-    for (index, path) in [(0, "icon.svg"), (1, "icon.png")] {
-        if let Err(error) = set(index, path) {
-            log::debug!(target: "jianying_ofx", "Optional OFX icon {path} was not accepted: {error:?}");
-        }
-    }
-}
-
-pub(super) fn configure_optional_icon(descriptor: &mut EffectDescriptor) {
-    configure_icon_paths(|index, path| RawSetter::set_at(descriptor, c"OfxPropIcon".as_ptr(), index as _, path));
-}
-
 fn configure_cuda_property(status: i32, dimension: i32, set_false: impl FnOnce() -> Result<()>) -> Result<()> {
     match (status, dimension) {
         (0, 1) => set_false(),
@@ -225,16 +213,6 @@ mod tests {
             assert!(configure_cuda_property(0, dimension, || { called.set(true); Ok(()) }).is_err());
         }
         assert!(!called.get());
-    }
-
-    #[test]
-    fn mac_icon_uses_standard_resource_slots_and_remains_optional() {
-        let mut accepted = Vec::new();
-        configure_icon_paths(|index, path| { accepted.push((index, path.to_owned())); Ok(()) });
-        assert_eq!(accepted, vec![(0, "icon.svg".to_owned()), (1, "icon.png".to_owned())]);
-        let mut attempts = 0;
-        configure_icon_paths(|_, _| { attempts += 1; Err(Error::UnknownError) });
-        assert_eq!(attempts, 2);
     }
 
     #[test]

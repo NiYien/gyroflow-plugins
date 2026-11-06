@@ -3803,7 +3803,6 @@ impl Execute for GyroflowPlugin {
                     descriptor.set_opengl_render_supported("false")?;
                     descriptor.set_opencl_render_supported("false")?;
                     jianying_macos::configure_optional_cuda(_plugin_context, &mut descriptor)?;
-                    jianying_macos::configure_optional_icon(&mut descriptor);
                     descriptor.set_metal_render_supported("true")?;
                     log::info!(target: "jianying_ofx", "Local Mac candidate enabled through independent wrapper; Metal buffers only; exact-project autoload requires verified source provider");
                     return OK;

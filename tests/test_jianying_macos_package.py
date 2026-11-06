@@ -5,12 +5,23 @@ import json
 from pathlib import Path
 import plistlib
 import sys
+import struct
+import zlib
 import tempfile
 import unittest
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import build_jianying_macos_package as package
+
+
+def png_fixture(color=6):
+    def chunk(name, payload):
+        return struct.pack(">I", len(payload)) + name + payload + struct.pack(">I", zlib.crc32(name + payload))
+    header = struct.pack(">IIBBBBB", 128, 128, 8, color, 0, 0, 0)
+    channels = 4 if color == 6 else 3
+    pixels = (b"\x00" + b"\xff" * 128 * channels) * 128
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b"")
 
 
 class PackageTests(unittest.TestCase):
@@ -28,8 +39,8 @@ class PackageTests(unittest.TestCase):
                      "NiYienPackageVersion": meta["version"]}),
                  "Contents/Resources/version.txt": (meta["version"] + "\n").encode(),
                  "Contents/Resources/LICENSE": b"GPL-3.0-or-later",
-                 "Contents/Resources/icon.svg": b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
-                 "Contents/Resources/icon.png": b"owned PNG fixture",
+                 "Contents/Resources/" + package.ICON_SVG: b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+                 "Contents/Resources/" + package.ICON_PNG: png_fixture(),
                  "Contents/_CodeSignature/CodeResources": b"seal"}
         inventory = lambda values: [{"path": name, "size": len(data),
             "sha256": hashlib.sha256(data).hexdigest()} for name, data in values.items()]
@@ -88,11 +99,20 @@ class PackageTests(unittest.TestCase):
     def test_icon_resources_are_required_and_covered_by_the_inventory(self):
         with tempfile.TemporaryDirectory() as root:
             def missing(meta, inner, files):
-                files.pop("Contents/Resources/icon.png")
+                files.pop("Contents/Resources/" + package.ICON_PNG)
                 inner["files"] = [item for item in inner["files"]
-                                  if item["path"] != "Contents/Resources/icon.png"]
+                                  if item["path"] != "Contents/Resources/" + package.ICON_PNG]
             with self.assertRaises(ValueError):
                 package.verify(self.fixture(root, mutate=missing))
+
+    def test_browser_icon_is_named_after_the_exported_plugin_identifier(self):
+        self.assertEqual(package.ICON_PNG, "xyz.niyien.gyroflow.jianying.batch11.png")
+        self.assertEqual(package.ICON_SVG, "xyz.niyien.gyroflow.jianying.batch11.svg")
+
+    def test_browser_icon_rejects_rgb_without_an_alpha_channel(self):
+        package.validate_browser_png(png_fixture())
+        with self.assertRaises(ValueError):
+            package.validate_browser_png(png_fixture(color=2))
 
     def test_generic_core_must_match_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as root:

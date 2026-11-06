@@ -89,7 +89,6 @@ jobs:
         run: |
           just install-deps
           just ofx --command cargo test --locked -p gyroflow-plugin-base -p gyroflow-ofx sampling
-          just ofx --command cargo test --locked -p gyroflow-ofx mac_icon
           just deploy
           python3 scripts/build_jianying_macos_package.py --verify target/GyroflowNiyien-Jianying-macos.zip --openfx-package target/GyroflowNiyien-OpenFX-macos.zip
           xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-Jianying-macos.zip

@@ -7,6 +7,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -22,6 +23,9 @@ PACKAGE = "GyroflowNiyien-Jianying-macos.zip"
 LOCAL_PACKAGE = "GyroflowNiyien-Jianying-macos-local-validation.zip"
 TEAM = "H59FJRN2AM"
 GENERIC_CORE = "GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.ofx"
+# Browser icons are named after the exported OfxPlugin identifier.
+ICON_PNG = candidate.PLUGIN_ID + ".png"
+ICON_SVG = candidate.PLUGIN_ID + ".svg"
 
 
 def run(*args):
@@ -37,7 +41,15 @@ def metadata(version, local_validation=False):
             "gpu": "Metal-only", "signature": "ad-hoc" if local_validation else "Developer ID",
             "notarization": "not-requested" if local_validation else "required-before-distribution",
             "autoload": True, "autoload_provider": candidate.AUTOLOAD_PROVIDER,
-            "manual_saved_binding_priority": True, "icon": {"svg": "icon.svg", "png": "icon.png"}}
+            "manual_saved_binding_priority": True, "icon": {"svg": ICON_SVG, "png": ICON_PNG}}
+
+
+def validate_browser_png(data):
+    if len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise ValueError("The effect browser icon must be a PNG image")
+    width, height, depth, color = struct.unpack(">IIBB", data[16:26])
+    if width < 128 or height < 128 or depth != 8 or color != 6:
+        raise ValueError("The effect browser icon must be at least 128x128 with 8-bit RGBA")
 
 
 def verify_shared_core(package, openfx_package):
@@ -101,9 +113,10 @@ def verify(package, openfx_package=None, allow_local=False):
                     prefix + "Info.plist", resources + "version.txt",
                     resources + "LICENSE", resources + "package-manifest.json",
                     prefix + "_CodeSignature/CodeResources"}
-        required.update(resources + name for name in ("icon.svg", "icon.png"))
+        required.update(resources + name for name in (ICON_SVG, ICON_PNG))
         if not required <= expected:
             raise ValueError("Formal package is missing a required file")
+        validate_browser_png(archive.read(resources + ICON_PNG))
         info = plistlib.loads(archive.read(prefix + "Info.plist"))
         if info.get("CFBundleIdentifier") != candidate.PLUGIN_ID or info.get("CFBundleExecutable") != WRAPPER:
             raise ValueError("OFX draft identity changed")
@@ -165,8 +178,9 @@ def build(core, output, headers, version, build_receipt, openfx_package,
         "-framework", "Foundation", "-framework", "Metal", "-o", binaries / WRAPPER)
     shutil.copy2(core, binaries / CORE)
     shutil.copy2(ROOT / "LICENSE", resources / "LICENSE")
-    for name in ("icon.svg", "icon.png"):
-        shutil.copy2(ROOT / "jianying/resources" / name, resources / name)
+    for name, destination in (("icon.svg", ICON_SVG), ("icon.png", ICON_PNG)):
+        shutil.copy2(ROOT / "jianying/resources" / name, resources / destination)
+    validate_browser_png((resources / ICON_PNG).read_bytes())
     numeric = re.split(r"[-+]", version)[0]
     info = {"CFBundleIdentifier": candidate.PLUGIN_ID, "CFBundleExecutable": WRAPPER,
             "CFBundleName": "Gyroflow 剪映", "CFBundlePackageType": "BNDL",
