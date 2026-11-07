@@ -67,8 +67,10 @@ struct Fixture {
                 : "3$_0NS_9allocatorIS8_EEFN8veplugin9FrameDataERKNS_12basic_stringIcNS_11char_traitsIcEENS9_IcEEEEdddddEEE");
         }
         if (!role) return ".?AVTEOfxhImageEffectInstance@@";
-        return std::string(".?AV?$_Func_impl_no_alloc@V<lambda_1>@?4??init@TEPluginProcessor@@QEAAXXZ@")
-            + (role == 1 ? "_NPEBUMessageEvent@veplugin@@@Z@std@@" : "?AUFrameData@veplugin@@AEBVstring@std@@NNNNN@Z@std@@");
+        // Captured MSVC RTTI names do not include the enclosing init function.
+        return role == 1
+            ? ".?AV?$_Func_impl_no_alloc@V<lambda_6b8473e888e3690aae2d0fc3ad4a9912>@@_NPEBUMessageEvent@veplugin@@@std@@"
+            : ".?AV?$_Func_impl_no_alloc@V<lambda_77c7ea972ce80bd00bcf43d5f15377e0>@@UFrameData@veplugin@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@NNNNN@std@@";
     }
     void type(unsigned role, const std::string& name_value) {
         const auto table = tables[role], info = table + 0x100, name_address = info + 0x100;
@@ -167,6 +169,18 @@ int main() {
             Fixture invalid_effect(abi); require(invalid_effect.inspect(1).status == Status::UnreadableEffect, "Unreadable effect accepted"); ++cases;
             require(invalid_effect.inspect(std::numeric_limits<std::uintptr_t>::max() - 4).status == Status::AddressOverflow, "Effect address overflow"); ++cases;
             if (abi == Abi::MsvcX64) {
+                for (unsigned role : {1U, 2U}) {
+                    Fixture renamed(abi); renamed.source(long_path);
+                    auto name = Fixture::name(abi, role);
+                    name.replace(name.find("<lambda_") + 8, 32, "0123456789abcdef0123456789abcdef");
+                    renamed.type(role, name); expect(renamed, Status::Ready);
+                    Fixture wrong_signature(abi); wrong_signature.source(long_path);
+                    name = Fixture::name(abi, role);
+                    if (role == 1) name.replace(name.find("_NPEBU"), 2, "H");
+                    else name.erase(name.find("NNNNN"), 1);
+                    wrong_signature.type(role, name);
+                    expect(wrong_signature, role == 1 ? Status::MessageTypeMismatch : Status::ImageTypeMismatch);
+                }
                 Fixture locator(abi); locator.memory.put<std::uint32_t>(locator.tables[0] + 0x80 + 20, 0); expect(locator, Status::EffectTypeMismatch);
                 Fixture unc(abi); unc.source("\\\\server\\media\\clip.mov"); expect(unc, Status::Ready);
             }

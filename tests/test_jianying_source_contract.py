@@ -51,7 +51,8 @@ class JianyingSourceContractTests(unittest.TestCase):
 
             contract = output / ("source-contract" + suffix)
             compile_file("jianying_source_contract_main.cpp", contract)
-            result = subprocess.run([str(contract)], check=True, capture_output=True, text=True, env=environment)
+            result = subprocess.run([str(contract)], capture_output=True, text=True, env=environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(json.loads(result.stdout)["passed"])
             if not windows and sys.platform != "darwin":
                 return

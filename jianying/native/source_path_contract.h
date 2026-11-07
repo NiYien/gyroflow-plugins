@@ -120,10 +120,12 @@ inline bool matches_type_name(const std::string& name, Abi abi, Role role) {
             : name.find("9FrameDataE") != std::string::npos && name.find("basic_stringIcNS_11char_traitsIcE") != std::string::npos
                 && name.size() >= 8 && name.compare(name.size() - 8, 8, "dddddEEE") == 0;
     }
-    // The no-allocator callable stores its single captured processor immediately after its vptr.
-    return name.rfind(".?AV?$_Func_impl_no_alloc@", 0) == 0
-        && name.find("init@TEPluginProcessor@@") != std::string::npos
-        && name.find(role == Role::Message ? "MessageEvent@veplugin@@" : "FrameData@veplugin@@") != std::string::npos;
+    // MSVC can hash a lambda name without its enclosing function; match its callable signature.
+    const char* signature = role == Role::Message ? "_NPEBUMessageEvent@veplugin@@@std@@"
+        : "UFrameData@veplugin@@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@NNNNN@std@@";
+    const auto size = std::strlen(signature);
+    return name.rfind(".?AV?$_Func_impl_no_alloc@V<lambda_", 0) == 0
+        && name.size() >= size && name.compare(name.size() - size, size, signature) == 0;
 }
 inline bool matches_type(const Reader& reader, const Module& module, std::uintptr_t vtable, Role role) {
     static_assert(sizeof(std::uintptr_t) == 8, "The source contract requires a 64-bit host");

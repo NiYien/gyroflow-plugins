@@ -19,6 +19,7 @@ class TESharedGLContext {};
 class TEOfxhImageEffectInstance {
 public:
     virtual ~TEOfxhImageEffectInstance() = default;
+    virtual void fixture_action() {}
     unsigned char fields[0x200]{};
 };
 class TEPluginProcessor {
