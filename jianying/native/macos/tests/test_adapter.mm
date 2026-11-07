@@ -11,7 +11,6 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <map>
 #include <stdexcept>
@@ -288,23 +287,10 @@ int main(int argc, char** argv) {
                 "Rejected image must be released exactly once");
         require(get(handle(host_properties), "NiYienJianyingMacMetalAdapter", 0, &missing) == kOfxStatErrUnknown,
                 "Private property synthesis must not mutate original host");
-        std::ifstream log_file(argv[2]);
-        const std::string log(std::istreambuf_iterator<char>(log_file), {});
-        for (const auto& expected : {"set_host_begin", "set_host_suites", "set_host_property_functions",
-            "set_host_end host_name_status=0 host_name=com.lemon.lvpro", "suite_fetch name=OfxPropertySuite",
-            "private_get_int property=NiYienJianyingMacMetalAdapter", "private_get_pointer property=NiYienJianyingMacMetalCopyV1",
-            "action_begin action=MockNSetterError", "action_inner_return action=MockNSetterError", "action_end action=MockNSetterError"})
-            require(log.find(expected) != std::string::npos, "Missing diagnostic log field: " + std::string(expected));
-        require(log.find("property_write_result action=MockNSetterError operation=propSetStringN property=MockNFailure status="
-            + std::to_string(kOfxStatErrUnknown)) != std::string::npos, "N setter original failure must be logged");
-        require(log.find("property_write_result action=MockNSetterMissing operation=propSetDoubleN property=MockNMissing status="
-            + std::to_string(kOfxStatErrMissingHostFeature)) != std::string::npos, "N setter missing function must be logged");
-        for (const auto* action : {"OfxActionMetalContextAttached", "OfxActionMetalContextDetached"})
-            require(log.find(std::string("metal_context_noop action=") + action + " status=14 forwarded=0 gpu_commands=0 parameter_writes=0")
-                != std::string::npos, "Metal context no-op diagnostic must identify bypassed inner");
+        require(!std::filesystem::exists(argv[2]), "Adapter must not create a diagnostic file");
         std::cout << "PASS: mock-only OFX forwarding ABI, private properties, 26 typed value calls, Render write guard, real Metal validation/copy and image release\n";
         std::cout << "{\"scope\":\"native mock only; no Jianying host acceptance\",\"vararg_host_calls\":" << writes.size()
-                  << ",\"images_fetched\":" << fetched << ",\"images_released\":" << released << ",\"gpu_copy_bytes\":128,\"n_setter_errors_preserved\":true,\"diagnostic_fields_verified\":true,\"metal_context_noops\":2,\"unknown_nonmetal_forwarded\":true}\n";
+                  << ",\"images_fetched\":" << fetched << ",\"images_released\":" << released << ",\"gpu_copy_bytes\":128,\"n_setter_errors_preserved\":true,\"diagnostic_file_absent\":true,\"metal_context_noops\":2,\"unknown_nonmetal_forwarded\":true}\n";
         return 0;
     }} catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

@@ -482,10 +482,15 @@ impl GyroflowPluginBase {
     }
 
     pub fn initialize_log(&mut self, name: &str) {
+        self.initialize_log_with_level(name, log::LevelFilter::Debug);
+    }
+
+    pub fn initialize_log_with_level(&mut self, name: &str, level: log::LevelFilter) {
         // Install the file logger (idempotent; usually already done by the DLL-load constructor on
         // the Adobe plugin, but the only init point on the OpenFX / frei0r plugins which have no
         // competing global logger).
         ensure_file_logger(name);
+        log::set_max_level(level);
         // (Re-)install the panic logger. Done here, at command/render time, rather than in the
         // constructor, so it runs AFTER the host entry macro sets its own panic hook and therefore
         // wins — preserving the prior behavior of routing panics to the log file.

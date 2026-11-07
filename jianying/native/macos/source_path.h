@@ -73,20 +73,6 @@ struct Observation {
     }
 };
 
-// These fields are observation-only and never participate in source binding decisions.
-struct PublishObservation {
-    Status status = Status::InternalFailure;
-    bool fields_read = false;
-    std::uint8_t created = 0;
-    std::int32_t edit_count = 0;
-    std::uint64_t plugin_changed_size = 0;
-};
-struct RouteObservation {
-    Status status = Status::InternalFailure;
-    std::uintptr_t processor = 0;
-    std::string clip_id;
-};
-
 namespace detail {
 struct Reader {
     using Function = bool (*)(std::uintptr_t, void*, std::size_t, void*);
@@ -305,99 +291,6 @@ inline Observation read_verified_layout(std::uintptr_t effect, const ModuleIdent
     result.status = Status::Ready;
     return result;
 }
-inline RouteObservation read_verified_route_id(std::uintptr_t effect, const ModuleIdentity& module, const Reader& reader) {
-    RouteObservation result;
-    if (!effect) { result.status = Status::NullEffect; return result; }
-    if (module.status != Status::Ready) { result.status = module.status; return result; }
-    if (module.sha256 != verified_sha256) { result.status = Status::ModuleHashMismatch; return result; }
-    if (module.cpu_type != CPU_TYPE_ARM64 || module.cpu_subtype != CPU_SUBTYPE_ARM64_ALL) {
-        result.status = Status::UnsupportedArchitecture; return result;
-    }
-    Chain first;
-    result.status = read_chain(effect, module, reader, first);
-    if (result.status != Status::Ready) return result;
-    result.processor = first.message_processor;
-    std::uintptr_t header_address = 0;
-    if (!safe_add(result.processor, 0x48, header_address)) { result.status = Status::AddressOverflow; return result; }
-    std::array<unsigned char, 24> header{};
-    if (!reader.read(header_address, header.data(), header.size())) { result.status = Status::UnreadableSourceHeader; return result; }
-    const bool long_string = (header[23] & 0x80) != 0;
-    const auto length = long_string ? local_word(header, 8) : std::uint64_t(header[23]);
-    const auto capacity = long_string ? local_word(header, 16) & 0x7fffffffffffffffULL : 23;
-    if (!length) { result.status = Status::EmptySource; return result; }
-    if (length > maximum_source_bytes) { result.status = Status::SourceTooLong; return result; }
-    if ((!long_string && length > 22) || (long_string && capacity <= length)) {
-        result.status = Status::InvalidStringLayout; return result;
-    }
-    std::uintptr_t payload_address = long_string ? static_cast<std::uintptr_t>(local_word(header, 0)) : header_address;
-    std::uintptr_t terminator_address = 0;
-    if (!safe_add(payload_address, length, terminator_address)) { result.status = Status::AddressOverflow; return result; }
-    std::vector<unsigned char> payload(static_cast<std::size_t>(length) + 1);
-    if (long_string) {
-        if (!reader.read(payload_address, payload.data(), payload.size())) { result.status = Status::UnreadableSourcePayload; return result; }
-    } else {
-        for (std::size_t index = 0; index < payload.size(); ++index) payload[index] = header[index];
-    }
-    Chain second;
-    std::array<unsigned char, 24> second_header{};
-    if (read_chain(effect, module, reader, second) != Status::Ready || !(first == second)
-        || !reader.read(header_address, second_header.data(), second_header.size()) || header != second_header) {
-        result.status = Status::ChangedDuringCopy; return result;
-    }
-    if (long_string) {
-        std::vector<unsigned char> second_payload(payload.size());
-        Chain final_chain;
-        std::array<unsigned char, 24> final_header{};
-        if (!reader.read(payload_address, second_payload.data(), second_payload.size()) || payload != second_payload
-            || read_chain(effect, module, reader, final_chain) != Status::Ready || !(first == final_chain)
-            || !reader.read(header_address, final_header.data(), final_header.size()) || header != final_header) {
-            result.status = Status::ChangedDuringCopy; return result;
-        }
-    }
-    if (payload.back() != 0) { result.status = Status::MissingTerminator; return result; }
-    for (std::size_t index = 0; index < length; ++index) {
-        if (!payload[index]) { result.status = Status::EmbeddedNull; return result; }
-    }
-    if (!valid_utf8(payload, static_cast<std::size_t>(length))) { result.status = Status::InvalidUtf8; return result; }
-    result.clip_id.assign(reinterpret_cast<const char*>(payload.data()), static_cast<std::size_t>(length));
-    result.status = Status::Ready;
-    return result;
-}
-
-inline PublishObservation read_verified_publish_state(std::uintptr_t effect, const ModuleIdentity& module, const Reader& reader) {
-    PublishObservation result;
-    if (!effect) { result.status = Status::NullEffect; return result; }
-    if (module.status != Status::Ready) { result.status = module.status; return result; }
-    if (module.sha256 != verified_sha256) { result.status = Status::ModuleHashMismatch; return result; }
-    if (module.cpu_type != CPU_TYPE_ARM64 || module.cpu_subtype != CPU_SUBTYPE_ARM64_ALL) {
-        result.status = Status::UnsupportedArchitecture; return result;
-    }
-    std::uintptr_t expected_vtable = 0, vtable = 0, created_address = 0, count_address = 0, size_address = 0;
-    if (!slid_address(module.slide, effect_vtable, expected_vtable) || !safe_add(effect, 0xc9, created_address)
-        || !safe_add(effect, 0x130, count_address) || !safe_add(effect, 0x160, size_address)) {
-        result.status = Status::AddressOverflow; return result;
-    }
-    if (!read_word(reader, effect, 0, vtable)) { result.status = Status::UnreadableEffect; return result; }
-    if (vtable != expected_vtable) { result.status = Status::EffectVtableMismatch; return result; }
-    if (!reader.read(created_address, &result.created, sizeof(result.created))
-        || !reader.read(count_address, &result.edit_count, sizeof(result.edit_count))
-        || !reader.read(size_address, &result.plugin_changed_size, sizeof(result.plugin_changed_size))) {
-        result.status = Status::UnreadableEffect; return result;
-    }
-    result.fields_read = true;
-    PublishObservation second;
-    if (!read_word(reader, effect, 0, vtable) || vtable != expected_vtable
-        || !reader.read(created_address, &second.created, sizeof(second.created))
-        || !reader.read(count_address, &second.edit_count, sizeof(second.edit_count))
-        || !reader.read(size_address, &second.plugin_changed_size, sizeof(second.plugin_changed_size))
-        || result.created != second.created || result.edit_count != second.edit_count
-        || result.plugin_changed_size != second.plugin_changed_size) {
-        result.status = Status::ChangedDuringCopy; return result;
-    }
-    result.status = Status::Ready;
-    return result;
-}
-
 } // namespace detail
 
 inline bool is_pending(const Observation& observation) {
@@ -439,38 +332,6 @@ inline Observation inspect_source(const void* effect) {
         const auto module = detail::loaded_module(vtable);
         return detail::read_verified_layout(reinterpret_cast<std::uintptr_t>(effect), module, reader);
     } catch (...) { return {Status::InternalFailure, 0, {}}; }
-#else
-    (void)effect;
-    return {Status::UnsupportedArchitecture, 0, {}};
-#endif
-}
-
-inline PublishObservation inspect_publish_state(const void* effect) {
-#if defined(__arm64__) || defined(__aarch64__)
-    try {
-        if (!effect) { PublishObservation result; result.status = Status::NullEffect; return result; }
-        const detail::Reader reader{detail::mach_read};
-        std::uintptr_t vtable = 0;
-        if (!detail::read_word(reader, reinterpret_cast<std::uintptr_t>(effect), 0, vtable)) {
-            PublishObservation result; result.status = Status::UnreadableEffect; return result;
-        }
-        return detail::read_verified_publish_state(reinterpret_cast<std::uintptr_t>(effect), detail::loaded_module(vtable), reader);
-    } catch (...) { return {}; }
-#else
-    (void)effect;
-    PublishObservation result; result.status = Status::UnsupportedArchitecture; return result;
-#endif
-}
-inline RouteObservation inspect_route_id(const void* effect) {
-#if defined(__arm64__) || defined(__aarch64__)
-    try {
-        if (!effect) return {Status::NullEffect, 0, {}};
-        const detail::Reader reader{detail::mach_read};
-        std::uintptr_t vtable = 0;
-        if (!detail::read_word(reader, reinterpret_cast<std::uintptr_t>(effect), 0, vtable))
-            return {Status::UnreadableEffect, 0, {}};
-        return detail::read_verified_route_id(reinterpret_cast<std::uintptr_t>(effect), detail::loaded_module(vtable), reader);
-    } catch (...) { return {}; }
 #else
     (void)effect;
     return {Status::UnsupportedArchitecture, 0, {}};

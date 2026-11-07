@@ -26,6 +26,7 @@ OfxImageEffectSuiteV1 image_suite{};
 OfxParameterSuiteV1 parameter_suite{};
 OfxPlugin* wrapper = nullptr;
 Effect* active_effect = nullptr;
+unsigned parameter_sets = 0, parameter_handles = 0, parameter_properties_reads = 0;
 unsigned value_reads = 0, wrong_type_reads = 0, value_writes = 0, property_writes = 0, image_calls = 0;
 std::map<std::string, unsigned> reads;
 bool reentrant = false, reentered = false;
@@ -68,9 +69,11 @@ template<class T> OfxStatus write_property(OfxPropertySetHandle, const char*, in
 template<class T> OfxStatus write_properties(OfxPropertySetHandle, const char*, int, const T*) { ++property_writes; return kOfxStatOK; }
 OfxStatus reset_property(OfxPropertySetHandle, const char*) { ++property_writes; return kOfxStatOK; }
 OfxStatus get_param_set(OfxImageEffectHandle effect, OfxParamSetHandle* output) {
+    ++parameter_sets;
     *output = reinterpret_cast<OfxParamSetHandle>(effect); return kOfxStatOK;
 }
 OfxStatus get_parameter(OfxParamSetHandle raw, const char* name, OfxParamHandle* output, OfxPropertySetHandle* properties) {
+    ++parameter_handles;
     auto& parameters = reinterpret_cast<Effect*>(raw)->parameters;
     const auto found = parameters.find(name);
     if (found == parameters.end()) return kOfxStatErrUnknown;
@@ -79,6 +82,7 @@ OfxStatus get_parameter(OfxParamSetHandle raw, const char* name, OfxParamHandle*
     return kOfxStatOK;
 }
 OfxStatus parameter_properties(OfxParamHandle raw, OfxPropertySetHandle* output) {
+    ++parameter_properties_reads;
     *output = handle(reinterpret_cast<Parameter*>(raw)->props); return kOfxStatOK;
 }
 OfxStatus get_value(OfxParamHandle raw, ...) {
@@ -137,6 +141,7 @@ int main(int argc, char** argv) {
         require(argc == 4, "Usage: test-snapshot wrapper.ofx log scenario");
         require(std::filesystem::path(argv[1]).is_absolute() && std::filesystem::path(argv[2]).is_absolute(), "Absolute paths required");
         require(setenv("NIYIEN_JIANYING_MAC_LOG", argv[2], 1) == 0, "Cannot isolate snapshot log");
+        require(setenv("NIYIEN_JIANYING_MAC_OBSERVE_UI", "1", 1) == 0, "Cannot test obsolete observation switch");
         initialize_suites();
         void* library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
         if (!library) { const char* error = dlerror(); throw std::runtime_error(error ? error : "Wrapper dlopen failed"); }
@@ -196,11 +201,11 @@ int main(int argc, char** argv) {
         } else if (scenario == "reentrant") {
             reentrant = true;
             status = invoke(kOfxActionEndInstanceChanged);
-            require(reentered && nested_status == kOfxStatOK && calls() == 2, "Reentrant action did not execute exactly once");
+            require(!reentered && calls() == 1, "A diagnostic getter unexpectedly triggered reentry");
         } else throw std::runtime_error("Unknown snapshot scenario");
-        const unsigned expected_reads = scenario == "other" || scenario == "inner-failure" || scenario == "render" ? 0 :
-            scenario == "missing" || scenario == "type-mismatch" ? 4 : 5;
+        const unsigned expected_reads = 0;
         require(status == (scenario == "inner-failure" ? kOfxStatFailed : kOfxStatOK), "Snapshot changed action status");
+        require(parameter_sets == 0 && parameter_handles == 0 && parameter_properties_reads == 0, "Adapter queried diagnostic parameters");
         require(value_reads == expected_reads && wrong_type_reads == 0, "Unexpected typed getter count");
         require(value_writes == 0 && property_writes == 0 && image_calls == 0, "Snapshot changed host state or acquired an image");
         if (scenario == "type-mismatch") require(reads["Smoothness"] == 0, "Type mismatch must not call typed getter");

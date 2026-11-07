@@ -265,7 +265,6 @@ fn prepare_jianying_gpu(stab: &StabilizationManager, buffers: &Buffers) -> Resul
         };
         *GPU_LIST.write() = devices.iter().map(|device| device.list_name.clone()).collect();
         stabilization.set_device(device.raw_index as isize);
-        log::debug!(target: "jianying_ofx", "GPU selected: {}", device.list_name);
     }
     Ok(())
 }
@@ -3074,7 +3073,6 @@ impl Execute for GyroflowPlugin {
                         { None }
                         #[cfg(any(target_os = "macos", target_os = "ios"))]
                         {
-                            log::info!("metal: src_size: {src_size:?} | {src_stride}, out_size: {out_size:?} | {out_stride}");
                             if !is_mac_jianying { instance_data.plugin.disable_opencl(); }
                             let command_queue = in_args.get_metal_command_queue()? as *mut std::ffi::c_void;
 
@@ -3900,7 +3898,9 @@ impl Execute for GyroflowPlugin {
 
             Load => {
                 update_notice::available();
-                self.gyroflow_plugin.initialize_log("openfx");
+                // Keep playback free of per-frame core/backend logging in this host.
+                let level = if is_mac_jianying { log::LevelFilter::Warn } else { log::LevelFilter::Debug };
+                self.gyroflow_plugin.initialize_log_with_level("openfx", level);
                 // Remove DRT temp files left behind by crashed sessions (older than an hour).
                 let swept = sweep_temp_files(&std::env::temp_dir(), std::process::id(), 0, std::time::SystemTime::now());
                 log::debug!(target: "host_input_sizing", "host_input_sizing: swept {swept} stale DRT temp file(s) at load");
