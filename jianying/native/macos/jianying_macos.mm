@@ -486,7 +486,9 @@ extern "C" __attribute__((visibility("default"))) OfxPlugin* OfxGetPlugin(int in
     std::call_once(once, [] {
         Dl_info module{};
         if (!dladdr(reinterpret_cast<void*>(&OfxGetPlugin), &module) || !module.dli_fname) return;
-        const auto path = std::filesystem::path(module.dli_fname).parent_path() / "libgyroflow_ofx.dylib";
+        const auto directory = std::filesystem::path(module.dli_fname).parent_path();
+        auto path = directory.parent_path() / "PlugIns/GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.ofx";
+        if (!std::filesystem::exists(path)) path = directory / "libgyroflow_ofx.dylib";
         void* library = dlopen(path.c_str(), RTLD_LOCAL | RTLD_NOW);
         if (!library) { report_error("load_inner_failed reason=%s", dlerror()); return; }
         auto get = reinterpret_cast<OfxPlugin* (*)(int)>(dlsym(library, "OfxGetPlugin"));

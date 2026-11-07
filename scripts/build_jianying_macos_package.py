@@ -18,7 +18,8 @@ import jianying_macos_build_receipt as receipt
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = candidate.BUNDLE
 WRAPPER = candidate.WRAPPER
-CORE = candidate.CORE
+CORE_BUNDLE = "Contents/PlugIns/GyroflowNiyien.ofx.bundle"
+CORE = CORE_BUNDLE + "/Contents/MacOS/GyroflowNiyien.ofx"
 PACKAGE = "GyroflowNiyien-Jianying-macos.zip"
 LOCAL_PACKAGE = "GyroflowNiyien-Jianying-macos-local-validation.zip"
 TEAM = "H59FJRN2AM"
@@ -59,7 +60,7 @@ def validate_browser_png(data):
 
 def verify_shared_core(package, openfx_package):
     with zipfile.ZipFile(package) as archive, zipfile.ZipFile(openfx_package) as generic:
-        if archive.read(BUNDLE + "/Contents/MacOS/" + CORE) != generic.read(GENERIC_CORE):
+        if archive.read(BUNDLE + "/" + CORE) != generic.read(GENERIC_CORE):
             raise ValueError("Jianying and generic OFX packages must contain identical signed core bytes")
 
 
@@ -88,6 +89,7 @@ def verify(package, openfx_package=None, allow_local=False):
         if set(names) != expected:
             raise ValueError("Formal delivery inventory is incomplete")
         prefix = BUNDLE + "/Contents/"
+        core_name = BUNDLE + "/" + CORE
         resources = prefix + "Resources/"
         inner = json.loads(archive.read(resources + "package-manifest.json"))
         if any(inner.get(k) != v for k, v in expected_meta.items()):
@@ -112,9 +114,11 @@ def verify(package, openfx_package=None, allow_local=False):
                 raise ValueError("Inner formal payload checksum mismatch")
         if payload != expected - {"delivery-manifest.json"}:
             raise ValueError("Inner formal inventory does not cover every payload file")
-        if hashlib.sha256(archive.read(prefix + "MacOS/" + CORE)).hexdigest() != declaration.get("core_sha256"):
+        if hashlib.sha256(archive.read(core_name)).hexdigest() != declaration.get("core_sha256"):
             raise ValueError("Declared shared core identity is incorrect")
-        required = {prefix + "MacOS/" + WRAPPER, prefix + "MacOS/" + CORE,
+        required = {prefix + "MacOS/" + WRAPPER, core_name,
+                    BUNDLE + "/" + CORE_BUNDLE + "/Contents/Info.plist",
+                    BUNDLE + "/" + CORE_BUNDLE + "/Contents/_CodeSignature/CodeResources",
                     prefix + "Info.plist", resources + "version.txt",
                     resources + "LICENSE", resources + "package-manifest.json",
                     prefix + "_CodeSignature/CodeResources"}
@@ -157,6 +161,27 @@ def sign(path, identity, local):
     run(sys.executable, ROOT / "scripts/codesign_with_retry.py", *args, path)
 
 
+def copy_shared_core(core, openfx_package, bundle):
+    source = core.parent.parent.parent
+    if source.name != "GyroflowNiyien.ofx.bundle" or core != source / "Contents/MacOS/GyroflowNiyien.ofx":
+        raise ValueError("The shared core must remain inside its original signed OFX bundle")
+    run("codesign", "--verify", "--deep", "--strict", "--all-architectures", source)
+    inventory = candidate.file_inventory(source)
+    prefix = source.name + "/"
+    with zipfile.ZipFile(openfx_package) as archive:
+        files = {name[len(prefix):] for name in archive.namelist()
+                 if name.startswith(prefix) and not name.endswith("/")}
+        if files != {item["path"] for item in inventory}:
+            raise ValueError("The input OFX bundle differs from the selected generic package")
+        for item in inventory:
+            data = archive.read(prefix + item["path"])
+            if len(data) != item["size"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
+                raise ValueError("The input OFX bundle differs from the selected generic package")
+    destination = bundle / CORE_BUNDLE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination)
+
+
 def build(core, output, headers, version, build_receipt, openfx_package,
           identity, local_validation=False):
     if identity == "-" and not local_validation:
@@ -171,9 +196,6 @@ def build(core, output, headers, version, build_receipt, openfx_package,
     run("codesign", "--verify", "--strict", "--all-architectures", core)
     if not local_validation:
         verify_developer_id(core)
-    with zipfile.ZipFile(openfx_package) as archive:
-        if archive.read(GENERIC_CORE) != core.read_bytes():
-            raise ValueError("The input core differs from the selected generic OFX package")
     output.mkdir(parents=True, exist_ok=False)
     bundle = output / BUNDLE
     binaries = bundle / "Contents/MacOS"
@@ -185,7 +207,7 @@ def build(core, output, headers, version, build_receipt, openfx_package,
         "-mmacosx-version-min=11.0", "-fobjc-arc", "-Wall", "-Wextra", "-Werror",
         "-I", headers, native / "jianying_macos.mm", native / "metal_guard.mm",
         "-framework", "Foundation", "-framework", "Metal", "-o", binaries / WRAPPER)
-    shutil.copy2(core, binaries / CORE)
+    copy_shared_core(core, openfx_package, bundle)
     shutil.copy2(ROOT / "LICENSE", resources / "LICENSE")
     for name, destination in (("icon.svg", ICON_SVG), ("icon.png", ICON_PNG)):
         shutil.copy2(ROOT / "jianying/resources" / name, resources / destination)
@@ -210,7 +232,7 @@ def build(core, output, headers, version, build_receipt, openfx_package,
         verify_developer_id(bundle)
     if any(receipt.sha256(native / name) != digest for name, digest in native_hashes.items()):
         raise ValueError("Native adapter source changed during packaging")
-    if receipt.sha256(binaries / CORE) != data["core_sha256"]:
+    if receipt.sha256(bundle / CORE) != data["core_sha256"]:
         raise ValueError("Bundle signing changed the shared core")
     delivery = {**meta, "files": [{**item, "path": BUNDLE + "/" + item["path"]}
                                   for item in candidate.file_inventory(bundle)]}

@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import plistlib
+import shutil
 import sys
 import struct
 import subprocess
@@ -62,12 +63,59 @@ class PackageTests(unittest.TestCase):
                         with self.assertRaises(subprocess.CalledProcessError):
                             package.verify_arm64(binary)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS signing tools are required")
+    def test_signed_ofx_bundle_keeps_its_info_context_when_nested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "fixture.c"
+            source.write_text("int fixture;\n")
+            generic = root / "generic/GyroflowNiyien.ofx.bundle"
+            core = generic / "Contents/MacOS/GyroflowNiyien.ofx"
+            core.parent.mkdir(parents=True)
+            package.run("xcrun", "clang", "-arch", "arm64", "-dynamiclib", source, "-o", core)
+            info = plistlib.loads((package.ROOT / "openfx/res/Info.plist").read_bytes())
+            info.update(CFBundleVersion="3.0.0.0", CFBundleShortVersionString="3.0.0.0")
+            (generic / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
+            shutil.copy2(package.ROOT / "LICENSE", generic / "Contents/LICENSE")
+            package.sign(generic, "-", True)
+            original = core.read_bytes()
+            archive_path = root / "generic.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                for item in package.candidate.file_inventory(generic):
+                    archive.write(generic / item["path"], generic.name + "/" + item["path"])
+            for layout in ("flat", "nested"):
+                bundle = root / layout / package.BUNDLE
+                wrapper = bundle / "Contents/MacOS" / package.WRAPPER
+                wrapper.parent.mkdir(parents=True)
+                package.run("xcrun", "clang", "-arch", "arm64", "-dynamiclib", source, "-o", wrapper)
+                (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                    "CFBundleIdentifier": package.candidate.PLUGIN_ID,
+                    "CFBundleExecutable": wrapper.name, "CFBundlePackageType": "BNDL"}))
+                if layout == "flat":
+                    shutil.copy2(core, wrapper.parent / "libgyroflow_ofx.dylib")
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(subprocess.CalledProcessError) as raised:
+                            package.sign(bundle, "-", True)
+                            package.run("codesign", "--verify", "--deep", "--strict", "--all-architectures", bundle)
+                    self.assertIn("invalid Info.plist", raised.exception.stderr)
+                else:
+                    package.copy_shared_core(core, archive_path, bundle)
+                    package.sign(bundle, "-", True)
+                    package.run("codesign", "--verify", "--deep", "--strict", "--all-architectures", bundle)
+                    self.assertEqual((bundle / package.CORE).read_bytes(), original)
+                    self.assertEqual(package.candidate.file_inventory(bundle / package.CORE_BUNDLE),
+                                     package.candidate.file_inventory(generic))
+
     def fixture(self, directory, local=False, mutate=None):
         meta = package.metadata("2.1.2-local" if local else "2.1.2", local)
         meta.update(core_sha256=hashlib.sha256(b"core").hexdigest(),
                     formal_dependency_revision="e" * 40, rust_source_sha256={"common/src/sampling_policy.rs": "a" * 64})
         files = {"Contents/MacOS/" + package.WRAPPER: b"wrapper",
-                 "Contents/MacOS/" + package.CORE: b"core",
+                 package.CORE: b"core",
+                 package.CORE_BUNDLE + "/Contents/Info.plist": plistlib.dumps({
+                     "CFBundleIdentifier": "com.niyien.gyroflow.ofx",
+                     "CFBundleExecutable": "GyroflowNiyien.ofx", "CFBundlePackageType": "BNDL"}),
+                 package.CORE_BUNDLE + "/Contents/_CodeSignature/CodeResources": b"inner seal",
                  "Contents/Info.plist": plistlib.dumps({
                      "CFBundleIdentifier": package.candidate.PLUGIN_ID,
                      "CFBundleExecutable": package.WRAPPER,
@@ -122,7 +170,7 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             def omit(meta, inner, files):
                 inner["files"] = [item for item in inner["files"]
-                                  if item["path"] != "Contents/MacOS/" + package.CORE]
+                                  if item["path"] != package.CORE]
             with self.assertRaises(ValueError):
                 package.verify(self.fixture(root, mutate=omit))
 
@@ -132,6 +180,15 @@ class PackageTests(unittest.TestCase):
                 meta["core_sha256"] = inner["core_sha256"] = "0" * 64
             with self.assertRaises(ValueError):
                 package.verify(self.fixture(root, mutate=wrong))
+
+    def test_shared_core_requires_its_original_signed_bundle_context(self):
+        with tempfile.TemporaryDirectory() as root:
+            def missing(meta, inner, files):
+                name = package.CORE_BUNDLE + "/Contents/Info.plist"
+                files.pop(name)
+                inner["files"] = [item for item in inner["files"] if item["path"] != name]
+            with self.assertRaisesRegex(ValueError, "required file"):
+                package.verify(self.fixture(root, mutate=missing))
 
     def test_icon_resources_are_required_and_covered_by_the_inventory(self):
         with tempfile.TemporaryDirectory() as root:
@@ -165,7 +222,7 @@ class PackageTests(unittest.TestCase):
             path = self.fixture(root)
             with zipfile.ZipFile(path) as archive:
                 contents = {name: archive.read(name) for name in archive.namelist()}
-            contents[package.BUNDLE + "/Contents/MacOS/" + package.CORE] = b"tampered"
+            contents[package.BUNDLE + "/" + package.CORE] = b"tampered"
             bad = Path(root) / "tampered.zip"
             with zipfile.ZipFile(bad, "w") as archive:
                 for name, data in contents.items():
