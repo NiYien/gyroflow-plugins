@@ -158,7 +158,7 @@ def build(core, output, headers, version, build_receipt, openfx_package,
     native = ROOT / "jianying/native/macos"
     native_hashes = {name: receipt.sha256(native / name) for name in candidate.NATIVE_SOURCES}
     receipt.validate(data, core)
-    run("lipo", "-verify_arch", "arm64", core)
+    run("lipo", core, "-verify_arch", "arm64")
     run("codesign", "--verify", "--strict", "--all-architectures", core)
     if not local_validation:
         verify_developer_id(core)
