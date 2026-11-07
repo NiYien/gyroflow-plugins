@@ -25,7 +25,7 @@ def sources(root=ROOT):
 
 def formal_revision(root=ROOT):
     metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--offline", "--locked", "--format-version", "1", "--filter-platform", "aarch64-apple-darwin"], cwd=root))
+        ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", "aarch64-apple-darwin"], cwd=root))
     core = next(p for p in metadata["packages"] if p["name"] == "gyroflow-core")
     source = core.get("source") or ""
     match = re.fullmatch(r"git\+https://github.com/NiYien/gyroflow\.git\?rev=([0-9a-f]{40})#\1", source)

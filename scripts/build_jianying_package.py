@@ -57,7 +57,7 @@ def msvc_environment():
 
 def openfx_headers(environment):
     metadata = json.loads(subprocess.check_output(
-        ["cargo", "metadata", "--format-version", "1", "--locked", "--offline",
+        ["cargo", "metadata", "--format-version", "1", "--locked",
          "--filter-platform", "x86_64-pc-windows-msvc"],
         cwd=ROOT, env=environment, text=True, encoding="utf-8"))
     package = next(p for p in metadata["packages"] if p["name"] == "ofx_sys")
