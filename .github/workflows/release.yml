@@ -36,15 +36,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
+        id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Rust cache
-        uses: actions/cache@v4
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ github.workspace }}/target
             ~/.cargo
             C:\Users\runneradmin\.cargo
-          key: ${{ matrix.targets.type }}-gyroflow-plugins-0
+          key: ${{ runner.os }}-${{ runner.arch }}-gyroflow-plugins-1-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'adobe/**/*.rs', 'common/**/*.rs', 'openfx/**/*.rs', 'frei0r/**/*.rs') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-gyroflow-plugins-1-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Prepare Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@main
@@ -76,26 +80,37 @@ jobs:
           python -m unittest tests.test_jianying_package tests.test_jianying_protocol
           python scripts/build_jianying_package.py --verify target/GyroflowNiyien-Jianying-windows.zip --openfx-package target/GyroflowNiyien-OpenFX-windows.zip
 
-      - name: Check macOS signing retries
+      - name: Check macOS packaging tools and signing
         if: ${{ matrix.targets.type == 'macos' }}
         run: |
           python3 -m unittest discover -s tests -p test_codesign_with_retry.py
-          python3 -m unittest tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt
+          python3 -m unittest tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt tests.test_jianying_notarization
 
       - name: Build plugins (macOS)
         if: ${{ matrix.targets.type == 'macos' }}
         env:
           SIGNING_FINGERPRINT: ${{ secrets.MACOS_CERTIFICATE_FINGERPRINT }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_ACCOUNT_USER }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_TEAM }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_ACCOUNT_PASS }}
         run: |
           just install-deps
           just ofx --command cargo test --locked -p gyroflow-plugin-base -p gyroflow-ofx sampling
           just deploy
           python3 scripts/build_jianying_macos_package.py --verify target/GyroflowNiyien-Jianying-macos.zip --openfx-package target/GyroflowNiyien-OpenFX-macos.zip
-          xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-Jianying-macos.zip
+          python3 scripts/notarize_jianying_package.py --zip target/GyroflowNiyien-Jianying-macos.zip --result target/jianying-notary-result.json
           xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-OpenFX-macos.dmg
           xcrun stapler staple --verbose ${{ github.workspace }}/target/GyroflowNiyien-OpenFX-macos.dmg
           xcrun notarytool submit --wait --apple-id ${{ secrets.MACOS_ACCOUNT_USER }} --team-id ${{ secrets.MACOS_TEAM }} --password ${{ secrets.MACOS_ACCOUNT_PASS }} ${{ github.workspace }}/target/GyroflowNiyien-Adobe-macos.dmg
           xcrun stapler staple --verbose ${{ github.workspace }}/target/GyroflowNiyien-Adobe-macos.dmg
+
+      - name: Preserve Jianying notarization diagnostics
+        if: ${{ always() && matrix.targets.type == 'macos' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: jianying-macos-release-evidence
+          path: target/jianying-notary*.json
+          if-no-files-found: ignore
 
       - name: Build plugins (Linux)
         if: ${{ matrix.targets.type == 'linux' }}
@@ -170,6 +185,16 @@ jobs:
         with:
           name: GyroflowNiyien-Adobe-${{ matrix.targets.type }}-zip
           path: target/GyroflowNiyien-Adobe-macos.zip
+
+      - name: Save Rust cache after builds
+        if: ${{ always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ github.workspace }}/target
+            ~/.cargo
+            C:\Users\runneradmin\.cargo
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
   github_release:
     name: Create GitHub release

@@ -137,6 +137,10 @@ def verify(package, openfx_package=None, allow_local=False):
     return declaration
 
 
+def verify_arm64(path):
+    run("lipo", path, "-verify_arch", "arm64")
+
+
 def verify_developer_id(path):
     requirement = ('=anchor apple generic and certificate leaf[subject.OU] = "' + TEAM
                    + '" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
@@ -163,7 +167,7 @@ def build(core, output, headers, version, build_receipt, openfx_package,
     native = ROOT / "jianying/native/macos"
     native_hashes = {name: receipt.sha256(native / name) for name in candidate.NATIVE_SOURCES}
     receipt.validate(data, core)
-    run("lipo", core, "-verify_arch", "arm64")
+    verify_arm64(core)
     run("codesign", "--verify", "--strict", "--all-architectures", core)
     if not local_validation:
         verify_developer_id(core)

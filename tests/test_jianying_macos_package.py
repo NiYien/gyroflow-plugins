@@ -46,6 +46,22 @@ class PackageTests(unittest.TestCase):
                 package.verify_developer_id(Path("/usr/bin/true"))
         self.assertIn("code failed to satisfy specified code requirement(s)", raised.exception.stderr)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS lipo and clang are required")
+    def test_architecture_check_accepts_arm64_and_rejects_intel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "fixture.c"
+            source.write_text("int fixture;\n")
+            for architecture in ("arm64", "x86_64"):
+                binary = root / (architecture + ".o")
+                package.run("xcrun", "clang", "-arch", architecture, "-c", source, "-o", binary)
+                if architecture == "arm64":
+                    package.verify_arm64(binary)
+                else:
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            package.verify_arm64(binary)
+
     def fixture(self, directory, local=False, mutate=None):
         meta = package.metadata("2.1.2-local" if local else "2.1.2", local)
         meta.update(core_sha256=hashlib.sha256(b"core").hexdigest(),

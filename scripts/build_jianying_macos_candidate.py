@@ -57,7 +57,7 @@ def openfx_headers(explicit=None):
         headers = explicit.resolve(strict=True)
     else:
         result = run("cargo", "metadata", "--locked", "--format-version", "1",
-                     "--offline", "--filter-platform", "aarch64-apple-darwin", capture=True)
+                     "--filter-platform", "aarch64-apple-darwin", capture=True)
         metadata = json.loads(result.stdout)
         package = next(item for item in metadata["packages"] if item["name"] == "ofx_sys")
         headers = Path(package["manifest_path"]).parent / "native/openfx/include"
