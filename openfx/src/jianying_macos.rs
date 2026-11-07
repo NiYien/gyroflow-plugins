@@ -154,18 +154,6 @@ pub(super) fn copy_images(context: &PluginContext, source: &Image, output: &Imag
     OK
 }
 
-pub(super) fn source_timestamp_us(time: f64, source_fps: f64, speed: f64) -> Result<i64> {
-    if !time.is_finite() || !source_fps.is_finite() || source_fps <= 0.0 || !speed.is_finite() || speed <= 0.0 {
-        return Err(Error::InvalidValue);
-    }
-    // Mac starts with the observed standard OFX floating frame clock. Windows rounding stays separate.
-    let timestamp = time / source_fps * speed * 1_000_000.0;
-    if !timestamp.is_finite() || timestamp < i64::MIN as f64 || timestamp >= i64::MAX as f64 {
-        return Err(Error::InvalidValue);
-    }
-    Ok(timestamp.round() as i64)
-}
-
 pub(super) fn parameter_frame(time: gyroflow_plugin_base::TimeType, host_fps: f64) -> f64 {
     use gyroflow_plugin_base::TimeType;
     match time {
@@ -287,12 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn mac_jianying_frame_clock_preserves_fractional_ofx_frames() {
-        assert_eq!(source_timestamp_us(30.5, 30.0, 1.0).unwrap(), 1_016_667);
-        assert_eq!(source_timestamp_us(1.1, 60.0, 1.0).unwrap(), 18_333);
-        assert_eq!(source_timestamp_us(15.0, 30.0, 2.0).unwrap(), 1_000_000);
-        for fps in [0.0, -1.0, f64::NAN] { assert!(source_timestamp_us(1.0, fps, 1.0).is_err()); }
-        assert!(source_timestamp_us(f64::INFINITY, 30.0, 1.0).is_err());
+    fn mac_jianying_parameter_clock_preserves_fractional_ofx_frames() {
         assert_eq!(parameter_frame(gyroflow_plugin_base::TimeType::Frame(30.5), 30.0), 30.5);
         assert_eq!(parameter_frame(gyroflow_plugin_base::TimeType::Microseconds(1_500_000), 30.0), 45.0);
     }

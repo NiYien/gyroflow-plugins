@@ -94,9 +94,10 @@ fn resolve(input: &str) -> Option<String> {
     };
     let project_path = source.with_extension("gyroflow");
     let project: Value = serde_json::from_slice(&fs::read(&project_path).ok()?).ok()?;
-    let video = local_path(project.get("videofile")?.as_str()?)?;
-    if !same_path(&video, &source)? { return None; }
-    project_path.to_str().map(str::to_owned)
+    project.as_object()?;
+    // Use the shared OFX lookup after validating the exact-named sidecar. Its saved
+    // media path may refer to an old location after the video and project were copied.
+    gyroflow_plugin_base::GyroflowPluginBase::get_project_path(source.to_str()?)
 }
 
 #[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
@@ -158,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn jianying_autoload_rejects_other_source_and_prefix_projects() {
+    fn jianying_autoload_requires_exact_readable_project() {
         let folder = fixture("exact-only");
         let source = folder.join("clip.mp4");
         let other = folder.join("other.mp4");
@@ -166,10 +167,28 @@ mod tests {
         fs::write(&other, b"other").unwrap();
         fs::write(folder.join("clip-final.gyroflow"), serde_json::to_vec(&serde_json::json!({"videofile": source})).unwrap()).unwrap();
         assert!(State::default().candidate(source.to_str().unwrap()).is_none());
-        project_for(&source, other.to_str().unwrap());
-        assert!(State::default().candidate(source.to_str().unwrap()).is_none());
-        fs::write(source.with_extension("gyroflow"), b"invalid JSON").unwrap();
-        assert!(State::default().candidate(source.to_str().unwrap()).is_none());
+        let project = project_for(&source, other.to_str().unwrap());
+        assert_eq!(State::default().candidate(source.to_str().unwrap()), project.to_str());
+        for invalid in [b"invalid JSON".as_slice(), b"null", b"[]"] {
+            fs::write(&project, invalid).unwrap();
+            assert!(State::default().candidate(source.to_str().unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn jianying_autoload_same_name_project_survives_media_move() {
+        let folder = fixture("moved-media");
+        let source = folder.join("原片 空格.MOV");
+        fs::write(&source, b"moved source").unwrap();
+        let missing = folder.join("old location").join(source.file_name().unwrap());
+        assert!(!missing.exists());
+        let project = project_for(&source, &filesystem::path_to_url(missing.to_str().unwrap()));
+        let before = fs::read(&project).unwrap();
+        let source_url = filesystem::path_to_url(source.to_str().unwrap());
+        assert_eq!(State::default().candidate(&source_url), project.to_str());
+        assert_eq!(gyroflow_plugin_base::GyroflowPluginBase::get_project_path(source.to_str().unwrap()),
+                   Some(project.to_str().unwrap().to_owned()));
+        assert_eq!(fs::read(&project).unwrap(), before);
     }
 
     #[test]

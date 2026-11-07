@@ -10,6 +10,8 @@ use gyroflow_plugin_base::lru::LruCache;
 
 #[path = "jianying_macos.rs"]
 mod jianying_macos;
+#[path = "jianying_timing.rs"]
+mod jianying_timing;
 
 plugin_module!(
     "xyz.niyien.gyroflow",
@@ -593,27 +595,25 @@ pub fn parse_mismatch_mode(s: &str) -> Option<HostInputSizing> {
     }
 }
 
-// plugins-host-timeline-trim (out-of-window passthrough): source-domain timestamp
-// for an Edit/Color-page render request. Shared by Render and IsIdentity so the
-// passthrough verdict can never drift from the timestamp Render actually uses.
-// Timeline time -> source microseconds via speed_stretch. Mixed-fps requests
-// keep the historical floor except for Jianying's microsecond quantization. The
-// Render-only SrcFrame override is deliberately NOT part of this function —
-// IsIdentity has no access to that in-arg, which is why its boundary slack must
-// stay <= the widen guard's slack (see the IsIdentity arm).
-pub(crate) fn ofx_source_timestamp_us(time: f64, src_fps: f64, fps: f64, speed_stretch: f64, is_jianying: bool) -> i64 {
+// Generic OFX retains its historical Resolve timing and mixed-fps frame grid.
+// Jianying uses the same source clock on both platforms, without range-derived
+// retiming or an unvalidated Resolve SrcFrame override.
+fn ofx_source_timestamp_us(time: f64, src_fps: f64, fps: f64, speed_stretch: f64) -> i64 {
     let mut timestamp_us = ((time / src_fps * 1_000_000.0) * speed_stretch).round() as i64;
     if (src_fps - fps).abs() > 0.01 {
-        let frame = (time / src_fps) * fps * speed_stretch;
-        // Jianying quantizes source times to integer microseconds before reporting OFX frame time.
-        let frame = if is_jianying && (frame - frame.round()).abs() <= fps * speed_stretch * 1e-6 {
-            frame.round()
-        } else {
-            frame.floor()
-        };
+        let frame = ((time / src_fps) * fps * speed_stretch).floor();
         timestamp_us = (frame * (1_000_000.0 / fps)).round() as i64;
     }
     timestamp_us
+}
+
+fn source_timestamp_for_host(time: f64, clock_fps: f64, project_fps: f64,
+    speed_stretch: f64, is_jianying: bool) -> Result<i64> {
+    if is_jianying {
+        jianying_timing::SourceClock::new(clock_fps)?.timestamp_us(time)
+    } else {
+        Ok(ofx_source_timestamp_us(time, clock_fps, project_fps, speed_stretch))
+    }
 }
 
 // Speed factor between the project media duration and the host clip's reported
@@ -630,6 +630,13 @@ fn ofx_speed_stretch(duration_ms: f64, src_fps: f64, frame_range_max: f64) -> f6
         speed_stretch = 1.0;
     }
     speed_stretch
+}
+
+fn ofx_speed_stretch_for_host(duration_ms: f64, src_fps: f64, frame_range_max: f64, is_jianying: bool) -> f64 {
+    // Jianying requests already identify positions in the source clip clock.
+    // Availability endpoints cannot distinguish rounding, trims or retiming.
+    if is_jianying { return 1.0; }
+    ofx_speed_stretch(duration_ms, src_fps, frame_range_max)
 }
 
 // Shared verdict for both passthrough layers (IsIdentity + render-copy): TRUE
@@ -2322,7 +2329,7 @@ impl Execute for GyroflowPlugin {
                 }
                 let src_fps = instance_data.source_clip.get_frame_rate().unwrap_or(fps);
                 let speed_stretch = instance_data.source_clip.get_frame_range()
-                    .map(|range| ofx_speed_stretch(duration_ms, src_fps, range.max))
+                    .map(|range| ofx_speed_stretch_for_host(duration_ms, src_fps, range.max, is_jianying))
                     .unwrap_or(1.0);
                 // Retimed clips: Render additionally honors the host's SrcFrame
                 // in-arg, which IsIdentity cannot read — near the boundary the
@@ -2331,8 +2338,7 @@ impl Execute for GyroflowPlugin {
                 if speed_stretch != 1.0 {
                     return REPLY_DEFAULT;
                 }
-                let timestamp_us = if is_mac_jianying { jianying_macos::source_timestamp_us(time, src_fps, speed_stretch)? }
-                    else { ofx_source_timestamp_us(time, src_fps, fps, speed_stretch, is_jianying) };
+                let timestamp_us = source_timestamp_for_host(time, src_fps, fps, speed_stretch, is_jianying)?;
                 if stab.params.read().get_source_timestamp_at_ramped_timestamp(timestamp_us) != timestamp_us {
                     return REPLY_DEFAULT;
                 }
@@ -2824,7 +2830,7 @@ impl Execute for GyroflowPlugin {
                     if instance_data.is_fusion_page {
                         time_adj = range.min;
                     } else {
-                        speed_stretch = ofx_speed_stretch(params.duration_ms, src_fps, range.max);
+                        speed_stretch = ofx_speed_stretch_for_host(params.duration_ms, src_fps, range.max, is_jianying);
                     }
                 }
 
@@ -2833,12 +2839,11 @@ impl Execute for GyroflowPlugin {
                 let mut time = time;
                 //let time_adj = if instance_data.is_fusion_page { instance_data.params.fusion_start_frame.get_value().unwrap_or_default() } else { 0.0 };
                 time -= time_adj;
-                let mut timestamp_us = if is_mac_jianying { jianying_macos::source_timestamp_us(time, src_fps, speed_stretch)? }
-                    else { ofx_source_timestamp_us(time, src_fps, fps, speed_stretch, is_jianying) };
+                let mut timestamp_us = source_timestamp_for_host(time, src_fps, fps, speed_stretch, is_jianying)?;
 
                 // log::info!("fps: {fps:?}, src_fps: {src_fps:?}, speed_stretch: {speed_stretch:.6}, time: {time:?}, timestamp_us: {timestamp_us:?}");
 
-                if !is_mac_jianying {
+                if !is_jianying {
                     if let Ok(frame) = in_args.get_src_frame() {
                         timestamp_us = (frame as f64 * (1_000_000.0 / fps)).round() as i64;
                     }
@@ -2848,10 +2853,12 @@ impl Execute for GyroflowPlugin {
                 drop(params);
 
                 if source_timestamp_us != timestamp_us {
-                    let source_frame = source_timestamp_us as f64 / speed_stretch / 1_000_000.0 * src_fps;
-                    time = if is_mac_jianying { source_frame } else { source_frame.round() };
-                    timestamp_us = if is_mac_jianying { jianying_macos::source_timestamp_us(time, src_fps, speed_stretch)? }
-                    else { ofx_source_timestamp_us(time, src_fps, fps, speed_stretch, is_jianying) };
+                    time = if is_jianying {
+                        jianying_timing::SourceClock::new(src_fps)?.frame_at_timestamp_us(source_timestamp_us)?
+                    } else {
+                        (source_timestamp_us as f64 / speed_stretch / 1_000_000.0 * src_fps).round()
+                    };
+                    timestamp_us = source_timestamp_for_host(time, src_fps, fps, speed_stretch, is_jianying)?;
                 }
 
                 // plugins-host-timeline-trim D7: passthrough verdict on the FINAL
@@ -3915,6 +3922,22 @@ impl Execute for GyroflowPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jianying_range_size_does_not_retime_the_source_clock() {
+        for duration in [1000.0, 1001.0, 200.0, 10_000.0] {
+            for end in [0.0, 15.0, 29.0, 30.0, 30.99999, 31.0, 60.0] {
+                let rate = ofx_speed_stretch_for_host(duration, 30.0, end, true);
+                assert_eq!(source_timestamp_for_host(15.0, 30.0, 29.97002997, rate, true).unwrap(), 500_000);
+                assert_eq!(ofx_speed_stretch_for_host(duration, 30.0, end, false),
+                    ofx_speed_stretch(duration, 30.0, end));
+            }
+        }
+        // A caller's duration estimate must never scale a Jianying source request.
+        assert_eq!(source_timestamp_for_host(15.0, 30.0, 60.0, 0.96, true).unwrap(), 500_000);
+        assert_eq!(source_timestamp_for_host(15.0, 30.0, 30.0, 2.0, false).unwrap(), 1_000_000);
+    }
+
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -4861,45 +4884,11 @@ mod tests {
     #[test]
     fn ofx_source_timestamp_matches_render_math() {
         // Same-fps path: plain round of time/src_fps.
-        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 1.0, false), 2_000_000);
+        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 1.0), 2_000_000);
         // Mixed-fps path (|src_fps - fps| > 0.01): floor to the target frame grid.
-        assert_eq!(ofx_source_timestamp_us(50.0, 50.0, 25.0, 1.0, false), 1_000_000);
+        assert_eq!(ofx_source_timestamp_us(50.0, 50.0, 25.0, 1.0), 1_000_000);
         // speed_stretch scales the source time.
-        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 2.0, false), 4_000_000);
-    }
-
-    #[test]
-    fn ofx_source_timestamp_jianying_quantized_capture_times() {
-        let fps = 60_000.0 / 1001.0;
-        // Frame indices 61, 121, 181 and 241 were matched independently against captured source images.
-        for (time, expected, legacy) in [
-            (30.53049, 1_017_683, 1_001_000),
-            (60.56049, 2_018_683, 2_002_000),
-            (90.59049, 3_019_683, 3_003_000),
-            (120.62049, 4_020_683, 4_004_000),
-        ] {
-            assert_eq!(ofx_source_timestamp_us(time, 30.0, fps, 1.0, true), expected);
-            assert_eq!(ofx_source_timestamp_us(time, 30.0, fps, 1.0, false), legacy);
-        }
-    }
-
-    #[test]
-    fn ofx_source_timestamp_jianying_only_snaps_microsecond_quantization() {
-        for speed in [0.5, 1.0, 2.0] {
-            let at = 30.0 / speed;
-            // Half a microsecond is inside the host quantization error; two microseconds is outside.
-            assert_eq!(ofx_source_timestamp_us(at - 30.0 * 0.5e-6, 30.0, 60.0, speed, true), 1_000_000);
-            assert_eq!(ofx_source_timestamp_us(at + 30.0 * 0.5e-6, 30.0, 60.0, speed, true), 1_000_000);
-            assert_eq!(ofx_source_timestamp_us(at - 30.0 * 2.0e-6, 30.0, 60.0, speed, true), 983_333);
-            assert_eq!(ofx_source_timestamp_us(at - 30.0 * 0.5e-6, 30.0, 60.0, speed, false), 983_333);
-        }
-        assert_eq!(ofx_source_timestamp_us(30.49, 30.0, 60.0, 1.0, true), 1_000_000);
-        assert_eq!(ofx_source_timestamp_us(-30.0 * 0.5e-6, 30.0, 60.0, 1.0, true), 0);
-        assert_eq!(ofx_source_timestamp_us(-30.0 * 2.0e-6, 30.0, 60.0, 1.0, true), -16_667);
-        assert_eq!(ofx_source_timestamp_us(30.53049, 30.0, 30.0, 1.0, true), 1_017_683);
-        assert_eq!(ofx_source_timestamp_us(30.53049, 30.0, 30.0, 1.0, false), 1_017_683);
-        // A rounded request beyond the media tail stays beyond the tail; this helper does not clamp it.
-        assert_eq!(ofx_source_timestamp_us(300.5 - 30.0 * 0.5e-6, 30.0, 60.0, 1.0, true), 10_016_667);
+        assert_eq!(ofx_source_timestamp_us(50.0, 25.0, 25.0, 2.0), 4_000_000);
     }
 
     #[test]
