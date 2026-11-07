@@ -90,7 +90,7 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
         }
         ParameterType::Text { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
-            let hidden = hidden && !matches!(p, Params::TranslationStatus | Params::PluginUpdateNotice);
+            let hidden = hidden && p != Params::PluginUpdateNotice;
             // The loaded-project name is shown in Adobe via the custom Status panel (ui.rs draws
             // "Project: …"), so the standard LoadedProject text param is a redundant always-empty
             // field here (set_string is a no-op for it — parameters.rs `set_string`). Hide it
@@ -114,7 +114,6 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
         ParameterType::Slider { id, label, min, max, default, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
             let translation = gyroflow_plugin_base::translation::is_setting(p);
-            let hidden = hidden && !translation;
             if p == Params::VideoSpeed { return; }
             if p == Params::FusionStartFrame { return; }
             let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
@@ -133,7 +132,7 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
             if id == "DontDrawOutside" { return; }
             let p = Params::from_str(id).unwrap();
             let translation = gyroflow_plugin_base::translation::is_setting(p);
-            let hidden = hidden && !translation;
+            let hidden = hidden && p != Params::TranslationEnabled;
             let ui = if hidden { ParamUIFlags::NO_ECW_UI } else { ParamUIFlags::empty() };
             params.add_with_flags(p, label, ae::CheckBoxDef::setup(|f| {
                 f.set_default(default);

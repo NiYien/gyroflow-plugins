@@ -2979,6 +2979,11 @@ mod tests {
         manager
     }
 
+    fn assert_translation_switch_only(params: &TestParams) {
+        assert!(params.visible[&Params::TranslationEnabled]);
+        assert!(translation::CONTROLS[1..].iter().all(|p| !params.visible[p]));
+    }
+
     #[test]
     fn translation_controls_require_results_and_hide_after_project_switch() {
         let without = StabilizationManager::default();
@@ -2990,7 +2995,7 @@ mod tests {
         let with = translation_control_fixture();
         translation::load(&mut params, &with, true).unwrap();
         translation::update_ui(&mut params, Some(&with));
-        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert_translation_switch_only(&params);
         translation::update_ui(&mut params, Some(&without));
         assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
     }
@@ -3013,14 +3018,14 @@ mod tests {
         instance.param_changed(&mut params, &cache, Params::TranslationEnabled, true).unwrap();
 
         assert!(instance.ever_changed && instance.managers.is_empty());
-        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert_translation_switch_only(&params);
         assert!(params.enabled[&Params::TranslationEnabled]);
         assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
         assert_eq!(params.get_string(Params::TranslationStatus).unwrap(), t!("status.translation_disabled"));
         assert_eq!(*shared.optical_ui.read(), before);
 
         instance.param_changed(&mut params, &cache, Params::ProjectData, true).unwrap();
-        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert_translation_switch_only(&params);
         assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
 
         params.set_string(Params::ProjectPath, "").unwrap();
@@ -3109,18 +3114,18 @@ mod tests {
         params.set_bool(Params::TranslationEnabled, false).unwrap();
         instance.param_changed(&mut params, &cache, Params::TranslationEnabled, true).unwrap();
         assert!(instance.managers.is_empty());
-        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert_translation_switch_only(&params);
         assert!(params.enabled[&Params::TranslationEnabled]);
         assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
         assert_eq!(params.get_string(Params::TranslationStatus).unwrap(), t!("status.translation_disabled"));
         assert_eq!(*stab.optical_ui.read(), project_translation_settings);
         instance.param_changed(&mut params, &cache, Params::ProjectData, true).unwrap();
-        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert_translation_switch_only(&params);
         assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
         let disabled = instance.stab_manager(&mut params, &cache, (0, 0), false).unwrap();
         disabled.recompute_blocking();
         assert!(!params.get_bool(Params::TranslationEnabled).unwrap());
-        assert!(translation::CONTROLS.iter().all(|p| params.visible[p]));
+        assert_translation_switch_only(&params);
         assert!(translation::CONTROLS[1..].iter().all(|p| !params.enabled[p]));
         assert!(!disabled.gyro.read().optical_translation.as_ref().unwrap().is_active());
         let off = FrameTransform::at_timestamp(&ComputeParams::from_manager(&disabled), timestamp, frame).matrices;

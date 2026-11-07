@@ -77,7 +77,8 @@ pub fn update_ui(params: &mut dyn GyroflowPluginParams, stab: Option<&Stabilizat
         Some((enabled, auto, result.applies))
     });
     for param in CONTROLS {
-        let _ = params.set_visible(param, state.is_some());
+        // Keep legacy parameters registered while exposing only the enable switch.
+        let _ = params.set_visible(param, param == Params::TranslationEnabled && state.is_some());
     }
     if let Some((enabled, auto, applies)) = state {
         let _ = params.set_enabled(Params::TranslationEnabled, true);
