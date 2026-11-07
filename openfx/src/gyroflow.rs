@@ -3906,7 +3906,7 @@ impl Execute for GyroflowPlugin {
             Load => {
                 update_notice::available();
                 // Keep playback free of per-frame core/backend logging in this host.
-                let level = if is_mac_jianying { log::LevelFilter::Warn } else { log::LevelFilter::Debug };
+                let level = if is_jianying { log::LevelFilter::Warn } else { log::LevelFilter::Debug };
                 self.gyroflow_plugin.initialize_log_with_level("openfx", level);
                 // Remove DRT temp files left behind by crashed sessions (older than an hour).
                 let swept = sweep_temp_files(&std::env::temp_dir(), std::process::id(), 0, std::time::SystemTime::now());

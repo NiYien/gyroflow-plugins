@@ -185,7 +185,9 @@ mod tests {
         let project = project_for(&source, &filesystem::path_to_url(missing.to_str().unwrap()));
         let before = fs::read(&project).unwrap();
         let source_url = filesystem::path_to_url(source.to_str().unwrap());
-        assert_eq!(State::default().candidate(&source_url), project.to_str());
+        let mut state = State::default();
+        let candidate = state.candidate(&source_url).expect("The moved media's exact project must resolve");
+        assert_eq!(fs::canonicalize(candidate).unwrap(), fs::canonicalize(&project).unwrap());
         assert_eq!(gyroflow_plugin_base::GyroflowPluginBase::get_project_path(source.to_str().unwrap()),
                    Some(project.to_str().unwrap().to_owned()));
         assert_eq!(fs::read(&project).unwrap(), before);

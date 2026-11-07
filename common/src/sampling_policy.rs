@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use crate::{BufferSource, Buffers, KernelParamsFlags, StabilizationManager};
+use crate::{Buffers, KernelParamsFlags, StabilizationManager};
+#[cfg(any(target_os = "macos", test))]
+use crate::BufferSource;
 
 // Keep the existing ABI usable with formal cores that predate this optional bit.
 pub const INTEGER_FRAGMENT_COORDINATES_BIT: i32 = 1 << 14;
@@ -28,13 +30,14 @@ impl FragmentSamplingPolicy {
         self.supported_by(cfg!(target_os = "macos"), KernelParamsFlags::all().bits())
     }
 
-    pub fn apply(self, stab: &StabilizationManager, buffers: &Buffers) -> Result<(), &'static str> {
+    pub fn apply(self, stab: &StabilizationManager, _buffers: &Buffers) -> Result<(), &'static str> {
         if !self.is_supported() {
             return Err("The selected fragment sampling policy is unavailable in this core/platform");
         }
+        #[cfg(target_os = "macos")]
         if self == Self::IntegerCoordinates
-            && (!matches!(buffers.input.data, BufferSource::MetalBuffer { .. })
-                || !matches!(buffers.output.data, BufferSource::MetalBuffer { .. })) {
+            && (!matches!(_buffers.input.data, BufferSource::MetalBuffer { .. })
+                || !matches!(_buffers.output.data, BufferSource::MetalBuffer { .. })) {
             return Err("Integer fragment sampling requires two Metal buffers");
         }
         let flag = KernelParamsFlags::from_bits_truncate(INTEGER_FRAGMENT_COORDINATES_BIT);
@@ -86,6 +89,20 @@ mod tests {
             all.bits() & !INTEGER_FRAGMENT_COORDINATES_BIT);
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn integer_policy_rejects_non_macos_without_changing_flags() {
+        let stab = StabilizationManager::default();
+        let original = stab.stabilization.read().kernel_flags.bits();
+        let mut input = [0u8; 4];
+        let mut output = [0u8; 4];
+        let buffers = Buffers { input: descriptor(BufferSource::Cpu { buffer: &mut input }),
+            output: descriptor(BufferSource::Cpu { buffer: &mut output }) };
+        assert!(FragmentSamplingPolicy::IntegerCoordinates.apply(&stab, &buffers).is_err());
+        assert_eq!(stab.stabilization.read().kernel_flags.bits(), original);
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn integer_rejection_leaves_manager_flags_unchanged() {
         let stab = StabilizationManager::default();
@@ -97,6 +114,7 @@ mod tests {
         assert_eq!(stab.stabilization.read().kernel_flags.bits(), original);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn explicit_integer_policy_uses_the_existing_core_bit_only() {
         let stab = StabilizationManager::default();

@@ -4,7 +4,7 @@
 
 产物是 `target/GyroflowNiyien-Jianying-windows.zip`，内含 `GyroflowJianyingBatch11.ofx.bundle`。`batch11` 文件名、插件 ID `xyz.niyien.gyroflow.jianying.batch11`、OFX 版本 1.11 以及隐藏的诊断参数保留，用于保持已有剪映草稿和参数身份；界面名称为“Gyroflow 剪映”。更新检测使用 `Contents/version.txt` 和 `Contents/package-manifest.json` 的正式发布版本，不能使用固定 OFX 版本判断更新。
 
-包内的 `gyroflow_ofx.dll` 从同一构建的正式 OpenFX 产物复制。ANGLE 库从宿主已加载模块取得，不携带私有 ANGLE 库，不依赖用户目录、固定剪映应用版本目录或实验启动脚本。外层日志使用当前用户的 LocalAppData 下 `NiYien/GyroflowNiYien/plugins/jianying/`。默认不进行输出 GPU 读回。
+包内的 `gyroflow_ofx.dll` 从同一构建的正式 OpenFX 产物复制。ANGLE 库从宿主已加载模块取得，不携带私有 ANGLE 库，不依赖用户目录、固定剪映应用版本目录或实验启动脚本。Windows 外层不再创建诊断目录或日志、抓取图像或进行输出 GPU 校验读回；桥接错误只写调试器。剪映内层仅记录警告和错误，隐藏的旧诊断参数不再改变渲染行为。
 
 自动加载仅在 `cccreator.dll` SHA-256 精确匹配时使用本实例来源，其他构建保留浏览按钮。构建成功和离线回归不能替代宿主验收。安装器负责宿主占用检查、完整备份及失败恢复，本脚本只构建和打包，不安装。
 
