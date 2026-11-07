@@ -76,8 +76,10 @@ class PackageTests(unittest.TestCase):
             info = plistlib.loads((package.ROOT / "openfx/res/Info.plist").read_bytes())
             info.update(CFBundleVersion="3.0.0.0", CFBundleShortVersionString="3.0.0.0")
             (generic / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
-            shutil.copy2(package.ROOT / "LICENSE", generic / "Contents/LICENSE")
-            package.sign(generic, "-", True)
+            (generic / "Contents/Resources").mkdir()
+            shutil.copy2(package.ROOT / "LICENSE", generic / "Contents/Resources/LICENSE")
+            package.run(sys.executable, package.ROOT / "scripts/codesign_with_retry.py",
+                        "--force", "--deep", "--strict", "--options=runtime", "--sign", "-", generic)
             original = core.read_bytes()
             archive_path = root / "generic.zip"
             with zipfile.ZipFile(archive_path, "w") as archive:
@@ -105,6 +107,16 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual((bundle / package.CORE).read_bytes(), original)
                     self.assertEqual(package.candidate.file_inventory(bundle / package.CORE_BUNDLE),
                                      package.candidate.file_inventory(generic))
+                    delivery = {"files": [{**item, "path": package.BUNDLE + "/" + item["path"]}
+                                          for item in package.candidate.file_inventory(bundle)]}
+                    (bundle.parent / "delivery-manifest.json").write_text(json.dumps(delivery))
+                    zipped = bundle.parent / "signed.zip"
+                    package.write_package(zipped, bundle.parent, delivery)
+                    with zipfile.ZipFile(zipped) as archive:
+                        archive.extractall(bundle.parent / "unpacked")
+                    unpacked = bundle.parent / "unpacked" / package.BUNDLE
+                    package.run("codesign", "--verify", "--deep", "--strict", "--all-architectures", unpacked)
+                    self.assertEqual((unpacked / package.CORE).read_bytes(), original)
 
     def fixture(self, directory, local=False, mutate=None):
         meta = package.metadata("2.1.2-local" if local else "2.1.2", local)
@@ -137,11 +149,14 @@ class PackageTests(unittest.TestCase):
         files["Contents/Resources/package-manifest.json"] = json.dumps(inner).encode()
         delivery = {**meta, "files": [{**item, "path": package.BUNDLE + "/" + item["path"]}
                                      for item in inventory(files)]}
-        path = Path(directory) / "jianying.zip"
-        with zipfile.ZipFile(path, "w") as archive:
-            for name, data in files.items():
-                archive.writestr(package.BUNDLE + "/" + name, data)
-            archive.writestr("delivery-manifest.json", json.dumps(delivery))
+        root = Path(directory)
+        for name, data in files.items():
+            destination = root / package.BUNDLE / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        (root / "delivery-manifest.json").write_text(json.dumps(delivery))
+        path = root / "jianying.zip"
+        package.write_package(path, root, delivery)
         return path
 
     def test_formal_archive_keeps_the_shared_ofx_identity(self):

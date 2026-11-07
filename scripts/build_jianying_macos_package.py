@@ -182,6 +182,13 @@ def copy_shared_core(core, openfx_package, bundle):
     shutil.copytree(source, destination)
 
 
+def write_package(package, output, delivery):
+    with zipfile.ZipFile(package, "x", zipfile.ZIP_DEFLATED) as archive:
+        for item in delivery["files"]:
+            archive.write(output / item["path"], item["path"])
+        archive.write(output / "delivery-manifest.json", "delivery-manifest.json")
+
+
 def build(core, output, headers, version, build_receipt, openfx_package,
           identity, local_validation=False):
     if identity == "-" and not local_validation:
@@ -238,10 +245,7 @@ def build(core, output, headers, version, build_receipt, openfx_package,
                                   for item in candidate.file_inventory(bundle)]}
     (output / "delivery-manifest.json").write_text(json.dumps(delivery, ensure_ascii=False, indent=2) + "\n")
     package = output / (LOCAL_PACKAGE if local_validation else PACKAGE)
-    with zipfile.ZipFile(package, "x", zipfile.ZIP_DEFLATED) as archive:
-        for item in delivery["files"]:
-            archive.write(output / item["path"], item["path"])
-        archive.write(output / "delivery-manifest.json", "delivery-manifest.json")
+    write_package(package, output, delivery)
     verify(package, openfx_package, allow_local=local_validation)
     receipt.validate(data, core)
     return {"package": str(package), "sha256": receipt.sha256(package),
