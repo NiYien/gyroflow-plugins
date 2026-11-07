@@ -235,7 +235,7 @@ static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHan
     return status;
 }
 
-static OfxPlugin plugin = {kOfxImageEffectPluginApi,1,"xyz.niyien.gyroflow.jianying.batch11",1,11,set_host,entry};
+static OfxPlugin plugin = {kOfxImageEffectPluginApi,1,"xyz.niyien.jianying.gyroflow",1,11,set_host,entry};
 extern "C" __declspec(dllexport) int OfxGetNumberOfPlugins() { return 1; }
 extern "C" __declspec(dllexport) OfxPlugin* OfxGetPlugin(int index) {
     if (index != 0) return nullptr;

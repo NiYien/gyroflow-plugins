@@ -16,7 +16,10 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = "GyroflowJianyingBatch11.ofx.bundle"
 WRAPPER = "GyroflowJianyingBatch11.ofx"
+# Keep the package identity accepted by existing Gyroflow installers.
 PLUGIN_ID = "xyz.niyien.gyroflow.jianying.batch11"
+EFFECT_ID = "xyz.niyien.jianying.gyroflow"
+ICON_PNG = EFFECT_ID + ".png"
 PACKAGE = "GyroflowNiyien-Jianying-windows.zip"
 
 
@@ -89,6 +92,9 @@ def create_package(wrapper, core, output, version):
         bundle = Path(temporary) / BUNDLE
         binaries = bundle / "Contents/Win64"
         binaries.mkdir(parents=True)
+        resources = bundle / "Contents/Resources"
+        resources.mkdir()
+        shutil.copy2(ROOT / "jianying/resources/icon.png", resources / ICON_PNG)
         shutil.copy2(wrapper, binaries / WRAPPER)
         shutil.copy2(core, binaries / "gyroflow_ofx.dll")
         shutil.copy2(ROOT / "LICENSE", bundle / "Contents/LICENSE")
@@ -96,7 +102,8 @@ def create_package(wrapper, core, output, version):
         (bundle / "Contents/version.txt").write_text(version + "\n", encoding="utf-8")
         files = [{"path": path.relative_to(bundle).as_posix(), "sha256": sha256(path)}
                  for path in sorted(bundle.rglob("*")) if path.is_file()]
-        manifest = {"schema_version": 1, "plugin_id": PLUGIN_ID, "version": version, "files": files}
+        manifest = {"schema_version": 1, "plugin_id": PLUGIN_ID, "effect_id": EFFECT_ID,
+                    "version": version, "files": files}
         (bundle / "Contents/package-manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -112,7 +119,7 @@ def verify_package(package):
         prefix = BUNDLE + "/"
         manifest_name = prefix + "Contents/package-manifest.json"
         manifest = json.loads(archive.read(manifest_name))
-        if manifest["schema_version"] != 1 or manifest["plugin_id"] != PLUGIN_ID:
+        if manifest["schema_version"] != 1 or manifest["plugin_id"] != PLUGIN_ID or manifest.get("effect_id") != EFFECT_ID:
             raise ValueError("Unexpected Jianying package identity")
         expected = {manifest_name}
         for entry in manifest["files"]:
@@ -125,7 +132,8 @@ def verify_package(package):
             expected.add(filename)
             if hashlib.sha256(archive.read(filename)).hexdigest() != entry["sha256"]:
                 raise ValueError("Package hash mismatch: " + name)
-        required = {prefix + "Contents/Win64/" + WRAPPER, prefix + "Contents/Win64/gyroflow_ofx.dll"}
+        required = {prefix + "Contents/Win64/" + WRAPPER, prefix + "Contents/Win64/gyroflow_ofx.dll",
+                    prefix + "Contents/Resources/" + ICON_PNG}
         if not required <= expected or set(archive.namelist()) != expected:
             raise ValueError("Unexpected Jianying package contents")
         if archive.read(prefix + "Contents/version.txt").decode("utf-8").strip() != manifest["version"]:
@@ -147,8 +155,8 @@ def verify_wrapper(wrapper):
     plugin = library.OfxGetPlugin(0)
     if library.OfxGetNumberOfPlugins() != 1 or not plugin or library.OfxGetPlugin(1):
         raise RuntimeError("Invalid Jianying plugin exports")
-    if plugin.contents.identifier != PLUGIN_ID.encode() or (plugin.contents.major, plugin.contents.minor) != (1, 11):
-        raise RuntimeError("Jianying draft identity changed")
+    if plugin.contents.identifier != EFFECT_ID.encode() or (plugin.contents.major, plugin.contents.minor) != (1, 11):
+        raise RuntimeError("Unexpected Jianying effect identity")
 
 
 def verify_shared_core(jianying_package, openfx_package):
@@ -189,7 +197,7 @@ def main():
     shutil.copy2(core, wrapper.parent / "gyroflow_ofx.dll")
     subprocess.run([sys.executable, str(Path(__file__).resolve()), "--verify-wrapper", str(wrapper)], check=True)
     package, manifest = create_package(wrapper, core, output, package_version())
-    summary = {"package": package.name, "sha256": sha256(package), "plugin_id": PLUGIN_ID,
+    summary = {"package": package.name, "sha256": sha256(package), "plugin_id": PLUGIN_ID, "effect_id": EFFECT_ID,
                "version": manifest["version"], "ofx_version": [1, 11],
                "core_sha256": sha256(core), "wrapper_sha256": sha256(wrapper),
                "native_sources": {path.relative_to(ROOT).as_posix(): sha256(path)
