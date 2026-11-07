@@ -100,8 +100,8 @@ class CandidateTests(unittest.TestCase):
     def test_enabled_autoload_rejects_incomplete_or_unverified_provider(self):
         changes = {
             "missing-provider": lambda data: data.pop("autoload_provider"),
-            "unknown-version": lambda data: data["autoload_provider"].update(version=2),
-            "wrong-host-hash": lambda data: data["autoload_provider"]["host"].update(sha256="0" * 64),
+            "unknown-version": lambda data: data["autoload_provider"].update(version=candidate.AUTOLOAD_PROVIDER["version"] + 1),
+            "unexpected-host-fingerprint": lambda data: data["autoload_provider"]["host"].update(sha256="0" * 64),
             "missing-host-module": lambda data: data["autoload_provider"]["host"].pop("module"),
             "wrong-host-bundle": lambda data: data["autoload_provider"]["host"].update(bundle_id="other.host"),
             "missing-priority": lambda data: data.pop("manual_saved_binding_priority"),

@@ -215,8 +215,17 @@ class PackageTests(unittest.TestCase):
                 package.verify(self.fixture(root, mutate=missing))
 
     def test_browser_icon_is_named_after_the_exported_plugin_identifier(self):
-        self.assertEqual(package.ICON_PNG, "xyz.niyien.gyroflow.jianying.batch11.png")
-        self.assertEqual(package.ICON_SVG, "xyz.niyien.gyroflow.jianying.batch11.svg")
+        self.assertEqual(package.ICON_PNG, "xyz.niyien.jianying.gyroflow.png")
+        self.assertEqual(package.ICON_SVG, "xyz.niyien.jianying.gyroflow.svg")
+
+    def test_effect_identity_and_source_contract_do_not_change_the_installer_identity(self):
+        self.assertEqual(package.candidate.PLUGIN_ID, "xyz.niyien.gyroflow.jianying.batch11")
+        meta = package.metadata("3.0.0.71")
+        self.assertEqual(meta["effect_id"], "xyz.niyien.jianying.gyroflow")
+        self.assertEqual(meta["autoload_provider"]["version"], 2)
+        self.assertEqual(meta["autoload_provider"]["compatibility"], "runtime-type-and-layout-contract")
+        self.assertNotIn("sha256", meta["autoload_provider"]["host"])
+        self.assertIn("../source_path_contract.h", package.candidate.NATIVE_SOURCES)
 
     def test_browser_icon_rejects_rgb_without_an_alpha_channel(self):
         package.validate_browser_png(png_fixture())

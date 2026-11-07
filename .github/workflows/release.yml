@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify native signing, architecture and package contracts
-        run: python3 -m unittest tests.test_codesign_with_retry tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt tests.test_jianying_notarization
+        run: python3 -m unittest tests.test_codesign_with_retry tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt tests.test_jianying_notarization tests.test_jianying_source_contract
 
   build:
     if: ${{ !inputs.native_checks_only }}
@@ -96,14 +96,14 @@ jobs:
         env:
           GYROFLOW_JIANYING_TEST_CORE: ${{ github.workspace }}/target/deploy/gyroflow_ofx.dll
         run: |
-          python -m unittest tests.test_jianying_package tests.test_jianying_protocol
+          python -m unittest tests.test_jianying_package tests.test_jianying_protocol tests.test_jianying_source_contract
           python scripts/build_jianying_package.py --verify target/GyroflowNiyien-Jianying-windows.zip --openfx-package target/GyroflowNiyien-OpenFX-windows.zip
 
       - name: Check macOS packaging tools and signing
         if: ${{ matrix.targets.type == 'macos' }}
         run: |
           python3 -m unittest discover -s tests -p test_codesign_with_retry.py
-          python3 -m unittest tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt tests.test_jianying_notarization
+          python3 -m unittest tests.test_jianying_macos_package tests.test_jianying_macos_build_receipt tests.test_jianying_notarization tests.test_jianying_source_contract
 
       - name: Build plugins (macOS)
         if: ${{ matrix.targets.type == 'macos' }}

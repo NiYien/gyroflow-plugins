@@ -474,7 +474,7 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
     return status;
 }
 
-OfxPlugin plugin{kOfxImageEffectPluginApi, 1, "xyz.niyien.gyroflow.jianying.batch11", 1, 11, set_host, entry};
+OfxPlugin plugin{kOfxImageEffectPluginApi, 1, "xyz.niyien.jianying.gyroflow", 1, 11, set_host, entry};
 }
 
 extern "C" __attribute__((visibility("default"))) int OfxGetNumberOfPlugins() {

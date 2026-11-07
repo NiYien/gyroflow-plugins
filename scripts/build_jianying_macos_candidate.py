@@ -18,13 +18,14 @@ BUNDLE = "GyroflowJianyingBatch11.ofx.bundle"
 WRAPPER = "GyroflowJianyingBatch11.ofx"
 CORE = "libgyroflow_ofx.dylib"
 PLUGIN_ID = "xyz.niyien.gyroflow.jianying.batch11"
+EFFECT_ID = "xyz.niyien.jianying.gyroflow"
 PACKAGE = "GyroflowNiyien-Jianying-macos-arm64-candidate.zip"
 DELIVERY = "delivery-manifest.json"
-NATIVE_SOURCES = ("jianying_macos.mm", "metal_guard.mm", "metal_guard.h", "source_path.h")
-AUTOLOAD_PROVIDER = {"id": "macos-effect-processor-source-path", "version": 1,
+NATIVE_SOURCES = ("jianying_macos.mm", "metal_guard.mm", "metal_guard.h", "source_path.h", "../source_path_contract.h")
+AUTOLOAD_PROVIDER = {"id": "macos-effect-processor-source-path", "version": 2,
+                     "compatibility": "runtime-type-and-layout-contract",
                      "host": {"bundle_id": "com.lemon.lvpro", "architecture": "arm64",
-                              "module": "libcccreator.dylib",
-                              "sha256": "8db71da2f613404b3c6ad5edd91d33af4ad877b54aa52dec3730d6cf3922d503"}}
+                              "module": "libcccreator.dylib"}}
 AUTOLOAD_REQUIRED_RUST_SOURCES = ("openfx/src/gyroflow.rs", "openfx/src/jianying_macos.rs",
                                   "openfx/src/jianying_autoload.rs", "openfx/src/lib.rs")
 RUST_SOURCES = ("openfx/src/gyroflow.rs", "openfx/src/jianying_macos.rs", "openfx/src/lib.rs",
@@ -100,7 +101,7 @@ def write_json(path, value):
 
 
 def candidate_metadata(version, autoload=True):
-    metadata = {"schema_version": 1, "plugin_id": PLUGIN_ID, "version": version,
+    metadata = {"schema_version": 1, "plugin_id": PLUGIN_ID, "effect_id": EFFECT_ID, "version": version,
             "ofx_version": [1, 11], "platform": "macos", "architecture": "arm64",
             "candidate": True, "host_verified": False, "notarized": False,
             "signature": "ad-hoc", "gpu": "Metal-only", "autoload": autoload,
@@ -176,7 +177,7 @@ def verify_delivery(package):
         if len(names) != len(set(names)):
             raise ValueError("Duplicate ZIP member")
         manifest = json.loads(archive.read(DELIVERY))
-        if manifest["plugin_id"] != PLUGIN_ID or manifest["ofx_version"] != [1, 11]:
+        if manifest["plugin_id"] != PLUGIN_ID or manifest.get("effect_id") != EFFECT_ID or manifest["ofx_version"] != [1, 11]:
             raise ValueError("Candidate identity changed")
         if (manifest.get("platform"), manifest.get("architecture"), manifest.get("candidate"),
                 manifest.get("host_verified"), manifest.get("notarized")) != (

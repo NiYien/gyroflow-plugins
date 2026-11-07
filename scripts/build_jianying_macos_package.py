@@ -25,8 +25,8 @@ LOCAL_PACKAGE = "GyroflowNiyien-Jianying-macos-local-validation.zip"
 TEAM = "H59FJRN2AM"
 GENERIC_CORE = "GyroflowNiyien.ofx.bundle/Contents/MacOS/GyroflowNiyien.ofx"
 # Browser icons are named after the exported OfxPlugin identifier.
-ICON_PNG = candidate.PLUGIN_ID + ".png"
-ICON_SVG = candidate.PLUGIN_ID + ".svg"
+ICON_PNG = candidate.EFFECT_ID + ".png"
+ICON_SVG = candidate.EFFECT_ID + ".svg"
 
 
 def run(*args):
@@ -41,7 +41,7 @@ def run(*args):
 def metadata(version, local_validation=False):
     if not re.fullmatch(r"\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.-]+)?", version):
         raise ValueError("Invalid Jianying package version")
-    return {"schema_version": 1, "plugin_id": candidate.PLUGIN_ID, "version": version,
+    return {"schema_version": 1, "plugin_id": candidate.PLUGIN_ID, "effect_id": candidate.EFFECT_ID, "version": version,
             "ofx_version": [1, 11], "platform": "macos", "architecture": "arm64",
             "candidate": local_validation, "fragment_sampling_policy": "core-default",
             "gpu": "Metal-only", "signature": "ad-hoc" if local_validation else "Developer ID",
@@ -218,6 +218,9 @@ def build(core, output, headers, version, build_receipt, openfx_package,
     shutil.copy2(ROOT / "LICENSE", resources / "LICENSE")
     for name, destination in (("icon.svg", ICON_SVG), ("icon.png", ICON_PNG)):
         shutil.copy2(ROOT / "jianying/resources" / name, resources / destination)
+    # Older saved browser metadata can still reference the previous resource names.
+    for suffix in (".png", ".svg"):
+        shutil.copy2(resources / (candidate.EFFECT_ID + suffix), resources / (candidate.PLUGIN_ID + suffix))
     validate_browser_png((resources / ICON_PNG).read_bytes())
     numeric = re.split(r"[-+]", version)[0]
     info = {"CFBundleIdentifier": candidate.PLUGIN_ID, "CFBundleExecutable": WRAPPER,

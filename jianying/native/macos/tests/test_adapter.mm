@@ -179,8 +179,8 @@ int main(int argc, char** argv) {
         auto count = reinterpret_cast<int (*)()>(dlsym(library, "OfxGetNumberOfPlugins"));
         require(get_plugin && count && count() == 1 && !get_plugin(1), "Wrapper exports and index bounds");
         OfxPlugin* plugin = get_plugin(0);
-        require(plugin && std::string(plugin->pluginIdentifier) == "xyz.niyien.gyroflow.jianying.batch11"
-            && plugin->pluginVersionMajor == 1 && plugin->pluginVersionMinor == 11, "Draft identity and OFX version");
+        require(plugin && std::string(plugin->pluginIdentifier) == "xyz.niyien.jianying.gyroflow"
+            && plugin->pluginVersionMajor == 1 && plugin->pluginVersionMinor == 11, "Effect identity and OFX version");
         const auto inner_path = std::filesystem::path(argv[1]).parent_path() / "libgyroflow_ofx.dylib";
         void* inner_library = dlopen(inner_path.c_str(), RTLD_NOW | RTLD_LOCAL);
         require(inner_library, "Mock inner loaded from same directory");
