@@ -55,7 +55,7 @@ deploy:
     fi
 
     cd "{{TargetDir}}"
-    rm -Rf gyroflow-niyien-ofx-macos GyroflowNiyien-OpenFX-macos.dmg
+    rm -Rf gyroflow-niyien-ofx-macos GyroflowNiyien-OpenFX-macos.dmg GyroflowNiyien-OpenFX-macos.zip
     mkdir -p gyroflow-niyien-ofx-macos/GyroflowNiyien.ofx.bundle/Contents/MacOS
     mkdir -p gyroflow-niyien-ofx-macos/ResolveScripts
 

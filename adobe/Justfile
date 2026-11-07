@@ -51,7 +51,7 @@ deploy:
     fi
 
     cd "{{TargetDir}}"
-    rm -Rf gyroflow-niyien-adobe-macos GyroflowNiyien-Adobe-macos.dmg
+    rm -Rf gyroflow-niyien-adobe-macos GyroflowNiyien-Adobe-macos.dmg GyroflowNiyien-Adobe-macos.zip
     mkdir -p gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/Resources
     mkdir -p gyroflow-niyien-adobe-macos/GyroflowNiyien.plugin/Contents/MacOS
 

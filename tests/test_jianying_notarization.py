@@ -21,11 +21,15 @@ class NotarizationTests(unittest.TestCase):
         reply = {"id": "submission", "status": "Accepted"}
         with tempfile.TemporaryDirectory() as directory:
             result_path = Path(directory) / "evidence/result.json"
+            result_path.parent.mkdir()
+            previous_log = result_path.with_name("result-log.json")
+            previous_log.write_text('{"issues":[{"message":"previous rejection"}]}')
             with patch.object(notary.subprocess, "run", return_value=
                               subprocess.CompletedProcess([], 0, json.dumps(reply), "")) as command:
                 result = notary.notarize(Path("plugin.zip"), result_path, self.credentials, self.secrets)
             self.assertEqual(result, reply)
             self.assertEqual(json.loads(result_path.read_text()), reply)
+            self.assertFalse(previous_log.exists())
             self.assertEqual(command.call_args.args[0], ["xcrun", "notarytool", "submit", "--wait",
                              "--output-format", "json", *self.credentials, "plugin.zip"])
             self.assertEqual(command.call_count, 1)
@@ -65,12 +69,16 @@ class NotarizationTests(unittest.TestCase):
         response = subprocess.CompletedProcess([], 1, "private-account", "private-password failed")
         with tempfile.TemporaryDirectory() as directory:
             result_path = Path(directory) / "result.json"
+            result_path.write_text('{"id":"previous-submission","status":"Accepted"}')
+            previous_log = Path(directory) / "result-log.json"
+            previous_log.write_text('{"issues":[{"message":"previous rejection"}]}')
             with patch.object(notary.subprocess, "run", return_value=response):
                 with self.assertRaises(RuntimeError) as raised:
                     notary.notarize(Path("plugin.zip"), result_path, self.credentials, self.secrets)
             self.assertNotIn("private-account", str(raised.exception))
             self.assertNotIn("private-password", str(raised.exception))
             self.assertFalse(result_path.exists())
+            self.assertFalse(previous_log.exists())
 
     def test_timeout_does_not_expose_the_command_credentials(self):
         command = ["xcrun", "notarytool", "submit", *self.credentials, "plugin.zip"]

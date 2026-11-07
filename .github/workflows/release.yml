@@ -43,7 +43,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: |
-            ${{ github.workspace }}/target
+            ${{ github.workspace }}/target/debug
+            ${{ github.workspace }}/target/deploy
+            ${{ github.workspace }}/target/aarch64-apple-darwin
+            ${{ github.workspace }}/target/x86_64-apple-darwin
+            ${{ github.workspace }}/target/.rustc_info.json
             ~/.cargo
             C:\Users\runneradmin\.cargo
           key: ${{ runner.os }}-${{ runner.arch }}-gyroflow-plugins-1-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'adobe/**/*.rs', 'common/**/*.rs', 'openfx/**/*.rs', 'frei0r/**/*.rs') }}
@@ -191,7 +195,11 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            ${{ github.workspace }}/target
+            ${{ github.workspace }}/target/debug
+            ${{ github.workspace }}/target/deploy
+            ${{ github.workspace }}/target/aarch64-apple-darwin
+            ${{ github.workspace }}/target/x86_64-apple-darwin
+            ${{ github.workspace }}/target/.rustc_info.json
             ~/.cargo
             C:\Users\runneradmin\.cargo
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}

@@ -23,6 +23,9 @@ def run(command, secrets):
 
 
 def notarize(archive, result_path, credentials, secrets):
+    log_path = result_path.with_name(result_path.stem + "-log.json")
+    result_path.unlink(missing_ok=True)
+    log_path.unlink(missing_ok=True)
     output = run(["xcrun", "notarytool", "submit", "--wait", "--output-format", "json",
                   *credentials, str(archive)], secrets)
     result = json.loads(output)
@@ -32,7 +35,6 @@ def notarize(archive, result_path, credentials, secrets):
             or not result["id"] or not isinstance(result.get("status"), str)):
         raise ValueError("Notarytool did not return a submission ID and status")
     if result["status"] != "Accepted":
-        log_path = result_path.with_name(result_path.stem + "-log.json")
         try:
             run(["xcrun", "notarytool", "log", result["id"], *credentials, str(log_path)], secrets)
             print(f"Apple rejection log: {log_path}", file=sys.stderr)
