@@ -29,7 +29,12 @@ ICON_SVG = candidate.PLUGIN_ID + ".svg"
 
 
 def run(*args):
-    return subprocess.run([str(a) for a in args], check=True, text=True, capture_output=True)
+    result = subprocess.run([str(a) for a in args], text=True, capture_output=True)
+    if result.returncode:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+    result.check_returncode()
+    return result
 
 
 def metadata(version, local_validation=False):
@@ -133,7 +138,7 @@ def verify(package, openfx_package=None, allow_local=False):
 
 
 def verify_developer_id(path):
-    requirement = ('anchor apple generic and certificate leaf[subject.OU] = "' + TEAM
+    requirement = ('=anchor apple generic and certificate leaf[subject.OU] = "' + TEAM
                    + '" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists')
     run("codesign", "--verify", "--strict", "--all-architectures", "-R", requirement, path)
     details = run("codesign", "-d", "--verbose=4", path).stderr

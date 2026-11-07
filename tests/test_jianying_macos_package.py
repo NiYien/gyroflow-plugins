@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Exercise archive identity, payload integrity and formal/local separation."""
+import contextlib
 import hashlib
+import io
 import json
 from pathlib import Path
 import plistlib
 import sys
 import struct
+import subprocess
 import zlib
 import tempfile
 import unittest
@@ -25,6 +28,24 @@ def png_fixture(color=6):
 
 
 class PackageTests(unittest.TestCase):
+    def test_failed_command_reports_output_and_preserves_the_failure(self):
+        diagnostics = io.StringIO()
+        with contextlib.redirect_stderr(diagnostics):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                package.run(sys.executable, "-c",
+                            "import sys; print('command output'); print('command error', file=sys.stderr); sys.exit(7)")
+        self.assertEqual(raised.exception.returncode, 7)
+        self.assertEqual(raised.exception.stdout, "command output\n")
+        self.assertEqual(raised.exception.stderr, "command error\n")
+        self.assertEqual(diagnostics.getvalue(), "command output\ncommand error\n")
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS codesign is required")
+    def test_system_binary_is_rejected_by_the_developer_id_requirement(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                package.verify_developer_id(Path("/usr/bin/true"))
+        self.assertIn("code failed to satisfy specified code requirement(s)", raised.exception.stderr)
+
     def fixture(self, directory, local=False, mutate=None):
         meta = package.metadata("2.1.2-local" if local else "2.1.2", local)
         meta.update(core_sha256=hashlib.sha256(b"core").hexdigest(),
