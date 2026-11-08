@@ -55,6 +55,7 @@ struct ParamSet {
 struct Clip {
     Properties properties, image_properties;
     std::vector<unsigned char> pixels;
+    double rod[4] = {0, 0, 3840, 2160};
     Effect* effect = nullptr;
     std::string name;
 };
@@ -84,6 +85,7 @@ static std::vector<std::string> action_stack;
 static std::ofstream trace;
 static std::string last_error, snapshot_result;
 static std::string messages_result;
+static std::string fixture_host_name = "com.lemon.lvpro";
 static bool strict_value_actions, reentrant_writes;
 static bool command_notifications;
 static int forbidden_writes, action_number;
@@ -334,7 +336,7 @@ static int define_clip(OfxImageEffectHandle h,const char* name,OfxPropertySetHan
 }
 static int clip_handle(OfxImageEffectHandle h,const char* name,OfxImageClipHandle* out,OfxPropertySetHandle* p){if(!h||!name||!out)return kOfxStatErrBadHandle;auto f=effect(h)->clips.find(name);if(f==effect(h)->clips.end())return kOfxStatErrUnknown;*out=reinterpret_cast<OfxImageClipHandle>(f->second.get());if(p)*p=handle(f->second->properties);return 0;}
 static int clip_properties(OfxImageClipHandle h,OfxPropertySetHandle* out){if(!h||!out)return kOfxStatErrBadHandle;*out=handle(clip(h)->properties);return 0;}
-static int clip_rod(OfxImageClipHandle,OfxTime,OfxRectD* out){if(!out)return kOfxStatErrBadHandle;*out={0,0,3840,2160};return 0;}
+static int clip_rod(OfxImageClipHandle h,OfxTime,OfxRectD* out){if(!h||!out)return kOfxStatErrBadHandle;auto* c=clip(h);*out={c->rod[0],c->rod[1],c->rod[2],c->rod[3]};return 0;}
 static int clip_image(OfxImageClipHandle h,OfxTime time,const OfxRectD*,OfxPropertySetHandle* out){if(!h||!out)return kOfxStatErrBadHandle;auto* c=clip(h);*out=handle(c->image_properties);record("clip_image","\"instance\":"+std::to_string(c->effect->number)+",\"clip\":"+json_quote(c->name)+",\"time\":"+std::to_string(time));return 0;}
 static int release_image(OfxPropertySetHandle){return 0;}static int abort_render(OfxImageEffectHandle){return 0;}
 static int memory_alloc(void*,size_t bytes,void** out){*out=std::malloc(bytes);return *out?0:kOfxStatErrMemory;}static int memory_free(void* p){std::free(p);return 0;}
@@ -384,11 +386,12 @@ static int call(Effect* e,const char* action,Properties* in,Properties* out) {
     action_stack.pop_back();return status;
 }
 
+extern "C" __declspec(dllexport) void fixture_set_host_name(const char* name) { fixture_host_name = name; }
 extern "C" __declspec(dllexport) int fixture_open(const wchar_t* core_path,const wchar_t* trace_path,int strict,int reentrant) {
     try {
         trace.open(trace_path,std::ios::binary);if(!trace)throw std::runtime_error("Cannot open fixture trace");
         strict_value_actions=strict!=0;reentrant_writes=reentrant!=0;command_notifications=false;init_suites();
-        set_string(handle(host_properties),kOfxPropName,0,"com.lemon.lvpro");set_string(handle(host_properties),kOfxPropVersionLabel,0,"11.6");set_int(handle(host_properties),kOfxParamHostPropSupportsCustomInteract,0,0);
+        set_string(handle(host_properties),kOfxPropName,0,fixture_host_name.c_str());set_string(handle(host_properties),kOfxPropVersionLabel,0,"11.6");set_int(handle(host_properties),kOfxParamHostPropSupportsCustomInteract,0,0);
         for(auto name:{"OfxImageEffectPropOpenGLRenderSupported","OfxImageEffectPropOpenCLRenderSupported","OfxImageEffectPropCudaRenderSupported","OfxImageEffectPropMetalRenderSupported","OfxImageEffectPropAngleRenderSupported"})set_string(handle(host_properties),name,0,"false");
         host={handle(host_properties),fetch_suite};core_module=LoadLibraryW(core_path);if(!core_module)throw std::runtime_error("Cannot load core DLL: "+std::to_string(GetLastError()));
         auto get=reinterpret_cast<OfxPlugin*(*)(int)>(GetProcAddress(core_module,"OfxGetPlugin"));if(!get)throw std::runtime_error("Missing OfxGetPlugin");plugin=get(0);plugin->setHost(&host);
