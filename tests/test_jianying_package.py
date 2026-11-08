@@ -36,9 +36,9 @@ class JianyingPackageTests(unittest.TestCase):
             files = {entry["path"] for entry in manifest["files"]}
             self.assertIn("Contents/Win64/gyroflow_ofx.dll", files)
             self.assertIn("Contents/Win64/GyroflowJianyingBatch11.ofx", files)
-            self.assertIn("Contents/Resources/xyz.niyien.jianying.gyroflow.png", files)
+            self.assertIn("Contents/Resources/xyz.NiYien.gyroflow.png", files)
             self.assertEqual(manifest["plugin_id"], "xyz.niyien.gyroflow.jianying.batch11")
-            self.assertEqual(manifest["effect_id"], "xyz.niyien.jianying.gyroflow")
+            self.assertEqual(manifest["effect_id"], "xyz.NiYien.gyroflow")
             self.assertFalse(any("ResolveScripts" in path for path in files))
             with zipfile.ZipFile(package) as source:
                 contents = {name: source.read(name) for name in source.namelist()}

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>xyz.niyien.jianying.gyroflow</string>
+    <string>xyz.NiYien.gyroflow</string>
     <key>CFBundleExecutable</key>
     <string>GyroflowJianyingBatch11.ofx</string>
     <key>CFBundleName</key>

@@ -212,6 +212,7 @@ static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHan
     if (!std::strcmp(action,kOfxActionDescribe) && status == kOfxStatOK) {
         OfxPropertySetHandle props = nullptr; image->getPropertySet(effect,&props);
         for (auto key : {kOfxPropLabel,kOfxPropShortLabel,kOfxPropLongLabel}) prop->propSetString(props,key,0,"Gyroflow");
+        prop->propSetString(props,kOfxImageEffectPluginPropGrouping,0,"NiYien");
         const char* depth[] = {kOfxBitDepthByte}; prop->propSetStringN(props,kOfxImageEffectPropSupportedPixelDepths,1,depth);
         for (auto key : {"OfxImageEffectPropOpenGLRenderSupported","OfxImageEffectPropOpenCLRenderSupported","OfxImageEffectPropCudaRenderSupported","OfxImageEffectPropMetalRenderSupported","OfxImageEffectPropAngleRenderSupported"}) prop->propSetString(props,key,0,"false");
         // Jianying prefers desktop OpenGL over ANGLE when both are advertised.
@@ -235,7 +236,7 @@ static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHan
     return status;
 }
 
-static OfxPlugin plugin = {kOfxImageEffectPluginApi,1,"xyz.niyien.jianying.gyroflow",1,11,set_host,entry};
+static OfxPlugin plugin = {kOfxImageEffectPluginApi,1,"xyz.NiYien.gyroflow",1,11,set_host,entry};
 extern "C" __declspec(dllexport) int OfxGetNumberOfPlugins() { return 1; }
 extern "C" __declspec(dllexport) OfxPlugin* OfxGetPlugin(int index) {
     if (index != 0) return nullptr;

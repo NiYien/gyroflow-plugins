@@ -63,6 +63,7 @@ class JianyingProtocolTests(unittest.TestCase):
                 "fixture_notify": ([ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_double], ctypes.c_int),
                 "fixture_action": ([ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_double], ctypes.c_int),
                 "fixture_snapshot": ([ctypes.c_void_p], ctypes.c_char_p),
+                "fixture_browser_metadata": ([], ctypes.c_char_p),
                 "fixture_error": ([], ctypes.c_char_p),
                 "fixture_close": ([], None),
             }
@@ -77,6 +78,9 @@ class JianyingProtocolTests(unittest.TestCase):
                 status = library.fixture_open(str(core), str(temporary / "trace.jsonl"), 1, 1)
                 self.assertEqual(status, 0, library.fixture_error().decode("utf-8"))
                 opened = True
+                if core.name == build.WRAPPER:
+                    browser = json.loads(library.fixture_browser_metadata().decode("utf-8"))
+                    self.assertEqual(browser, {"identifier": "xyz.NiYien.gyroflow", "label": "Gyroflow", "grouping": "NiYien"})
                 for name in ["NO_OPENCL", "NO_WGPU"]:
                     self.assertIsNone(native_environment_value(name), f"Describe changed {name}")
                 instance = library.fixture_new_instance()

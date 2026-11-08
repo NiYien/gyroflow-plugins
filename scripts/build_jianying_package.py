@@ -18,7 +18,8 @@ BUNDLE = "GyroflowJianyingBatch11.ofx.bundle"
 WRAPPER = "GyroflowJianyingBatch11.ofx"
 # Keep the package identity accepted by existing Gyroflow installers.
 PLUGIN_ID = "xyz.niyien.gyroflow.jianying.batch11"
-EFFECT_ID = "xyz.niyien.jianying.gyroflow"
+# Jianying derives the browser group and label from the final two ID components.
+EFFECT_ID = "xyz.NiYien.gyroflow"
 ICON_PNG = EFFECT_ID + ".png"
 PACKAGE = "GyroflowNiyien-Jianying-windows.zip"
 
