@@ -469,6 +469,7 @@ enum BandAspectSpace {
 
 #[derive(Copy, Clone, Debug)]
 struct BandAspectSelection {
+    #[cfg_attr(not(test), allow(dead_code))]
     space: BandAspectSpace,
     org_ratio: f64,
     output_aspect: f64,
@@ -2901,9 +2902,6 @@ impl Execute for GyroflowPlugin {
                         return Err(Error::InvalidValue);
                     }
                 }
-                let source_clip_pixel_aspect_ratio = instance_data.source_clip.get_pixel_aspect_ratio().ok();
-                let source_image_pixel_aspect_ratio = source_image.get_pixel_aspect_ratio().ok();
-
                 let source_rect: RectI = if is_jianying {
                     source_image.get_region_of_definition().or_else(|_| source_image.get_bounds())?
                 } else {
@@ -2939,14 +2937,6 @@ impl Execute for GyroflowPlugin {
                 );
                 let org_ratio = band_selection.org_ratio;
                 let output_aspect = band_selection.output_aspect;
-                if (raw_stretch.0 - 1.0).abs() > 0.01 || (raw_stretch.1 - 1.0).abs() > 0.01 {
-                    log::debug!(
-                        "anamorphic band guess: space={:?} host={host_name_ref:?} live_stretch={live_stretch:?} raw_stretch={raw_stretch:?} rotated_90_270={input_rotated_90_270} logical={logical_aspect_pair:?} physical={physical_aspect_pair:?} buffer=({}, {}) selected=({org_ratio:.4}, {output_aspect:.4}) clip_par={source_clip_pixel_aspect_ratio:?} image_par={source_image_pixel_aspect_ratio:?}",
-                        band_selection.space,
-                        src_size.0,
-                        src_size.1,
-                    );
-                }
                 let src_rect = GyroflowPluginBase::get_center_rect(src_size.0, src_size.1, org_ratio);
                 let effective_src_rect: Option<(usize, usize, usize, usize)> = if mode_is_fit || dont_draw_outside {
                     Some(src_rect)
@@ -3030,7 +3020,6 @@ impl Execute for GyroflowPlugin {
                     if zoom == 1.0 && rot == 0.0 && off_x == 0.0 && off_y == 0.0 {
                         None
                     } else {
-                        log::info!(target: "app", "output_post_affine zoom={zoom} rot={rot} off=({off_x},{off_y})");
                         Some(PostAffine { rotation_deg: rot, zoom, scale_xy: [1.0, 1.0], offset_norm: [off_x, off_y] })
                     }
                 };
@@ -3042,9 +3031,6 @@ impl Execute for GyroflowPlugin {
                 } else {
                     let raw_flip_h = instance_data.params.get_bool_at_time(Params::FlipHorizontal, TimeType::Frame(time)).unwrap_or(false);
                     let raw_flip_v = instance_data.params.get_bool_at_time(Params::FlipVertical,   TimeType::Frame(time)).unwrap_or(false);
-                    if raw_flip_h || raw_flip_v {
-                        log::info!(target: "app", "output_flip h={raw_flip_h} v={raw_flip_v}");
-                    }
                     (raw_flip_h, raw_flip_v)
                 };
 
@@ -3113,22 +3099,14 @@ impl Execute for GyroflowPlugin {
                             ))
                         }
                     } else if in_args.get_opengl_enabled().unwrap_or_default() {
-                        log::info!("OpenGL: src_size: {src_size:?} | {src_stride}, out_size: {out_size:?} | {out_stride}");
                         let texture = source_image.get_opengl_texture_index()? as u32;
                         let out_texture = output_image.get_opengl_texture_index()? as u32;
-                        let mut src_size = src_size;
-                        let mut out_size = out_size;
-                        src_size.2 = src_size.0 * 4 * (source_image.get_pixel_depth()?.bits() / 8);
-                        out_size.2 = out_size.0 * 4 * (output_image.get_pixel_depth()?.bits() / 8);
-
-                        log::info!("OpenGL in: {texture}, out: {out_texture} src_size: {src_size:?}, out_size: {out_size:?}, in_rect: {src_rect:?}, out_rect: {out_rect:?}");
                         Some((
                             BufferSource::OpenGL { texture: texture, context: std::ptr::null_mut() },
                             BufferSource::OpenGL { texture: out_texture, context: std::ptr::null_mut() },
                             true
                         ))
                     } else {
-                        log::info!("CPU: src_size: {src_size:?} | {src_stride}, out_size: {out_size:?} | {out_stride}");
                         use std::slice::from_raw_parts_mut;
                         let src_buf = unsafe { match source_image.get_pixel_depth()? {
                             BitDepth::None  => { return FAILED; }
