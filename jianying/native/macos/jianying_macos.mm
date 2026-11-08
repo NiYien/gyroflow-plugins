@@ -474,9 +474,11 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
     const auto status = inner->mainEntry(action, handle, in, out);
     if (same(action, kOfxActionDescribe) && status == kOfxStatOK) {
         OfxPropertySetHandle descriptor = nullptr;
-        if (images->getPropertySet(effect, &descriptor) == kOfxStatOK)
+        if (images->getPropertySet(effect, &descriptor) == kOfxStatOK) {
             for (auto key : {kOfxPropLabel, kOfxPropShortLabel, kOfxPropLongLabel})
                 properties->propSetString(descriptor, key, 0, "Gyroflow");
+            properties->propSetString(descriptor, kOfxImageEffectPluginPropGrouping, 0, "NiYien");
+        }
     }
     if (same(action, kOfxImageEffectActionDescribeInContext) && status == kOfxStatOK) define_diagnostic_mode(effect);
     if (render) {
@@ -487,7 +489,7 @@ OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
     return status;
 }
 
-OfxPlugin plugin{kOfxImageEffectPluginApi, 1, "xyz.niyien.jianying.gyroflow", 1, 11, set_host, entry};
+OfxPlugin plugin{kOfxImageEffectPluginApi, 1, "xyz.NiYien.gyroflow", 1, 11, set_host, entry};
 }
 
 extern "C" __attribute__((visibility("default"))) int OfxGetNumberOfPlugins() {

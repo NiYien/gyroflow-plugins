@@ -215,13 +215,13 @@ class PackageTests(unittest.TestCase):
                 package.verify(self.fixture(root, mutate=missing))
 
     def test_browser_icon_is_named_after_the_exported_plugin_identifier(self):
-        self.assertEqual(package.ICON_PNG, "xyz.niyien.jianying.gyroflow.png")
-        self.assertEqual(package.ICON_SVG, "xyz.niyien.jianying.gyroflow.svg")
+        self.assertEqual(package.ICON_PNG, "xyz.NiYien.gyroflow.png")
+        self.assertEqual(package.ICON_SVG, "xyz.NiYien.gyroflow.svg")
 
     def test_effect_identity_and_source_contract_do_not_change_the_installer_identity(self):
         self.assertEqual(package.candidate.PLUGIN_ID, "xyz.niyien.gyroflow.jianying.batch11")
         meta = package.metadata("3.0.0.71")
-        self.assertEqual(meta["effect_id"], "xyz.niyien.jianying.gyroflow")
+        self.assertEqual(meta["effect_id"], "xyz.NiYien.gyroflow")
         self.assertEqual(meta["autoload_provider"]["version"], 2)
         self.assertEqual(meta["autoload_provider"]["compatibility"], "runtime-type-and-layout-contract")
         self.assertNotIn("sha256", meta["autoload_provider"]["host"])

@@ -179,7 +179,7 @@ int main(int argc, char** argv) {
         auto count = reinterpret_cast<int (*)()>(dlsym(library, "OfxGetNumberOfPlugins"));
         require(get_plugin && count && count() == 1 && !get_plugin(1), "Wrapper exports and index bounds");
         OfxPlugin* plugin = get_plugin(0);
-        require(plugin && std::string(plugin->pluginIdentifier) == "xyz.niyien.jianying.gyroflow"
+        require(plugin && std::string(plugin->pluginIdentifier) == "xyz.NiYien.gyroflow"
             && plugin->pluginVersionMajor == 1 && plugin->pluginVersionMinor == 11, "Effect identity and OFX version");
         const auto inner_path = std::filesystem::path(argv[1]).parent_path() / "libgyroflow_ofx.dylib";
         void* inner_library = dlopen(inner_path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -226,6 +226,8 @@ int main(int argc, char** argv) {
         require(invoke(kOfxActionDescribe) == kOfxStatOK, "Describe forwarding");
         const char* label = nullptr;
         require(get_string(handle(effect.props), kOfxPropLabel, 0, &label) == kOfxStatOK && std::string(label) == "Gyroflow", "Product display label");
+        const char* grouping = nullptr;
+        require(get_string(handle(effect.props), kOfxImageEffectPluginPropGrouping, 0, &grouping) == kOfxStatOK && std::string(grouping) == "NiYien", "Product browser grouping");
         require(invoke(kOfxImageEffectActionDescribeInContext) == kOfxStatOK, "InContext forwarding");
         auto& diagnostic = effect.parameters.at("DiagnosticMode");
         require(diagnostic.type == kOfxParamTypeChoice, "DiagnosticMode identity");

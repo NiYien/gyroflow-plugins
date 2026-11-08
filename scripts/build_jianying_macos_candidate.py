@@ -18,7 +18,8 @@ BUNDLE = "GyroflowJianyingBatch11.ofx.bundle"
 WRAPPER = "GyroflowJianyingBatch11.ofx"
 CORE = "libgyroflow_ofx.dylib"
 PLUGIN_ID = "xyz.niyien.gyroflow.jianying.batch11"
-EFFECT_ID = "xyz.niyien.jianying.gyroflow"
+# Match the Windows browser group and label while preserving the installation identity.
+EFFECT_ID = "xyz.NiYien.gyroflow"
 PACKAGE = "GyroflowNiyien-Jianying-macos-arm64-candidate.zip"
 DELIVERY = "delivery-manifest.json"
 NATIVE_SOURCES = ("jianying_macos.mm", "metal_guard.mm", "metal_guard.h", "source_path.h", "../source_path_contract.h")
