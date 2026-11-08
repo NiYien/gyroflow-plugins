@@ -3561,6 +3561,10 @@ pub unsafe extern "C" fn gf_finalcut_instance_render_metal_v2(
             )));
         }
         set_framebuffer_orientation(&manager, mapping.framebuffer_inverted);
+        manager.stabilization.write().kernel_flags.set(
+            gyroflow_plugin_base::gyroflow_core::stabilization::KernelParamsFlags::INPUT_ROTATION_PIXEL_CENTERS,
+            !mapping.framebuffer_inverted,
+        );
         let input = request.source.texture;
         let output = request.destination.texture;
         let mut buffers = Buffers {

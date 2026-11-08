@@ -16,7 +16,7 @@ pub struct GFHostImageV2 {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GFHostOptions {
-    /// Auto, unrotated, clockwise 90, 180, clockwise 270.
+    /// Auto, unrotated, or the project rotation of 90, 180, 270 degrees.
     pub input_orientation: u32,
     /// Auto (fit), fit, fill, stretch.
     pub sizing: u32,
@@ -283,9 +283,9 @@ pub fn build_mapping(
         input_rect,
         output_rect,
         input_rotation: if source.origin == 0 {
-            -(orientation as f32)
-        } else {
             orientation as f32
+        } else {
+            -(orientation as f32)
         },
         output_affine,
         output_flip_v: source.origin != destination.origin,
@@ -355,9 +355,9 @@ impl HostGeometryState {
             let mut p = manager.params.write();
             p.size = size;
             p.output_size = output;
-            // FxPlug presents the already-oriented image clockwise in top-down
-            // coordinates; the core's top-down video rotation uses the opposite sign.
-            p.video_rotation = -(self.project.video_rotation as f64);
+            // Camera orientation belongs to the project. Only the host pixel
+            // sampling angle changes with the texture's row convention.
+            p.video_rotation = self.project.video_rotation as f64;
         }
         manager.init_size();
         manager.invalidate_smoothing();

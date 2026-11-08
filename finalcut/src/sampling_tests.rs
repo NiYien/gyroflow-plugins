@@ -95,7 +95,12 @@ fn render(
         .map(|v| f32::from_ne_bytes(v.try_into().unwrap()))
         .collect()
 }
-fn params(input: (usize, usize), output: (usize, usize), mapping: &HostMapping) -> KernelParams {
+fn params(
+    input: (usize, usize),
+    output: (usize, usize),
+    mapping: &HostMapping,
+    rotation: i32,
+) -> KernelParams {
     let mut p = KernelParams {
         width: 64,
         height: 48,
@@ -122,7 +127,9 @@ fn params(input: (usize, usize), output: (usize, usize), mapping: &HostMapping) 
             mapping.output_rect.2 as i32,
             mapping.output_rect.3 as i32,
         ],
-        input_rotation: mapping.input_rotation,
+        // This identity-matrix fixture reconstructs unrotated native axes.
+        // Production tests below retain the project's output orientation.
+        input_rotation: rotation as f32,
         max_pixel_value: 1.0,
         pixel_value_limit: 1.0,
         light_refraction_coefficient: 1.0,
@@ -187,7 +194,7 @@ fn check_images(gpu: bool) {
                     )
                     .unwrap();
                     assert!(mapping.crop.is_none());
-                    let p = params(size, output, &mapping);
+                    let p = params(size, output, &mapping, rotation);
                     let pixels = render(&mut input, size, output, p, gpu);
                     let (rx, ry, rw, rh) = mapping.output_rect;
                     let affine = mapping.output_affine.unwrap_or_default();
@@ -521,7 +528,8 @@ fn check_production_rotation_and_origins(with_motion: bool) {
                 } else {
                     n / w
                 };
-                let (nx, ny) = match rotation {
+                // Container/project rotation is opposite to the displayed clockwise turn.
+                let (nx, ny) = match (360 - rotation) % 360 {
                     90 => (y, 47 - x),
                     180 => (63 - x, 47 - y),
                     270 => (63 - y, x),
@@ -650,8 +658,8 @@ fn check_production_rotation_and_origins(with_motion: bool) {
                 {
                     let mut params = manager.params.write();
                     params.framebuffer_inverted = false;
-                    params.video_rotation = 0.0;
-                    params.output_size = (64, 48);
+                    params.video_rotation = rotation as f64;
+                    params.output_size = (w as usize, h as usize);
                 }
                 manager.init_size();
                 manager.recompute_blocking();
@@ -659,7 +667,11 @@ fn check_production_rotation_and_origins(with_motion: bool) {
                     [(n % 64) as f32 / 64.0, (n / 64) as f32 / 48.0, 0.25, 1.0]
                 }));
                 let mut expected = vec![0; 96 * 96 * 16];
-                let rect = (0, 12, 96, 72);
+                let rect = if rotation % 180 == 0 {
+                    (0, 12, 96, 72)
+                } else {
+                    (12, 0, 72, 96)
+                };
                 let mut buffers = Buffers {
                     input: BufferDescription { size: (64, 48, 64 * 16),
                         data: BufferSource::Cpu { buffer: &mut raw }, ..Default::default() },
@@ -678,21 +690,14 @@ fn check_production_rotation_and_origins(with_motion: bool) {
                 let mut error = 0.0f32;
                 for y in 32..64 {
                     for x in 32..64 {
-                        let (rx, ry) = match rotation {
-                            90 => (y, 95 - x),
-                            180 => (95 - x, 95 - y),
-                            270 => (95 - y, x),
-                            _ => (x, y),
-                        };
-                        for (a, b) in read(x, y)[..2].iter().zip(&expected[ry * 96 + rx][..2]) {
+                        for (a, b) in read(x, y)[..2].iter().zip(&expected[y * 96 + x][..2]) {
                             error += (a - b).abs();
                         }
                     }
                 }
                 let mean_error = error / (32 * 32 * 2) as f32;
-                // Core input rotation uses boundary coordinates, while this
-                // reference rotates texel centers. Allow the established one-pixel
-                // rotation phase plus half-float/GPU sampling error at this tiny size.
+                // Preserve the project's rotation in the independent camera-pixel reference.
+                // Allow half-float/GPU sampling error at this small fixture size.
                 assert!(mean_error < 0.03,
                     "motion direction differs from top-down reference: rotation={rotation} origins={source_origin}/{destination_origin} mean_error={mean_error}");
             }
@@ -717,16 +722,16 @@ fn check_production_rotation_and_origins(with_motion: bool) {
                         assert!(vertical.0[1] > vertical.1[1]);
                     }
                     90 => {
-                        assert!(vertical.0[0] > vertical.1[0], "90 must point down");
-                        assert!(horizontal.0[1] < horizontal.1[1]);
+                        assert!(vertical.0[0] < vertical.1[0], "project 90 must point up");
+                        assert!(horizontal.0[1] > horizontal.1[1]);
                     }
                     180 => {
                         assert!(horizontal.0[0] < horizontal.1[0]);
                         assert!(vertical.0[1] < vertical.1[1]);
                     }
                     _ => {
-                        assert!(vertical.0[0] < vertical.1[0]);
-                        assert!(horizontal.0[1] > horizontal.1[1]);
+                        assert!(vertical.0[0] > vertical.1[0]);
+                        assert!(horizontal.0[1] < horizontal.1[1]);
                     }
                 }
                 reference = Some(pixels);
