@@ -35,11 +35,12 @@ extern "C" std::int32_t gf_jianying_metal_copy_v1(
     void* source, void* destination, void* command_queue, std::int32_t width, std::int32_t height,
     std::int32_t source_stride, std::int32_t destination_stride, std::int32_t bytes_per_pixel) {
     last_error.clear();
-    if (width <= 0 || height <= 0 || bytes_per_pixel != 4 || source_stride <= 0 || destination_stride <= 0
-        || source_stride % 4 != 0 || destination_stride % 4 != 0) {
-        fail("copy requires positive RGBA8 geometry"); return 5;
+    if (width <= 0 || height <= 0 || (bytes_per_pixel != 4 && bytes_per_pixel != 8 && bytes_per_pixel != 16)
+        || source_stride <= 0 || destination_stride <= 0
+        || source_stride % bytes_per_pixel != 0 || destination_stride % bytes_per_pixel != 0) {
+        fail("copy requires positive RGBA geometry and supported component depth"); return 5;
     }
-    const auto row = static_cast<std::uint64_t>(width) * 4;
+    const auto row = static_cast<std::uint64_t>(width) * bytes_per_pixel;
     if (row > static_cast<std::uint64_t>(source_stride) || row > static_cast<std::uint64_t>(destination_stride)) {
         fail("copy row exceeds stride"); return 5;
     }

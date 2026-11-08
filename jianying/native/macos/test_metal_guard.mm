@@ -18,7 +18,7 @@ static void copy_for_test(id<MTLCommandQueue> queue, id<MTLBuffer> source, id<MT
     require(command.status == MTLCommandBufferStatusCompleted, "test transfer failed");
 }
 static void fixture(id<MTLDevice> device, id<MTLCommandQueue> queue, int width, int height,
-                    int input_stride, int output_stride, bool private_buffers) {
+                    int input_stride, int output_stride, bool private_buffers, int bytes_per_pixel = 4) {
     const auto input_size = static_cast<std::size_t>(input_stride) * height;
     const auto output_size = static_cast<std::size_t>(output_stride) * height;
     std::vector<unsigned char> input(input_size), expected(output_size, 0xcc);
@@ -34,16 +34,16 @@ static void fixture(id<MTLDevice> device, id<MTLCommandQueue> queue, int width, 
     [encoder endEncoding]; [clear commit]; [clear waitUntilCompleted];
     require(clear.status == MTLCommandBufferStatusCompleted, "fixture clear failed");
     require(gf_jianying_metal_copy_v1((__bridge void*)source, (__bridge void*)output, (__bridge void*)queue,
-                                     width, height, input_stride, output_stride, 4) == 0, gf_metal_last_error());
+                                     width, height, input_stride, output_stride, bytes_per_pixel) == 0, gf_metal_last_error());
     id<MTLBuffer> readback = [device newBufferWithLength:output_size options:MTLResourceStorageModeShared];
     copy_for_test(queue, output, readback, output_size);
     if (input_stride == output_stride) expected = input;
     else for (int y = 0; y < height; ++y)
         std::memcpy(expected.data() + static_cast<std::size_t>(y) * output_stride,
-                    input.data() + static_cast<std::size_t>(y) * input_stride, static_cast<std::size_t>(width) * 4);
+                    input.data() + static_cast<std::size_t>(y) * input_stride, static_cast<std::size_t>(width) * bytes_per_pixel);
     require(std::memcmp(readback.contents, expected.data(), output_size) == 0, "GPU passthrough pixels or padding differ");
     require(gf_jianying_metal_copy_v1((__bridge void*)source, (__bridge void*)source, (__bridge void*)queue,
-                                     width, height, input_stride, input_stride, 4) == 0, "identical buffer should be a no-op");
+                                     width, height, input_stride, input_stride, bytes_per_pixel) == 0, "identical buffer should be a no-op");
 }
 
 int main() {
@@ -57,8 +57,17 @@ int main() {
             fixture(device, queue, 7, 5, 32, 48, false);
             fixture(device, queue, 7, 5, 32, 48, true);
             fixture(device, queue, 3840, 2160, 15360, 15360, true);
+            for (int bytes_per_pixel : {8, 16}) {
+                fixture(device, queue, 7, 5, 8 * bytes_per_pixel, 10 * bytes_per_pixel, false, bytes_per_pixel);
+                fixture(device, queue, 7, 5, 8 * bytes_per_pixel, 10 * bytes_per_pixel, true, bytes_per_pixel);
+                fixture(device, queue, 3840, 2160, 3840 * bytes_per_pixel, 3840 * bytes_per_pixel, true, bytes_per_pixel);
+            }
             id<MTLBuffer> small = [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
             require(!gf_metal_validate_buffer((__bridge void*)small, (__bridge void*)queue, 20), "short buffer accepted");
+            require(gf_jianying_metal_copy_v1((__bridge void*)small, (__bridge void*)small, (__bridge void*)queue,
+                                             2, 2, 8, 8, 2) == 5, "unsupported RGBA pixel width accepted");
+            require(gf_jianying_metal_copy_v1((__bridge void*)small, (__bridge void*)small, (__bridge void*)queue,
+                                             2, 2, 16, 16, 8) == 5, "short high-depth buffer accepted");
             require(gf_jianying_metal_copy_v1((__bridge void*)small, (__bridge void*)small, (__bridge void*)queue,
                                              2, 2, 9, 8, 4) == 5, "unaligned stride accepted");
             require(gf_jianying_metal_copy_v1((__bridge void*)small, (__bridge void*)small, (__bridge void*)queue,
@@ -70,7 +79,7 @@ int main() {
                                                                                width:2 height:2 mipmapped:NO];
             id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
             require(texture && !gf_metal_validate_buffer((__bridge void*)texture, (__bridge void*)queue, 4), "texture accepted as buffer");
-            std::printf("PASS: real Metal GPU blit RGBA8, contiguous 640x360/4K, unequal strides, shared/private, padding and rejection checks\n");
+            std::printf("PASS: real Metal GPU blit RGBA8/16/float, contiguous 640x360/4K, unequal strides, shared/private, padding and rejection checks\n");
             return 0;
         } catch (const std::exception& error) {
             std::fprintf(stderr, "FAIL: %s\n", error.what()); return 1;

@@ -20,6 +20,36 @@ pub(super) fn apply_fragment_sampling(stab: &gyroflow_plugin_base::Stabilization
     })
 }
 
+const METAL_U16_BUFFER_COMPUTE_BIT: i32 = 1 << 16;
+
+fn buffer_compute_eligible(buffers: &gyroflow_plugin_base::Buffers, depth: BitDepth, known_flags: i32) -> bool {
+    #[cfg(target_os = "macos")]
+    use gyroflow_plugin_base::BufferSource;
+    if !cfg!(target_os = "macos") || depth != BitDepth::Short || known_flags & METAL_U16_BUFFER_COMPUTE_BIT == 0
+        || !buffers.input.texture_copy || !buffers.output.texture_copy
+        || buffers.input.size.2 % 8 != 0 || buffers.output.size.2 % 8 != 0
+        || buffers.input.size.0 == 0 || buffers.input.size.1 == 0
+        || buffers.output.size.0 == 0 || buffers.output.size.1 == 0
+        || buffers.input.size.0.checked_mul(8).is_none_or(|size| size > buffers.input.size.2)
+        || buffers.output.size.0.checked_mul(8).is_none_or(|size| size > buffers.output.size.2)
+        || buffers.output.rect.is_some_and(|r| r != (0, 0, buffers.output.size.0, buffers.output.size.1)) { return false; }
+    #[cfg(target_os = "macos")]
+    if let (BufferSource::MetalBuffer { buffer: input, command_queue: input_queue },
+            BufferSource::MetalBuffer { buffer: output, command_queue: output_queue }) = (&buffers.input.data, &buffers.output.data) {
+        return !input.is_null() && !output.is_null() && input != output
+            && !input_queue.is_null() && input_queue == output_queue;
+    }
+    false
+}
+
+pub(super) fn apply_buffer_compute(stab: &gyroflow_plugin_base::StabilizationManager,
+    buffers: &gyroflow_plugin_base::Buffers, depth: BitDepth) {
+    use gyroflow_plugin_base::KernelParamsFlags;
+    let enabled = buffer_compute_eligible(buffers, depth, KernelParamsFlags::all().bits());
+    let flag = KernelParamsFlags::from_bits_truncate(METAL_U16_BUFFER_COMPUTE_BIT);
+    stab.stabilization.write().kernel_flags.set(flag, enabled);
+}
+
 pub(super) fn candidate_gate(macos: bool, host: &str, marker: Option<i32>, metal: &str) -> bool {
     macos && host == "com.lemon.lvpro" && marker == Some(1) && metal == "true"
 }
@@ -105,17 +135,26 @@ pub(super) fn render_queue(args: &RenderInArgs) -> Result<*mut c_void> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ImageLayout { pub width: i32, pub height: i32, pub stride: i32 }
+pub(super) struct ImageLayout {
+    pub width: i32, pub height: i32, pub stride: i32,
+    pub depth: BitDepth, pub bytes_per_pixel: i32,
+}
 
-pub(super) fn rgba8_layout(bounds: RectI, stride: i32, depth: BitDepth, components: ImageComponent) -> Result<ImageLayout> {
+pub(super) fn rgba_layout(bounds: RectI, stride: i32, depth: BitDepth, components: ImageComponent) -> Result<ImageLayout> {
+    let bytes_per_pixel = match depth {
+        BitDepth::Byte => 4,
+        BitDepth::Short | BitDepth::Half => 8,
+        BitDepth::Float => 16,
+        _ => return Err(Error::InvalidValue),
+    };
     let width = bounds.x2.checked_sub(bounds.x1).ok_or(Error::InvalidValue)?;
     let height = bounds.y2.checked_sub(bounds.y1).ok_or(Error::InvalidValue)?;
     if bounds.x1 != 0 || bounds.y1 != 0 || width <= 0 || height <= 0 || stride <= 0
-        || depth != BitDepth::Byte || components != ImageComponent::RGBA
-        || width.checked_mul(4).is_none_or(|minimum| stride < minimum) {
+        || components != ImageComponent::RGBA || stride % bytes_per_pixel != 0
+        || width.checked_mul(bytes_per_pixel).is_none_or(|minimum| stride < minimum) {
         return Err(Error::InvalidValue);
     }
-    Ok(ImageLayout { width, height, stride })
+    Ok(ImageLayout { width, height, stride, depth, bytes_per_pixel })
 }
 
 pub(super) fn image_layout(image: &Image) -> Result<ImageLayout> {
@@ -123,7 +162,7 @@ pub(super) fn image_layout(image: &Image) -> Result<ImageLayout> {
     let rod = image.get_region_of_definition()?;
     if [bounds.x1, bounds.y1, bounds.x2, bounds.y2] != [rod.x1, rod.y1, rod.x2, rod.y2]
         || image.get_data()?.is_null() { return Err(Error::InvalidValue); }
-    rgba8_layout(bounds, image.get_row_bytes()?, image.get_pixel_depth()?, image.get_components()?)
+    rgba_layout(bounds, image.get_row_bytes()?, image.get_pixel_depth()?, image.get_components()?)
 }
 
 pub(super) type MetalCopy = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void,
@@ -131,11 +170,12 @@ pub(super) type MetalCopy = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut 
 
 fn copy_buffers(copy: MetalCopy, source: *mut c_void, output: *mut c_void, queue: *mut c_void,
     src: ImageLayout, dst: ImageLayout) -> Result<()> {
-    if source.is_null() || output.is_null() || queue.is_null() || src.width != dst.width || src.height != dst.height {
+    if source.is_null() || output.is_null() || queue.is_null() || src.width != dst.width || src.height != dst.height
+        || src.depth != dst.depth || src.bytes_per_pixel != dst.bytes_per_pixel {
         return Err(Error::InvalidValue);
     }
     // The wrapper owns resource validation and queue completion; no CPU address is accessed here.
-    let status = unsafe { copy(source, output, queue, src.width, src.height, src.stride, dst.stride, 4) };
+    let status = unsafe { copy(source, output, queue, src.width, src.height, src.stride, dst.stride, src.bytes_per_pixel) };
     if status != 0 {
         log::error!(target: "jianying_ofx", "Mac Metal passthrough failed: status={status}");
         return Err(Error::InvalidValue);
@@ -168,6 +208,37 @@ pub(super) fn parameter_frame(time: gyroflow_plugin_base::TimeType, host_fps: f6
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_jianying_buffer_compute_requires_capability_short_and_safe_buffers() {
+        use gyroflow_plugin_base::{BufferDescription, BufferSource, Buffers};
+        let descriptor = |buffer: usize, queue: usize, stride| BufferDescription {
+            size: (16, 16, stride), rect: None,
+            data: BufferSource::MetalBuffer { buffer: buffer as _, command_queue: queue as _ },
+            rotation: None, texture_copy: true, post_affine: None, flip_h: false, flip_v: false,
+        };
+        let mut buffers = Buffers { input: descriptor(1, 3, 128), output: descriptor(2, 3, 128) };
+        let flag = METAL_U16_BUFFER_COMPUTE_BIT;
+        assert!(buffer_compute_eligible(&buffers, BitDepth::Short, flag));
+        buffers.output.rect = Some((1, 0, 15, 16));
+        assert!(!buffer_compute_eligible(&buffers, BitDepth::Short, flag));
+        buffers.output.rect = None;
+        assert!(!buffer_compute_eligible(&buffers, BitDepth::Short, 0));
+        for depth in [BitDepth::Byte, BitDepth::Half, BitDepth::Float] {
+            assert!(!buffer_compute_eligible(&buffers, depth, flag));
+        }
+        buffers.output = descriptor(1, 3, 128);
+        assert!(!buffer_compute_eligible(&buffers, BitDepth::Short, flag));
+        buffers.output = descriptor(2, 4, 128);
+        assert!(!buffer_compute_eligible(&buffers, BitDepth::Short, flag));
+        for stride in [120, 130, 132] {
+            buffers.output = descriptor(2, 3, stride);
+            assert!(!buffer_compute_eligible(&buffers, BitDepth::Short, flag));
+        }
+        buffers.output = descriptor(2, 3, 128); buffers.input = descriptor(0, 3, 128);
+        assert!(!buffer_compute_eligible(&buffers, BitDepth::Short, flag));
+    }
 
     #[test]
     fn mac_jianying_known_cuda_capability_is_disabled_and_setter_errors_propagate() {
@@ -241,14 +312,21 @@ mod tests {
     }
 
     #[test]
-    fn mac_jianying_only_accepts_zero_origin_rgba8_and_positive_stride() {
+    fn mac_jianying_layout_preserves_component_depth_and_validates_stride() {
         let bounds = RectI { x1: 0, y1: 0, x2: 640, y2: 360 };
-        assert_eq!(rgba8_layout(bounds, 2560, BitDepth::Byte, ImageComponent::RGBA).unwrap(),
-            ImageLayout { width: 640, height: 360, stride: 2560 });
-        for stride in [0, -2560, 2559] { assert!(rgba8_layout(bounds, stride, BitDepth::Byte, ImageComponent::RGBA).is_err()); }
-        assert!(rgba8_layout(RectI { x1: 1, ..bounds }, 2560, BitDepth::Byte, ImageComponent::RGBA).is_err());
-        assert!(rgba8_layout(bounds, 2560, BitDepth::Float, ImageComponent::RGBA).is_err());
-        assert!(rgba8_layout(bounds, 2560, BitDepth::Byte, ImageComponent::RGB).is_err());
+        for (depth, bytes_per_pixel) in [(BitDepth::Byte, 4), (BitDepth::Short, 8), (BitDepth::Half, 8), (BitDepth::Float, 16)] {
+            let stride = 640 * bytes_per_pixel;
+            assert_eq!(rgba_layout(bounds, stride, depth, ImageComponent::RGBA).unwrap(),
+                ImageLayout { width: 640, height: 360, stride, depth, bytes_per_pixel });
+            assert!(rgba_layout(bounds, stride + 256, depth, ImageComponent::RGBA).is_ok());
+            for invalid in [0, -stride, stride - 1, stride + 1] {
+                assert!(rgba_layout(bounds, invalid, depth, ImageComponent::RGBA).is_err());
+            }
+            assert!(rgba_layout(RectI { x1: 1, ..bounds }, stride, depth, ImageComponent::RGBA).is_err());
+            assert!(rgba_layout(bounds, stride, depth, ImageComponent::RGB).is_err());
+        }
+        assert!(rgba_layout(bounds, 2560, BitDepth::None, ImageComponent::RGBA).is_err());
+        assert!(rgba_layout(RectI { x2: i32::MAX, ..bounds }, i32::MAX, BitDepth::Float, ImageComponent::RGBA).is_err());
     }
 
     static COPY_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -261,9 +339,33 @@ mod tests {
     unsafe extern "C" fn failed_copy(_: *mut c_void, _: *mut c_void, _: *mut c_void,
         _: i32, _: i32, _: i32, _: i32, _: i32) -> i32 { 9 }
 
+    static DEPTH_COPY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn high_depth_copy(src: *mut c_void, dst: *mut c_void, queue: *mut c_void,
+        width: i32, height: i32, src_stride: i32, dst_stride: i32, bpp: i32) -> i32 {
+        DEPTH_COPY_CALLS.fetch_add(1, Ordering::SeqCst);
+        if matches!(bpp, 8 | 16) && (src as usize, dst as usize, queue as usize, width, height,
+            src_stride, dst_stride) == (1, 2, 3, 640, 360, 640 * bpp, 640 * bpp + 256) { 0 } else { 8 }
+    }
+
+    #[test]
+    fn mac_jianying_passthrough_preserves_high_depth_and_rejects_reinterpretation() {
+        let bounds = RectI { x1: 0, y1: 0, x2: 640, y2: 360 };
+        DEPTH_COPY_CALLS.store(0, Ordering::SeqCst);
+        for (depth, bpp) in [(BitDepth::Short, 8), (BitDepth::Half, 8), (BitDepth::Float, 16)] {
+            let source = rgba_layout(bounds, 640 * bpp, depth, ImageComponent::RGBA).unwrap();
+            let output = ImageLayout { stride: source.stride + 256, ..source };
+            assert!(copy_buffers(high_depth_copy, 1usize as _, 2usize as _, 3usize as _, source, output).is_ok());
+        }
+        assert_eq!(DEPTH_COPY_CALLS.load(Ordering::SeqCst), 3);
+        let short = rgba_layout(bounds, 5120, BitDepth::Short, ImageComponent::RGBA).unwrap();
+        let half = rgba_layout(bounds, 5120, BitDepth::Half, ImageComponent::RGBA).unwrap();
+        assert!(copy_buffers(high_depth_copy, 1usize as _, 2usize as _, 3usize as _, short, half).is_err());
+        assert_eq!(DEPTH_COPY_CALLS.load(Ordering::SeqCst), 3);
+    }
+
     #[test]
     fn mac_jianying_passthrough_uses_exact_callback_abi_and_stops_on_failure() {
-        let src = ImageLayout { width: 640, height: 360, stride: 2560 };
+        let src = ImageLayout { width: 640, height: 360, stride: 2560, depth: BitDepth::Byte, bytes_per_pixel: 4 };
         let dst = ImageLayout { stride: 2816, ..src };
         COPY_CALLS.store(0, Ordering::SeqCst);
         assert!(copy_buffers(good_copy, 1usize as _, 2usize as _, 3usize as _, src, dst).is_ok());

@@ -294,25 +294,38 @@ OfxStatus set_value_at_time(OfxParamHandle parameter, OfxTime time, ...) {
     return result;
 }
 
+int rgba_bytes_per_pixel(const char* depth) {
+    if (same(depth, kOfxBitDepthByte)) return 4;
+    if (same(depth, kOfxBitDepthShort) || same(depth, "OfxBitDepthHalf")) return 8;
+    if (same(depth, kOfxBitDepthFloat)) return 16;
+    return 0;
+}
+
 bool valid_image(OfxPropertySetHandle image) {
     int bounds[4]{}, stride = 0;
     const char* depth = nullptr;
     const char* components = nullptr;
     void* buffer = nullptr;
-    if (!properties->propGetIntN || properties->propGetIntN(image, kOfxImagePropBounds, 4, bounds) != kOfxStatOK
-        || properties->propGetInt(image, kOfxImagePropRowBytes, 0, &stride) != kOfxStatOK
-        || properties->propGetString(image, kOfxImageEffectPropPixelDepth, 0, &depth) != kOfxStatOK
-        || properties->propGetString(image, kOfxImageEffectPropComponents, 0, &components) != kOfxStatOK
-        || properties->propGetPointer(image, kOfxImagePropData, 0, &buffer) != kOfxStatOK
-        || !same(depth, kOfxBitDepthByte) || !same(components, kOfxImageComponentRGBA)
+    const auto bounds_status = properties->propGetIntN
+        ? properties->propGetIntN(image, kOfxImagePropBounds, 4, bounds) : kOfxStatErrMissingHostFeature;
+    const auto stride_status = properties->propGetInt(image, kOfxImagePropRowBytes, 0, &stride);
+    const auto depth_status = properties->propGetString(image, kOfxImageEffectPropPixelDepth, 0, &depth);
+    const auto components_status = properties->propGetString(image, kOfxImageEffectPropComponents, 0, &components);
+    const auto data_status = properties->propGetPointer(image, kOfxImagePropData, 0, &buffer);
+    const int bytes_per_pixel = rgba_bytes_per_pixel(depth);
+    if (bounds_status != kOfxStatOK || stride_status != kOfxStatOK || depth_status != kOfxStatOK
+        || components_status != kOfxStatOK || data_status != kOfxStatOK
+        || !bytes_per_pixel || !same(components, kOfxImageComponentRGBA)
         || bounds[0] != 0 || bounds[1] != 0 || bounds[2] <= 0 || bounds[3] <= 0
-        || stride <= 0 || stride % 4 != 0
-        || static_cast<std::uint64_t>(stride) < static_cast<std::uint64_t>(bounds[2]) * 4) {
-        report_error("metal_image_rejected reason=unsupported_image_properties");
+        || stride <= 0 || stride % bytes_per_pixel != 0
+        || static_cast<std::uint64_t>(stride) < static_cast<std::uint64_t>(bounds[2]) * bytes_per_pixel) {
+        report_error("metal_image_rejected reason=unsupported_image_properties depth=%s components=%s bounds=%d,%d,%d,%d stride=%d statuses=%d,%d,%d,%d,%d",
+            depth ? depth : "null", components ? components : "null", bounds[0], bounds[1], bounds[2], bounds[3], stride,
+            bounds_status, stride_status, depth_status, components_status, data_status);
         return false;
     }
     const auto required = static_cast<std::uint64_t>(bounds[3] - 1) * stride
-                        + static_cast<std::uint64_t>(bounds[2]) * 4;
+                        + static_cast<std::uint64_t>(bounds[2]) * bytes_per_pixel;
     GFMetalBufferInfo info;
     if (required > std::numeric_limits<std::size_t>::max()
         || !gf_metal_validate_buffer(buffer, render_queue, required, &info)) {

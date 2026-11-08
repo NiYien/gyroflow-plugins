@@ -117,7 +117,15 @@ OfxStatus entry(const char* action, const void* raw_effect, OfxPropertySetHandle
             properties->propGetPointer(source_image, kOfxImagePropData, 0, &src);
             properties->propGetPointer(output_image, kOfxImagePropData, 0, &dst);
             properties->propGetPointer(in, "OfxImageEffectPropMetalCommandQueue", 0, &queue);
-            result = copy && copy(src, dst, queue, 8, 4, 32, 32, 4) == 0 ? kOfxStatOK : kOfxStatFailed;
+            int source_stride = 0, output_stride = 0;
+            const char* depth = nullptr;
+            properties->propGetInt(source_image, kOfxImagePropRowBytes, 0, &source_stride);
+            properties->propGetInt(output_image, kOfxImagePropRowBytes, 0, &output_stride);
+            properties->propGetString(output_image, kOfxImageEffectPropPixelDepth, 0, &depth);
+            const int bpp = depth && !std::strcmp(depth, kOfxBitDepthByte) ? 4
+                : depth && (!std::strcmp(depth, kOfxBitDepthShort) || !std::strcmp(depth, "OfxBitDepthHalf")) ? 8
+                : depth && !std::strcmp(depth, kOfxBitDepthFloat) ? 16 : 0;
+            result = copy && copy(src, dst, queue, 8, 4, source_stride, output_stride, bpp) == 0 ? kOfxStatOK : kOfxStatFailed;
         }
         if (output_image) images->clipReleaseImage(output_image);
         if (source_image) images->clipReleaseImage(source_image);

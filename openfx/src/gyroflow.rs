@@ -2892,7 +2892,15 @@ impl Execute for GyroflowPlugin {
                 } else {
                     instance_data.source_clip.get_image(time)?
                 };
-                if is_mac_jianying { jianying_macos::image_layout(&source_image)?; }
+                if is_mac_jianying {
+                    let source_layout = jianying_macos::image_layout(&source_image)?;
+                    let output_layout = jianying_macos::image_layout(&output_image)?;
+                    if source_layout.depth != output_layout.depth {
+                        log::error!(target: "jianying_ofx", "Mac source/output pixel depths differ: {:?} -> {:?}",
+                            source_layout.depth, output_layout.depth);
+                        return Err(Error::InvalidValue);
+                    }
+                }
                 let source_clip_pixel_aspect_ratio = instance_data.source_clip.get_pixel_aspect_ratio().ok();
                 let source_image_pixel_aspect_ratio = source_image.get_pixel_aspect_ratio().ok();
 
@@ -3086,7 +3094,8 @@ impl Execute for GyroflowPlugin {
                             Some((
                                 BufferSource::MetalBuffer { buffer: source_image.get_data()? as *mut std::ffi::c_void, command_queue },
                                 BufferSource::MetalBuffer { buffer: output_image.get_data()? as *mut std::ffi::c_void, command_queue },
-                                instance_data.is_fusion_page
+                                // Reuse tiled textures instead of retaining each host frame buffer.
+                                instance_data.is_fusion_page || is_mac_jianying
                             ))
                         }
                     } else if in_args.get_cuda_enabled().unwrap_or_default() {
@@ -3176,7 +3185,10 @@ impl Execute for GyroflowPlugin {
                         gyroflow_plugin_base::widen_host_trim_for_render(&stab, timestamp_us);
                     }
 
-                    if is_mac_jianying { jianying_macos::apply_fragment_sampling(&stab, &buffers)?; }
+                    if is_mac_jianying {
+                        jianying_macos::apply_fragment_sampling(&stab, &buffers)?;
+                        jianying_macos::apply_buffer_compute(&stab, &buffers, output_image.get_pixel_depth()?);
+                    }
                     if is_jianying { prepare_jianying_gpu(&stab, &buffers)?; }
 
                     let processed = match output_image.get_pixel_depth()? {
@@ -3797,7 +3809,8 @@ impl Execute for GyroflowPlugin {
                     descriptor.set_label("Gyroflow")?;
                     descriptor.set_short_label("Gyroflow")?;
                     descriptor.set_long_label("Gyroflow")?;
-                    descriptor.set_supported_pixel_depths(&[BitDepth::Byte])?;
+                    descriptor.set_supported_pixel_depths(&[BitDepth::Byte, BitDepth::Short, BitDepth::Half, BitDepth::Float])?;
+                    descriptor.set_supports_multiple_clip_depths(false)?;
                     descriptor.set_supported_contexts(&[ImageEffectContext::Filter])?;
                     descriptor.set_supports_tiles(false)?;
                     descriptor.set_single_instance(false)?;

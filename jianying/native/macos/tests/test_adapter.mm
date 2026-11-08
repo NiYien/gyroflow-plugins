@@ -167,12 +167,12 @@ int main(int argc, char** argv) {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         require(device != nil, "Real Metal device unavailable; rerun with full device permissions");
         id<MTLCommandQueue> queue = [device newCommandQueue];
-        id<MTLBuffer> source = [device newBufferWithLength:128 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> destination = [device newBufferWithLength:128 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> source = [device newBufferWithLength:512 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> destination = [device newBufferWithLength:512 options:MTLResourceStorageModeShared];
         require(queue && source && destination, "Metal test resource allocation");
         auto* bytes = static_cast<unsigned char*>(source.contents);
-        for (unsigned i = 0; i < 128; ++i) bytes[i] = static_cast<unsigned char>((i * 17) ^ 0x5a);
-        std::memset(destination.contents, 0, 128);
+        for (unsigned i = 0; i < 512; ++i) bytes[i] = static_cast<unsigned char>((i * 17) ^ 0x5a);
+        std::memset(destination.contents, 0, 512);
         void* library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
         if (!library) { const char* error = dlerror(); throw std::runtime_error(error ? error : "Wrapper dlopen"); }
         auto get_plugin = reinterpret_cast<OfxPlugin* (*)(int)>(dlsym(library, "OfxGetPlugin"));
@@ -285,12 +285,26 @@ int main(int argc, char** argv) {
         effect.source.props.values[kOfxImagePropRowBytes] = {-32};
         require(invoke(kOfxImageEffectActionRender, &render) == kOfxStatErrUnsupported && fetched == 3 && released == 3,
                 "Rejected image must be released exactly once");
+        for (const auto& format : std::vector<std::pair<const char*, int>>{
+                {kOfxBitDepthShort, 8}, {"OfxBitDepthHalf", 8}, {kOfxBitDepthFloat, 16}}) {
+            for (auto* clip : {&effect.source, &effect.output}) {
+                clip->props.values[kOfxImagePropRowBytes] = {8 * format.second};
+                clip->props.values[kOfxImageEffectPropPixelDepth] = {std::string(format.first)};
+            }
+            const auto prior_fetched = fetched, prior_released = released;
+            std::memset(destination.contents, 0, 512);
+            require(invoke(kOfxImageEffectActionRender, &render) == kOfxStatOK
+                && fetched == prior_fetched + 2 && released == prior_released + 2,
+                "High-depth images must be accepted and released exactly once");
+            require(!std::memcmp(source.contents, destination.contents, 32 * format.second),
+                "High-depth passthrough must preserve every component bit");
+        }
         require(get(handle(host_properties), "NiYienJianyingMacMetalAdapter", 0, &missing) == kOfxStatErrUnknown,
                 "Private property synthesis must not mutate original host");
         require(!std::filesystem::exists(argv[2]), "Adapter must not create a diagnostic file");
         std::cout << "PASS: mock-only OFX forwarding ABI, private properties, 26 typed value calls, Render write guard, real Metal validation/copy and image release\n";
         std::cout << "{\"scope\":\"native mock only; no Jianying host acceptance\",\"vararg_host_calls\":" << writes.size()
-                  << ",\"images_fetched\":" << fetched << ",\"images_released\":" << released << ",\"gpu_copy_bytes\":128,\"n_setter_errors_preserved\":true,\"diagnostic_file_absent\":true,\"metal_context_noops\":2,\"unknown_nonmetal_forwarded\":true}\n";
+                  << ",\"images_fetched\":" << fetched << ",\"images_released\":" << released << ",\"gpu_copy_bytes\":1152,\"pixel_formats_verified\":4,\"n_setter_errors_preserved\":true,\"diagnostic_file_absent\":true,\"metal_context_noops\":2,\"unknown_nonmetal_forwarded\":true}\n";
         return 0;
     }} catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }
