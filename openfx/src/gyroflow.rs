@@ -2997,7 +2997,9 @@ impl Execute for GyroflowPlugin {
                     out_rect = None;
                 }
 
-                let input_rotation = Some(input_rotation_deg as f32);
+                let input_pixel_centers = is_jianying && !instance_data.plugin.framebuffer_inverted;
+                // Top-down pre-rotated pixels use the opposite sampling angle from OFX's inverted coordinates.
+                let input_rotation = Some(if input_pixel_centers { -input_rotation_deg } else { input_rotation_deg } as f32);
 
                 // openfx-output-adjust-affine: read the four sliders at the current frame
                 // (host may keyframe them) and assemble PostAffine. Fusion page bypasses
@@ -3176,6 +3178,9 @@ impl Execute for GyroflowPlugin {
                         gyroflow_plugin_base::widen_host_trim_for_render(&stab, timestamp_us);
                     }
 
+                    if input_pixel_centers {
+                        stab.stabilization.write().kernel_flags.insert(KernelParamsFlags::INPUT_ROTATION_PIXEL_CENTERS);
+                    }
                     if is_mac_jianying { jianying_macos::apply_fragment_sampling(&stab, &buffers)?; }
                     if is_jianying { prepare_jianying_gpu(&stab, &buffers)?; }
 

@@ -1358,7 +1358,7 @@ dependencies = [
 [[package]]
 name = "gyroflow-core"
 version = "1.7.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=b827be80dacfcd4148d6b9008a9716cd5bb7bf17#b827be80dacfcd4148d6b9008a9716cd5bb7bf17"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=0cbf2ab61e4e44427062341958643151710857f4#0cbf2ab61e4e44427062341958643151710857f4"
 dependencies = [
  "ahrs",
  "akaze",
@@ -2305,7 +2305,7 @@ dependencies = [
 [[package]]
 name = "neuflow-trace-shared"
 version = "0.1.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=b827be80dacfcd4148d6b9008a9716cd5bb7bf17#b827be80dacfcd4148d6b9008a9716cd5bb7bf17"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=0cbf2ab61e4e44427062341958643151710857f4#0cbf2ab61e4e44427062341958643151710857f4"
 
 [[package]]
 name = "nodrop"
@@ -2910,7 +2910,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3551,7 +3551,7 @@ source = "git+https://github.com/Rust-GPU/rust-gpu?rev=854e9ba#854e9ba7da26d52ca
 [[package]]
 name = "stabilize_spirv"
 version = "0.0.0"
-source = "git+https://github.com/NiYien/gyroflow.git?rev=b827be80dacfcd4148d6b9008a9716cd5bb7bf17#b827be80dacfcd4148d6b9008a9716cd5bb7bf17"
+source = "git+https://github.com/NiYien/gyroflow.git?rev=0cbf2ab61e4e44427062341958643151710857f4#0cbf2ab61e4e44427062341958643151710857f4"
 dependencies = [
  "spirv-std",
 ]
