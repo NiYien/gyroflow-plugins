@@ -61,3 +61,94 @@ fn feedback_project_preserves_embedded_samples_and_sync_offsets() {
     assert_eq!(gyro.quaternions.len(), expected.raw_imu.len());
     eprintln!("plugin feedback import: samples={} lens_params={} offsets={:?}", metadata.raw_imu.len(), metadata.lens_params.len(), gyro.get_offsets());
 }
+
+#[test]
+#[ignore = "requires GYROFLOW_PLUGIN_OPTIMAL_PROJECT with an applied pure-visual Optimal path project"]
+fn optimal_project_load_overrides_reopen_and_legacy_method() {
+    let fixture = std::env::var("GYROFLOW_PLUGIN_OPTIMAL_PROJECT").unwrap();
+    let project: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
+    assert_eq!(project["stabilization"]["method"], "Optimal path");
+    assert_eq!(project["stabilization"]["fixed_zoom"], true);
+    let dir = seq_tmp();
+    for expected in ["Optimal path", "Default"] {
+        let mut data = project.clone();
+        data["stabilization"]["method"] = expected.into();
+        data["stabilization"]["smoothing_params"] = serde_json::json!([{"name": "smoothness", "value": 0.5}]);
+        let path = dir.join(format!("{}.gyroflow", expected.replace(' ', "-")));
+        std::fs::write(&path, serde_json::to_vec(&data).unwrap()).unwrap();
+        let mut host = TestParams::default();
+        host.set_string(Params::ProjectPath, &path.to_string_lossy()).unwrap();
+        host.set_string(Params::InstanceId, expected).unwrap();
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let mut instance = GyroflowPluginBaseInstance { ever_changed: true, ..Default::default() };
+        let first = instance.stab_manager(&mut host, &cache, (0, 0), false).unwrap();
+        assert_eq!(first.smoothing.read().current().get_name(), expected);
+        assert!(has_active_video_motion(&first));
+        assert!(first.gyro.read().get_offsets().is_empty());
+        assert_eq!(host.get_i32(Params::ZoomMode).unwrap(), 2);
+        let first_fovs = first.params.read().fovs.clone();
+        assert!(!first_fovs.is_empty());
+        assert!(first_fovs.iter().all(|f| f.to_bits() == first_fovs[0].to_bits()));
+        assert!(first_fovs[0] <= 1.0 / 1.25 + 1e-12);
+        let original = first.gyro.read().smoothed_quaternions.clone();
+
+        host.set_f64(Params::Smoothness, 90.0).unwrap();
+        instance.param_changed(&mut host, &cache, Params::Smoothness, true).unwrap();
+        host.set_f64(Params::ZoomLimit, 150.0).unwrap();
+        instance.param_changed(&mut host, &cache, Params::ZoomLimit, true).unwrap();
+        host_reload_pending_render_work(&first);
+        assert_eq!(first.smoothing.read().current().get_name(), expected);
+        assert_eq!(first.keyframes.read().value_at_video_timestamp(&KeyframeType::SmoothingParamSmoothness, 0.0), Some(0.9));
+        assert_eq!(first.keyframes.read().value_at_video_timestamp(&KeyframeType::MaxZoom, 0.0), Some(150.0));
+        let edited = first.gyro.read().smoothed_quaternions.clone();
+        assert!(host_reload_angle_difference(&original, &edited) > 1e-8);
+        let edited_fovs = first.params.read().fovs.clone();
+        assert!(edited_fovs.iter().all(|f| f.to_bits() == edited_fovs[0].to_bits()));
+        assert!(edited_fovs[0] <= 1.0 / 1.5 + 1e-12);
+        let exported: serde_json::Value = serde_json::from_str(&first.export_gyroflow_data(
+            gyroflow_core::GyroflowProjectType::WithGyroData, "{}", None).unwrap()).unwrap();
+        assert_eq!(exported["stabilization"]["fixed_zoom"], true);
+
+        let mut reopened = GyroflowPluginBaseInstance { reload_values_from_project: false, ever_changed: true, ..Default::default() };
+        let reopened_cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let restored = reopened.stab_manager(&mut host, &reopened_cache, (0, 0), false).unwrap();
+        host_reload_pending_render_work(&restored);
+        assert_eq!(restored.smoothing.read().current().get_name(), expected);
+        assert!(has_active_video_motion(&restored));
+        assert!(host_reload_angle_difference(&edited, &restored.gyro.read().smoothed_quaternions) < 1e-10);
+        assert_eq!(restored.params.read().fovs, edited_fovs);
+
+        reopened.param_changed(&mut host, &reopened_cache, Params::ReloadProject, true).unwrap();
+        let reloaded = reopened.stab_manager(&mut host, &reopened_cache, (0, 0), false).unwrap();
+        host_reload_pending_render_work(&reloaded);
+        assert_eq!(reloaded.smoothing.read().current().get_name(), expected);
+        assert!(host_reload_angle_difference(&original, &reloaded.gyro.read().smoothed_quaternions) < 1e-10);
+        assert_eq!(reloaded.params.read().fovs, first_fovs);
+        eprintln!("method={expected:?} applied_visual=true offsets=0 fixed_zoom=true initial_fov={} edited_fov={} host_overrides_and_reopen=ok", first_fovs[0], edited_fovs[0]);
+
+        reloaded.set_optical_correction_enabled(false);
+        reloaded.recompute_blocking();
+        assert!(!has_active_video_motion(&reloaded));
+    }
+    assert!(!has_active_video_motion(&StabilizationManager::default()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires GYROFLOW_PLUGIN_OPTIMAL_PROJECT with an applied pure-visual project"]
+fn pure_visual_zoom_actions_remain_enabled() {
+    let path = std::env::var("GYROFLOW_PLUGIN_OPTIMAL_PROJECT").unwrap();
+    let mut host = TestParams::default();
+    host.set_string(Params::ProjectPath, &path).unwrap();
+    host.set_string(Params::InstanceId, "pure-visual-zoom-actions").unwrap();
+    let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+    let mut instance = GyroflowPluginBaseInstance { ever_changed: true, ..Default::default() };
+    let stab = instance.stab_manager(&mut host, &cache, (0, 0), false).unwrap();
+    assert!(has_active_video_motion(&stab));
+    instance.param_changed(&mut host, &cache, Params::UseDynamicZoom, true).unwrap();
+    assert!(host.enabled[&Params::UseStaticZoom]);
+    assert!(!host.enabled[&Params::UseDynamicZoom]);
+    instance.param_changed(&mut host, &cache, Params::UseStaticZoom, true).unwrap();
+    assert!(host.enabled[&Params::UseDynamicZoom]);
+    assert!(!host.enabled[&Params::UseStaticZoom]);
+}

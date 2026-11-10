@@ -272,7 +272,7 @@ fn prepare_jianying_gpu(stab: &StabilizationManager, buffers: &Buffers) -> Resul
 }
 
 fn update_synchronization_status(plugin: &mut GyroflowPluginBaseInstance, params: &mut dyn GyroflowPluginParams, stab: &StabilizationManager) {
-    let synchronized = {
+    let synchronized = gyroflow_plugin_base::has_active_video_motion(stab) || {
         let gyro = stab.gyro.read();
         let metadata = gyro.file_metadata.read();
         metadata.has_accurate_timestamps || !gyro.get_offsets().is_empty()

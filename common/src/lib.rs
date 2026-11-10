@@ -24,6 +24,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub type PluginResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+pub fn has_active_video_motion(stab: &StabilizationManager) -> bool {
+    let gyro = stab.gyro.read();
+    gyro.optical_correction_applied
+        && !gyro.has_motion()
+        && !gyro.quaternions.is_empty()
+        && gyro.optical_correction.as_ref().is_some_and(|correction| !correction.video_base.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GyroflowLaunchCommand {
     program: String,
@@ -1764,7 +1772,8 @@ impl GyroflowPluginBaseInstance {
                 }
                 let use_gyroflows_keyframes = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
                 self.cache_keyframes(params, use_gyroflows_keyframes, self.num_frames, self.fps.max(1.0));
-                self.has_motion = stab.gyro.read().has_motion();
+                let has_file_motion = stab.gyro.read().has_motion();
+                self.has_motion = has_file_motion || has_active_video_motion(&stab);
                 loaded
             };
 
