@@ -22,6 +22,12 @@ pub(super) fn apply_fragment_sampling(stab: &gyroflow_plugin_base::Stabilization
 
 const METAL_U16_BUFFER_COMPUTE_BIT: i32 = 1 << 16;
 
+pub(super) fn processing_depth(mac_jianying: bool, reported: BitDepth) -> BitDepth {
+    // Jianying's Metal Short buffers contain IEEE 754 binary16 channels, including alpha 0x3c00.
+    // Keep the host's image properties intact and route only this adapter's arithmetic to Half.
+    if mac_jianying && reported == BitDepth::Short { BitDepth::Half } else { reported }
+}
+
 fn buffer_compute_eligible(buffers: &gyroflow_plugin_base::Buffers, depth: BitDepth, known_flags: i32) -> bool {
     #[cfg(target_os = "macos")]
     use gyroflow_plugin_base::BufferSource;
@@ -208,6 +214,15 @@ pub(super) fn parameter_frame(time: gyroflow_plugin_base::TimeType, host_fps: f6
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn mac_jianying_short_buffers_use_half_float_arithmetic_only_in_this_adapter() {
+        for depth in [BitDepth::None, BitDepth::Byte, BitDepth::Short, BitDepth::Half, BitDepth::Float] {
+            assert_eq!(processing_depth(false, depth), depth);
+            let expected = if depth == BitDepth::Short { BitDepth::Half } else { depth };
+            assert_eq!(processing_depth(true, depth), expected);
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

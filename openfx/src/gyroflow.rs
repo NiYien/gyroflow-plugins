@@ -3132,6 +3132,7 @@ impl Execute for GyroflowPlugin {
                 if effect.abort()? { return FAILED; }
 
                 if let Some(buffers) = buffers {
+                    let processing_depth = jianying_macos::processing_depth(is_mac_jianying, output_image.get_pixel_depth()?);
                     let mut buffers = Buffers {
                         input:  BufferDescription { size: src_size, rect: effective_src_rect, data: buffers.0, rotation: input_rotation, texture_copy: buffers.2, post_affine: None,               flip_h: false,         flip_v: false         },
                         output: BufferDescription { size: out_size, rect: out_rect,           data: buffers.1, rotation: None,           texture_copy: buffers.2, post_affine: output_post_affine, flip_h: output_flip_h, flip_v: output_flip_v }
@@ -3170,11 +3171,11 @@ impl Execute for GyroflowPlugin {
                     }
                     if is_mac_jianying {
                         jianying_macos::apply_fragment_sampling(&stab, &buffers)?;
-                        jianying_macos::apply_buffer_compute(&stab, &buffers, output_image.get_pixel_depth()?);
+                        jianying_macos::apply_buffer_compute(&stab, &buffers, processing_depth);
                     }
                     if is_jianying { prepare_jianying_gpu(&stab, &buffers)?; }
 
-                    let processed = match output_image.get_pixel_depth()? {
+                    let processed = match processing_depth {
                         BitDepth::None  => { return FAILED; },
                         BitDepth::Byte  => stab.process_pixels::<RGBA8>  (timestamp_us, None, &mut buffers),
                         BitDepth::Short => stab.process_pixels::<RGBA16> (timestamp_us, None, &mut buffers),
