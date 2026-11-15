@@ -416,16 +416,8 @@ impl AdobePluginGlobal for Plugin {
 
                 let _ = in_data.effect().set_options_button_name(gyroflow_plugin_base::t!("ae.button.open_gyroflow"));
             },
-            ae::Command::ArbitraryCallback { mut extra } => {
-                if let Err(e) = extra.dispatch::<ArbString, Params>(Params::InstanceId) {
-                    log::info!("arb callback error, which: {:?}", extra.which_function());
-                    return Err(e);
-                }
-                let _ = extra.dispatch::<ArbString, Params>(Params::ProjectData);
-                let _ = extra.dispatch::<ArbString, Params>(Params::EmbeddedLensProfile);
-                let _ = extra.dispatch::<ArbString, Params>(Params::EmbeddedPreset);
-                let _ = extra.dispatch::<ArbString, Params>(Params::Status);
-                let _ = extra.dispatch::<ArbString, Params>(Params::ProjectPath);
+            ae::Command::ArbitraryCallback { extra } => {
+                ArbString::callback(&extra)?;
             }
             ae::Command::GlobalSetdown => {
                 gyroflow_plugin_base::update_notice::shutdown();

@@ -32,24 +32,172 @@ pub fn de_stored<'de, D: Deserializer<'de>>(d: D) -> Result<Arc<RwLock<StoredPar
     Ok(Arc::new(RwLock::new(strs)))
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
-#[repr(C)]
-pub struct ArbString {
-    pub val: String,
-}
-impl ArbString {
-    pub fn get(&self) -> &str {
-        self.val.as_str()
-    }
-    pub fn set(&mut self, v: &str) {
-        self.val.clear();
-        self.val.push_str(v);
-    }
-}
+/// The value of the string parameters, as the host keeps it: the string itself, in the host's handle, laid out as it's
+/// saved (bincode's `String`: the length as a little-endian u64, then the UTF-8 bytes; up to v2.1.1 it was a struct of
+/// one, which saves the same), so projects read and write the same as before.
+///
+/// The host keeps the value in place in its handle, and copies the handle's bytes without asking (Premiere from other
+/// threads, outside of the effect's lock), so the value can't own memory elsewhere, as a `String` would: the copies would
+/// share it, and the first one changed or disposed would free it under the others. In the handle, each copy is a whole
+/// value, and its memory goes when the host disposes of the handle
+pub struct ArbString;
 
-impl ae::ArbitraryData<ArbString> for ArbString {
-    fn interpolate(&self, _other: &Self, _value: f64) -> Self {
-        self.clone()
+impl ArbString {
+    const LEN: usize = std::mem::size_of::<u64>();
+    /// The empty string, as the handle has it (its length), for `ArbitraryDef::set_default`
+    pub const EMPTY: u64 = 0;
+
+    /// `v` as the handle has it
+    pub fn encode(v: &str) -> Vec<u8> {
+        let mut bytes = vec![0; Self::LEN + v.len()];
+        Self::put(&mut bytes, v.as_bytes());
+        bytes
+    }
+    /// The string's bytes in a handle's `bytes`, `None` when they aren't a value
+    pub fn decode(bytes: &[u8]) -> Option<&[u8]> {
+        let len = u64::from_le_bytes(bytes.get(..Self::LEN)?.try_into().ok()?);
+        bytes.get(Self::LEN..Self::LEN.checked_add(usize::try_from(len).ok()?)?)
+    }
+    /// Puts the value of the string's bytes `v` in `dst`, which is as long as it
+    fn put(dst: &mut [u8], v: &[u8]) {
+        dst[..Self::LEN].copy_from_slice(&(v.len() as u64).to_le_bytes());
+        dst[Self::LEN..].copy_from_slice(v);
+    }
+
+    /// `f` of the string's bytes in the handle `h`, locked meanwhile. `None` for a null handle or one that isn't a value
+    fn with_bytes<R>(h: ae::sys::PF_Handle, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        if h.is_null() { return None; }
+        let suite = ae::pf::suites::Handle::new().ok()?;
+        let ptr = suite.lock_handle(h) as *const u8;
+        if ptr.is_null() { return None; }
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, suite.handle_size(h) as usize) };
+        let ret = Self::decode(bytes).map(f);
+        suite.unlock_handle(h);
+        ret
+    }
+    /// Puts the value of the string's bytes `v` in the handle `*h`: a new one when it's null, resized in place otherwise
+    fn set(h: &mut ae::sys::PF_Handle, v: &[u8]) -> Result<(), ae::Error> {
+        let suite = ae::pf::suites::Handle::new()?;
+        let size = Self::LEN + v.len();
+        if h.is_null() {
+            *h = suite.new_handle(size as _);
+            if h.is_null() { return Err(ae::Error::OutOfMemory); }
+        } else {
+            suite.resize_handle(size, h)?;
+        }
+        let ptr = suite.lock_handle(*h) as *mut u8;
+        if ptr.is_null() { return Err(ae::Error::OutOfMemory); }
+        Self::put(unsafe { std::slice::from_raw_parts_mut(ptr, size) }, v);
+        suite.unlock_handle(*h);
+        Ok(())
+    }
+    /// A new handle of the value of the string's bytes `v`
+    fn new_handle(v: &[u8]) -> Result<ae::sys::PF_Handle, ae::Error> {
+        let mut h = std::ptr::null_mut();
+        Self::set(&mut h, v)?;
+        Ok(h)
+    }
+    /// A new handle of the value in the handle `h`, the empty string when it has none
+    fn copy(h: ae::sys::PF_Handle) -> Result<ae::sys::PF_Handle, ae::Error> {
+        Self::with_bytes(h, Self::new_handle).unwrap_or_else(|| Self::new_handle(b""))
+    }
+
+    /// The string in the handle `h`
+    pub fn read(h: ae::sys::PF_Handle) -> String {
+        Self::with_bytes(h, |x| String::from_utf8_lossy(x).into_owned()).unwrap_or_default()
+    }
+    /// Sets the string in the handle `*h` to `v`. Returns whether it changed
+    pub fn write(h: &mut ae::sys::PF_Handle, v: &str) -> Result<bool, ae::Error> {
+        if Self::with_bytes(*h, |x| x == v.as_bytes()) == Some(true) {
+            return Ok(false);
+        }
+        Self::set(h, v.as_bytes())?;
+        Ok(true)
+    }
+
+    /// Handles the host's calls for the values of the string parameters, which all the arbitrary data parameters are
+    pub fn callback(extra: &ae::ArbParamsExtra) -> Result<(), ae::Error> {
+        use ae::sys;
+        let x = extra.as_ref();
+        unsafe {
+            match x.which_function as _ {
+                sys::PF_Arbitrary_NEW_FUNC => {
+                    *x.u.new_func_params.arbPH = Self::new_handle(b"")?;
+                }
+                sys::PF_Arbitrary_DISPOSE_FUNC => {
+                    let h = x.u.dispose_func_params.arbH;
+                    if !h.is_null() {
+                        ae::pf::suites::Handle::new()?.dispose_handle(h);
+                    }
+                }
+                sys::PF_Arbitrary_COPY_FUNC => {
+                    *x.u.copy_func_params.dst_arbPH = Self::copy(x.u.copy_func_params.src_arbH)?;
+                }
+                // Not time-varying: the value of the left one
+                sys::PF_Arbitrary_INTERP_FUNC => {
+                    *x.u.interp_func_params.interpPH = Self::copy(x.u.interp_func_params.left_arbH)?;
+                }
+                sys::PF_Arbitrary_FLAT_SIZE_FUNC => {
+                    let len = Self::with_bytes(x.u.flat_size_func_params.arbH, |x| x.len()).unwrap_or_default();
+                    *x.u.flat_size_func_params.flat_data_sizePLu = (Self::LEN + len) as _;
+                }
+                // Flat, it's as in the handle
+                sys::PF_Arbitrary_FLATTEN_FUNC => {
+                    let p = &x.u.flatten_func_params;
+                    if p.flat_dataPV.is_null() { return Err(ae::Error::InvalidParms); }
+                    let flat = std::slice::from_raw_parts_mut(p.flat_dataPV as *mut u8, p.buf_sizeLu as usize);
+                    let mut put = |v: &[u8]| flat.get_mut(..Self::LEN + v.len()).map(|dst| Self::put(dst, v)).is_some();
+                    let put = match Self::with_bytes(p.arbH, &mut put) {
+                        Some(put) => put,
+                        None => put(b""),
+                    };
+                    if !put {
+                        return Err(ae::Error::InvalidParms);
+                    }
+                }
+                sys::PF_Arbitrary_UNFLATTEN_FUNC => {
+                    let p = &x.u.unflatten_func_params;
+                    if p.flat_dataPV.is_null() { return Err(ae::Error::InvalidParms); }
+                    let flat = std::slice::from_raw_parts(p.flat_dataPV as *const u8, p.buf_sizeLu as usize);
+                    *p.arbPH = Self::new_handle(Self::decode(flat).ok_or(ae::Error::InternalStructDamaged)?)?;
+                }
+                sys::PF_Arbitrary_COMPARE_FUNC => {
+                    let p = &x.u.compare_func_params;
+                    let ordering = if p.a_arbH == p.b_arbH {
+                        std::cmp::Ordering::Equal
+                    } else {
+                        let with_b = |a: &[u8]| Self::with_bytes(p.b_arbH, |b| a.cmp(b)).unwrap_or(a.cmp(b""));
+                        Self::with_bytes(p.a_arbH, with_b).unwrap_or_else(|| with_b(b""))
+                    };
+                    *p.compareP = match ordering {
+                        std::cmp::Ordering::Less    => sys::PF_ArbCompare_LESS,
+                        std::cmp::Ordering::Equal   => sys::PF_ArbCompare_EQUAL,
+                        std::cmp::Ordering::Greater => sys::PF_ArbCompare_MORE,
+                    } as _;
+                }
+                // As text, a JSON string
+                sys::PF_Arbitrary_PRINT_SIZE_FUNC => {
+                    let p = &x.u.print_size_func_params;
+                    *p.print_sizePLu = (serde_json::to_string(&Self::read(p.arbH)).unwrap_or_default().len() + 1) as _;
+                }
+                sys::PF_Arbitrary_PRINT_FUNC => {
+                    let p = &x.u.print_func_params;
+                    let text = std::ffi::CString::new(serde_json::to_string(&Self::read(p.arbH)).unwrap_or_default()).unwrap_or_default();
+                    let text = text.as_bytes_with_nul();
+                    if text.len() <= p.print_sizeLu as usize && p.print_flags == 0 && !p.print_bufferPC.is_null() {
+                        std::ptr::copy_nonoverlapping(text.as_ptr(), p.print_bufferPC as *mut u8, text.len());
+                    }
+                }
+                sys::PF_Arbitrary_SCAN_FUNC => {
+                    let p = &x.u.scan_func_params;
+                    let text = std::ffi::CStr::from_ptr(p.bufPC).to_str().map_err(|_| ae::Error::InternalStructDamaged)?;
+                    let value = serde_json::from_str::<String>(text).map_err(|_| ae::Error::InternalStructDamaged)?;
+                    *p.arbPH = Self::new_handle(value.as_bytes())?;
+                }
+                _ => return Err(ae::Error::Generic)
+            }
+        }
+        Ok(())
     }
 }
 
@@ -58,7 +206,7 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
         ParameterType::HiddenString { id } => {
             let p = Params::from_str(id).unwrap();
             params.add_customized(p, id, ae::ArbitraryDef::setup(|f| {
-                f.set_default::<ArbString>(ArbString::default()).unwrap();
+                f.set_default(ArbString::EMPTY).unwrap();
             }), |param| {
                 param.set_flags(ae::ParamFlag::CANNOT_TIME_VARY);
                 param.set_ui_flags(ae::ParamUIFlags::NO_ECW_UI);
@@ -68,7 +216,7 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
         ParameterType::TextBox { id, label, hidden, .. } => {
             let p = Params::from_str(id).unwrap();
             params.add_customized(p, label, ae::ArbitraryDef::setup(|f| {
-                f.set_default::<ArbString>(ArbString::default()).unwrap();
+                f.set_default(ArbString::EMPTY).unwrap();
             }), |param| {
                 param.set_flags(ae::ParamFlag::CANNOT_TIME_VARY);
                 let mut ui = ae::ParamUIFlags::CONTROL;
@@ -99,7 +247,7 @@ pub fn define_param(params: &mut ae::Parameters<Params>, x: ParameterType, _grou
             // hidden:false there; only Adobe force-hides it, like InputRotation below).
             let hidden = hidden || matches!(p, Params::LoadedProject | Params::PluginUpdateNotice);
             params.add_customized(p, label, ae::ArbitraryDef::setup(|f| {
-                f.set_default::<ArbString>(ArbString::default()).unwrap();
+                f.set_default(ArbString::EMPTY).unwrap();
             }), |param| {
                 param.set_flags(ae::ParamFlag::CANNOT_TIME_VARY);
                 let mut ui = ae::ParamUIFlags::CONTROL | ae::ParamUIFlags::DO_NOT_ERASE_CONTROL;
@@ -201,6 +349,12 @@ pub struct ParamHandler<'a, 'b> where 'b: 'a {
     pub inner: ParamsInner<'a, 'b>,
     pub stored: Arc<RwLock<StoredParams>>,
 }
+/// The handle of the value of the string parameter `def` (see `ArbString`)
+pub fn arb_handle(def: &ae::ParamDef) -> Result<ae::sys::PF_Handle, ae::Error> {
+    def.as_arbitrary()?;
+    Ok(unsafe { def.as_ref().u.arb_d.value })
+}
+
 impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
     fn set_visible(&mut self, p: Params, visible: bool) -> PluginResult<()> {
         self.stored.write().translation_visibility.insert(p, visible);
@@ -213,16 +367,21 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         if let Some(v) = self.stored.read().pending_params_str.get(&p) {
             return Ok(v.clone());
         }
+        // Loaded names come from the imported context, not from host parameters.
+        if matches!(p, Params::LoadedProject | Params::LoadedLens | Params::LoadedPreset) {
+            return Ok(String::new());
+        }
         match &self.inner {
             ParamsInner::Ae(x) => {
-                Ok(x.get(p)?.as_arbitrary()?.value::<ArbString>()?.get().to_string())
+                Ok(ArbString::read(arb_handle(&*x.get(p)?)?))
             }
             ParamsInner::AeRO(x) => {
-                Ok(x.get(p)?.as_arbitrary()?.value::<ArbString>()?.get().to_string())
+                Ok(ArbString::read(arb_handle(&*x.get(p)?)?))
             }
             ParamsInner::Premiere((filter, render_params)) => {
                 if let Some(ind) = param_index_for_type(p, None) {
-                    Ok(filter.param_arbitrary_data::<ArbString>(ind, render_params.clip_time()).unwrap().get().to_owned())
+                    // Flattened, as `ArbString` saves it: a `String`
+                    Ok(filter.param_arbitrary_data::<String>(ind, render_params.clip_time()).map_err(|e| format!("{p:?}: {e:?}"))?)
                 } else {
                     Ok(String::new())
                 }
@@ -236,14 +395,17 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         self.stored.write().pending_params_str.insert(p, v.to_owned());
         if p == Params::LoadedProject || p == Params::LoadedPreset || p == Params::LoadedLens { return Ok(()); }
         match &mut self.inner {
-            ParamsInner::Ae(x) => {
-                let mut p = x.get_mut(p)?;
-                if let Ok(mut arb) = p.as_arbitrary_mut()?.value::<ArbString>() {
-                    arb.set(v);
+            // In the parameters the host gives the command, and keeps. Not in a copy it checks out for a render, which
+            // it doesn't keep, and whose value is the host's own: the pending value is set with the next edit
+            ParamsInner::Ae(x) if !x.raw_params().is_empty() => {
+                let mut def = x.get_mut(p)?;
+                arb_handle(&def)?;
+                // Every change is a new value for the host to keep, and the project data can be megabytes
+                if ArbString::write(unsafe { &mut def.as_mut().u.arb_d.value }, v)? {
+                    def.set_value_changed();
                 }
-                p.set_value_changed();
-                // p.update_param_ui()?;
             }
+            ParamsInner::Ae(_) => { }
             ParamsInner::AeRO(_) => { }
             ParamsInner::Premiere(_) => { } // Premiere can't set param values
         }
@@ -543,3 +705,7 @@ impl<'a, 'b> GyroflowPluginParams for ParamHandler<'a, 'b> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "string_params_tests.rs"]
+mod string_params_tests;
