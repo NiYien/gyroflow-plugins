@@ -52,7 +52,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         id: rust-toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Adobe PiPL resource staging relies on the pre-1.100 Cargo layout.
+        uses: dtolnay/rust-toolchain@1.99.1
       - name: Rust cache
         id: rust-cache
         uses: actions/cache/restore@v4
@@ -146,7 +147,7 @@ jobs:
             export CXX=clang++
             export CC_x86_64_unknown_linux_gnu=clang
             export CXX_x86_64_unknown_linux_gnu=clang++
-            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.99.1
             source \$HOME/.cargo/env
             cargo install just
             cd ${{ github.workspace }}
