@@ -20,6 +20,7 @@ deploy:
     $ErrorActionPreference = 'Stop'
 
     cargo build --profile deploy
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cd "{{TargetDir}}"
     Copy-Item -Force "deploy\gyroflow_adobe.dll" "GyroflowNiyien-Adobe-windows.aex"
 

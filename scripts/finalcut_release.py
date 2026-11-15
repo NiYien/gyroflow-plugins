@@ -100,10 +100,9 @@ def check_toolchain() -> dict:
     inputs = json.loads(INPUTS.read_text())
     rust = subprocess.check_output(["rustc", "--version"], text=True).split()[1]
     actual = {"xcode_version": detected_xcode_version(), "rust_toolchain": rust,
-              "xcode_path": os.environ.get("DEVELOPER_DIR"),
-              "lens_data_tag": os.environ.get("NIYIEN_LENS_DATA_TAG")}
+              "xcode_path": os.environ.get("DEVELOPER_DIR")}
     if any(value != inputs[key] for key, value in actual.items()):
-        raise ValueError("Selected Xcode, Rust or lens data does not match release-inputs.json")
+        raise ValueError("Selected Xcode or Rust does not match release-inputs.json")
     return actual
 
 

@@ -173,6 +173,31 @@ class ReleaseContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "pinned Git revision"):
                 release.validate_core(root)
 
+    def test_toolchain_accepts_the_core_default_lens_selection(self):
+        inputs = json.loads(release.INPUTS.read_text())
+        environment = {"DEVELOPER_DIR": inputs["xcode_path"]}
+        with mock.patch.dict(os.environ, environment, clear=True), \
+             mock.patch("check_finalcut_sdk.detected_xcode_version", return_value=inputs["xcode_version"]), \
+             mock.patch.object(release.subprocess, "check_output", return_value=f'rustc {inputs["rust_toolchain"]} fixture'):
+            actual = release.check_toolchain()
+        self.assertNotIn("lens_data_tag", actual)
+        self.assertEqual(actual["rust_toolchain"], inputs["rust_toolchain"])
+
+    def test_toolchain_still_rejects_an_incorrect_rust_version(self):
+        inputs = json.loads(release.INPUTS.read_text())
+        with mock.patch.dict(os.environ, {"DEVELOPER_DIR": inputs["xcode_path"]}), \
+             mock.patch("check_finalcut_sdk.detected_xcode_version", return_value=inputs["xcode_version"]), \
+             mock.patch.object(release.subprocess, "check_output", return_value="rustc 0.1.0 fixture"):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                release.check_toolchain()
+
+    def test_finalcut_release_does_not_override_the_core_lens_data_selection(self):
+        self.assertNotIn("lens_data_tag", json.loads(release.INPUTS.read_text()))
+        workflow = (ROOT / ".github/workflows/release.yml").read_text()
+        for job in ("check_finalcut", "build_finalcut"):
+            section = workflow.split(f"  {job}:", 1)[1]
+            self.assertNotIn("NIYIEN_LENS_DATA_TAG:", section)
+
     def test_notary_failure_does_not_reveal_password(self):
         password = "private-notary-password"
         result = subprocess.CompletedProcess([], 1, "", "failure: " + password)
