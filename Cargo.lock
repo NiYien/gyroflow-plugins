@@ -2606,7 +2606,6 @@ dependencies = [
 [[package]]
 name = "ofx"
 version = "0.3.0"
-source = "git+https://github.com/AdrianEddy/ofx-rs.git?rev=0b15219#0b152196fb47b0dd09c110881786d6a9e5e0d953"
 dependencies = [
  "libc",
  "log",

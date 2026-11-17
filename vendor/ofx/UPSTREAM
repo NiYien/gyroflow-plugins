@@ -1,0 +1,7 @@
+Source: https://github.com/AdrianEddy/ofx-rs
+Revision: 0b152196fb47b0dd09c110881786d6a9e5e0d953
+License: Apache-2.0
+
+The Rust wrapper is kept locally to fix shared dispatch, suite ownership and
+serialized instance access without publishing an unpushed dependency revision.
+ofx_sys remains pinned to the original revision by the workspace patch.

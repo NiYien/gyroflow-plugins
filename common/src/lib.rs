@@ -409,13 +409,13 @@ pub struct GyroflowPluginBase {
     // Cache key is specific enough
     pub manager_cache: ManagerCache,
 
-    pub context_initialized: bool,
+    context_initialized: std::sync::Once,
 }
 impl Default for GyroflowPluginBase {
     fn default() -> Self {
         Self {
             manager_cache: Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap())),
-            context_initialized: false,
+            context_initialized: std::sync::Once::new(),
         }
     }
 }
@@ -478,22 +478,21 @@ impl GyroflowPluginBase {
         data.to_string()
     }
 
-    pub fn initialize_gpu_context(&mut self) {
+    pub fn initialize_gpu_context(&self) {
         log::info!("GyroflowPluginBase::initialize_gpu_context");
-        if !self.context_initialized {
+        self.context_initialized.call_once(|| {
             gyroflow_core::gpu::initialize_contexts();
-            self.context_initialized = true;
-        }
+        });
     }
-    pub fn deinitialize_gpu_context(&mut self) {
+    pub fn deinitialize_gpu_context(&self) {
         log::info!("GyroflowPluginBase::deinitialize_gpu_context");
     }
 
-    pub fn initialize_log(&mut self, name: &str) {
+    pub fn initialize_log(&self, name: &str) {
         self.initialize_log_with_level(name, log::LevelFilter::Debug);
     }
 
-    pub fn initialize_log_with_level(&mut self, name: &str, level: log::LevelFilter) {
+    pub fn initialize_log_with_level(&self, name: &str, level: log::LevelFilter) {
         // Install the file logger (idempotent; usually already done by the DLL-load constructor on
         // the Adobe plugin, but the only init point on the OpenFX / frei0r plugins which have no
         // competing global logger).
@@ -2168,7 +2167,6 @@ impl GyroflowPluginBaseInstance {
                 Params::TranslationEnabled | Params::TranslationAuto | Params::TranslationReference |
                 Params::TranslationSmoothness | Params::TranslationAlongAxis => {
 
-                    params.set_string(Params::Status, t!("status.calculating"))?;
                     if !self.ever_changed {
                         // Invalidating a shared manager does not remove this project's measured translation.
                         if let Some((_, stab)) = self.managers.peek_lru() {
@@ -2221,7 +2219,6 @@ impl GyroflowPluginBaseInstance {
                             _ => { }
                         }
                     }
-                    params.set_string(Params::Status, t!("status.ok"))?;
                 },
                 _ => { }
             }
@@ -3007,6 +3004,27 @@ mod tests {
         assert_translation_switch_only(&params);
         translation::update_ui(&mut params, Some(&without));
         assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
+    }
+
+    #[test]
+    fn smoothness_edits_invalidate_without_overwriting_sync_status() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let manager = Arc::new(StabilizationManager::default());
+        let mut instance = GyroflowPluginBaseInstance { ever_changed: true, num_frames: 60, fps: 30.0, ..Default::default() };
+        instance.managers.put("local".into(), manager.clone());
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let mut params = TestParams::default();
+        params.strings.insert(Params::Status, "not synchronized".into());
+        params.f64s.insert(Params::Smoothness, 35.8);
+        instance.param_changed(&mut params, &cache, Params::Smoothness, true).unwrap();
+        assert_eq!(params.get_string(Params::Status).unwrap(), "not synchronized");
+        assert!(!params.value_writes.contains(&Params::Status));
+        assert!(manager.smoothing_invalidated.load(SeqCst));
+        assert!(manager.zooming_invalidated.load(SeqCst));
+        assert!(manager.undistortion_invalidated.load(SeqCst));
+        let cached = instance.keyframable_params.read();
+        let value = cached.cached_keyframes.value_at_video_timestamp(&KeyframeType::SmoothingParamSmoothness, 0.0).unwrap();
+        assert!((value - 0.358).abs() < 1e-12);
     }
 
     #[test]

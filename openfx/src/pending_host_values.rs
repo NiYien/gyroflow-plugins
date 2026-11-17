@@ -49,7 +49,7 @@ enum Property {
 struct PendingProperty {
     key: usize,
     property: Property,
-    commit: Box<dyn FnOnce() -> ofx::Result<()>>,
+    commit: Box<dyn FnOnce() -> ofx::Result<()> + Send>,
 }
 
 #[derive(Default)]
@@ -102,7 +102,7 @@ impl PendingHostValues {
         self.values.retain(|pending| pending.key() != key);
     }
 
-    fn defer_property(&mut self, key: usize, property: Property, commit: Box<dyn FnOnce() -> ofx::Result<()>>) {
+    fn defer_property(&mut self, key: usize, property: Property, commit: Box<dyn FnOnce() -> ofx::Result<()> + Send>) {
         if let Some(pending) = self.properties.iter_mut().find(|pending| pending.key == key && pending.property == property) {
             pending.commit = commit;
         } else {
@@ -114,7 +114,7 @@ impl PendingHostValues {
         self.properties.retain(|pending| pending.key != key || pending.property != property);
     }
 
-    pub(crate) fn defer_label<T: ParamHandleValue + 'static>(&mut self, param: &ParamHandle<T>, value: &str) -> ofx::Result<()> {
+    pub(crate) fn defer_label<T: ParamHandleValue + Send + 'static>(&mut self, param: &ParamHandle<T>, value: &str) -> ofx::Result<()> {
         if param.get_label()? == value {
             self.forget_property(param.handle() as usize, Property::Label);
             return Ok(());
@@ -128,7 +128,7 @@ impl PendingHostValues {
         Ok(())
     }
 
-    pub(crate) fn defer_hint<T: ParamHandleValue + 'static>(&mut self, param: &ParamHandle<T>, value: &str) -> ofx::Result<()> {
+    pub(crate) fn defer_hint<T: ParamHandleValue + Send + 'static>(&mut self, param: &ParamHandle<T>, value: &str) -> ofx::Result<()> {
         if param.get_hint()? == value {
             self.forget_property(param.handle() as usize, Property::Hint);
             return Ok(());
@@ -142,7 +142,7 @@ impl PendingHostValues {
         Ok(())
     }
 
-    pub(crate) fn defer_enabled<T: ParamHandleValue + 'static>(&mut self, param: &ParamHandle<T>, value: bool) -> ofx::Result<()> {
+    pub(crate) fn defer_enabled<T: ParamHandleValue + Send + 'static>(&mut self, param: &ParamHandle<T>, value: bool) -> ofx::Result<()> {
         if param.get_enabled()? == value {
             self.forget_property(param.handle() as usize, Property::Enabled);
             return Ok(());
@@ -155,7 +155,7 @@ impl PendingHostValues {
         Ok(())
     }
 
-    pub(crate) fn defer_visible<T: ParamHandleValue + 'static>(&mut self, param: &ParamHandle<T>, value: bool) -> ofx::Result<()> {
+    pub(crate) fn defer_visible<T: ParamHandleValue + Send + 'static>(&mut self, param: &ParamHandle<T>, value: bool) -> ofx::Result<()> {
         if param.get_secret()? != value {
             self.forget_property(param.handle() as usize, Property::Visible);
             return Ok(());
