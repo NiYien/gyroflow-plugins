@@ -455,3 +455,4 @@ extern "C" __declspec(dllexport) const char* fixture_snapshot(void* ptr) {
 extern "C" __declspec(dllexport) const char* fixture_error(){return last_error.c_str();}
 extern "C" __declspec(dllexport) const char* fixture_take_messages(void* ptr){auto* e=static_cast<Effect*>(ptr);std::ostringstream out;out<<'[';bool first=true;for(const auto& message:e->messages){if(!first)out<<',';first=false;out<<message;}out<<']';e->messages.clear();messages_result=out.str();return messages_result.c_str();}
 extern "C" __declspec(dllexport) void fixture_close(){for(auto& e:instances)if(e->created){call(e.get(),kOfxActionDestroyInstance,nullptr,nullptr);e->created=false;}call(nullptr,kOfxActionUnload,nullptr,nullptr);trace.flush();}
+extern "C" __declspec(dllexport) void fixture_reset_after_unload(){instances.clear();descriptor=Effect{};action_stack.clear();trace.close();trace.clear();}

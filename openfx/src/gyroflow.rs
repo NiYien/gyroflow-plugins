@@ -3928,6 +3928,11 @@ impl Execute for GyroflowPlugin {
             }
 
             Load => {
+                #[cfg(target_os = "windows")]
+                if let Err(error) = super::module_lifetime::retain_for_process() {
+                    log::error!("Cannot retain OpenFX module for background workers: {error}");
+                    return FAILED;
+                }
                 update_notice::available();
                 // Keep playback free of per-frame core/backend logging in this host.
                 let level = if is_jianying { log::LevelFilter::Warn } else { log::LevelFilter::Debug };
