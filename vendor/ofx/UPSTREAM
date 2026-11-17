@@ -4,4 +4,5 @@ License: Apache-2.0
 
 The Rust wrapper is kept locally to fix shared dispatch, suite ownership and
 serialized instance access without publishing an unpushed dependency revision.
+Per-action, property-access and image-release tracing is removed from hot paths.
 ofx_sys remains pinned to the original revision by the workspace patch.

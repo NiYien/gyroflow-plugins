@@ -499,7 +499,6 @@ where
 			x2: self.bounds.x2,
 			y2,
 		};
-		debug!("Chunk {}-{}", y1, y2);
 		// TODO: potentially unsound
 		let offset = self.byte_offset(self.bounds.x1, y1);
 		let ptr_mut = self.ptr_mut(offset);

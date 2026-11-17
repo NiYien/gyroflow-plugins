@@ -346,7 +346,9 @@ pub enum Params {
 // macro. To stay safe under the Windows loader lock, the constructor only performs cheap atomic
 // registration here; the real file open (`data_dir()` -> `SHGetKnownFolderPath`, `File::create`) is
 // deferred to the first emitted record, which happens at command/render time, outside loader lock.
-// Records are tee'd to `win_dbg_logger` so debug-build DebugView output is preserved unchanged.
+// Retained records are also sent to `win_dbg_logger` for DebugView.
+const IGNORED_LOG_TARGETS: &[&str] = &["mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "ofx"];
+
 struct PluginFileLogger {
     inner: RwLock<Option<Box<dyn log::Log>>>,
     name: std::sync::OnceLock<String>,
@@ -362,8 +364,7 @@ impl PluginFileLogger {
         let mut guard = self.inner.write();
         if self.open_attempted.swap(true, Ordering::AcqRel) { return; }
         let name = self.name.get().map(String::as_str).unwrap_or("plugin");
-        let log_config = [ "mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "ofx" ]
-            .into_iter()
+        let log_config = IGNORED_LOG_TARGETS.iter().copied()
             .fold(simplelog::ConfigBuilder::new(), |mut cfg, x| { cfg.add_filter_ignore_str(x); cfg })
             .build();
         let data_path = gyroflow_core::settings::data_dir().join(format!("gyroflow-{name}.log"));
@@ -376,9 +377,14 @@ impl PluginFileLogger {
     }
 }
 impl log::Log for PluginFileLogger {
-    fn enabled(&self, _: &log::Metadata) -> bool { true }
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+            || (metadata.level() <= log::Level::Debug
+                && !IGNORED_LOG_TARGETS.iter().any(|target| metadata.target().starts_with(*target)))
+    }
     fn log(&self, record: &log::Record) {
-        // Tee to the debugger (DebugView) so debug-build behavior is unchanged.
+        if !self.enabled(record.metadata()) { return; }
+        // Filter before debugger formatting, file initialization and the logger lock.
         log::Log::log(&win_dbg_logger::DEBUGGER_LOGGER, record);
         self.ensure_inner();
         let guard = self.inner.read();
@@ -1301,7 +1307,6 @@ impl GyroflowPluginBaseInstance {
         macro_rules! cache_key {
             ($typ:expr, $param:expr, $scale:expr) => {
                 if params.is_keyframed($param) {
-                    log::info!("param: {:?} is keyframed, cache_keyframes_every_frame: {}", $param, self.cache_keyframes_every_frame);
                     if self.cache_keyframes_every_frame { // Query every frame
                         for t in 0..num_frames {
                             let time = t as f64;
@@ -1327,7 +1332,6 @@ impl GyroflowPluginBaseInstance {
                         }
                     }
                 } else {
-                    log::info!("param: {:?} NOT keyframed", $param);
                     if let Ok(v) = params.get_f64($param) {
                         mgr.set(&$typ, 0, v / $scale);
                     }
@@ -3004,6 +3008,28 @@ mod tests {
         assert_translation_switch_only(&params);
         translation::update_ui(&mut params, Some(&without));
         assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
+    }
+
+    #[test]
+    fn ignored_sdk_logs_skip_formatting_and_file_initialization() {
+        use log::Log as _;
+        struct NotFormatted;
+        impl std::fmt::Display for NotFormatted {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("ignored diagnostic record was formatted");
+            }
+        }
+        let logger = PluginFileLogger::new();
+        for target in ["ofx::property", "wgpu_core::command", "naga::valid"] {
+            let metadata = log::Metadata::builder().target(target).level(log::Level::Debug).build();
+            assert!(!logger.enabled(&metadata));
+            logger.log(&log::Record::builder().target(target).level(log::Level::Debug)
+                .args(format_args!("{}", NotFormatted)).build());
+        }
+        assert!(!logger.open_attempted.load(std::sync::atomic::Ordering::Acquire));
+        assert!(logger.inner.read().is_none());
+        assert!(logger.enabled(&log::Metadata::builder().target("gyroflow_ofx::gyroflow").level(log::Level::Warn).build()));
+        assert!(logger.enabled(&log::Metadata::builder().target("ofx::property").level(log::Level::Warn).build()));
     }
 
     #[test]

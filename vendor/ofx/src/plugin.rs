@@ -290,7 +290,6 @@ impl Dispatch for PluginDescriptor {
 					};
 				}
 
-				debug!("Mapped action found: {:?}", mapped_action);
 				self.before_execute(&mapped_action)?;
 
 				if let (Some(host), Some(suites)) = (self.host.get(), self.suites.get().cloned()) {
@@ -311,12 +310,7 @@ impl Dispatch for PluginDescriptor {
 
 impl Execute for PluginDescriptor {
 	fn execute(&self, context: &PluginContext, action: &mut Action) -> Result<Int> {
-		let result = self.instance.execute(context, action);
-		debug!(
-			"Executed {:?} of {} -> {:?}",
-			action, self.module_name, result
-		);
-		result
+		self.instance.execute(context, action)
 	}
 }
 

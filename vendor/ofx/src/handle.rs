@@ -457,7 +457,6 @@ impl Image {
 	}
 
 	fn drop_image(&mut self) -> Result<()> {
-		debug!("Releasing data for ImageHandle {:?}", self.inner);
 		if self.is_texture {
 			if let Some(suite) = self.image_effect_opengl_render.as_ref() {
 				suite_fn!(clipFreeTexture in suite; self.inner)?;

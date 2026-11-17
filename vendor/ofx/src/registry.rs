@@ -64,7 +64,6 @@ impl Registry {
 	}
 
 	pub fn dispatch(&self, plugin_module: &str, message: RawMessage) -> Result<Int> {
-		info!("{}:{:?}", plugin_module, message);
 		let found_plugin = self.plugin_modules.get(plugin_module).cloned();
 		if let Some(plugin_index) = found_plugin {
 			let plugin = self.get_plugin(plugin_index);

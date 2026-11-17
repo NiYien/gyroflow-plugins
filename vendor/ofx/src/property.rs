@@ -23,15 +23,7 @@ macro_rules! raw_getter_impl {
 			R: Readable + AsProperties,
 		{
 			fn get_at($readable: &R, $c_name: CharPtr, $index: usize) -> Result<Self> {
-				let value = { $stmt };
-				debug!(
-					"{:?}.{:?}[{}] -> {:?}",
-					$readable.handle(),
-					unsafe { CStr::from_ptr($c_name) },
-					$index,
-					value
-				);
-				value
+				$stmt
 			}
 		}
 	};
@@ -46,28 +38,6 @@ macro_rules! raw_setter_impl {
 			fn set_at($writable: &mut W, $c_name: CharPtr, $index: usize, $value: &Self) -> Result<()>
 				$stmt
 		}
-	};
-}
-
-macro_rules! trace_setter {
-	($writable: expr, $c_name:expr, $index: expr, str $value:expr) => {
-		debug!(
-			"{:?}.{:?}[{}] <- &{:?}",
-			$writable,
-			unsafe { CStr::from_ptr($c_name) },
-			$index,
-			unsafe { CStr::from_bytes_with_nul_unchecked($value) }
-			)
-	};
-
-	($writable: expr, $c_name:expr, $index: expr, $value:expr) => {
-		debug!(
-			"{:?}.{:?}[{}] <- {:?}",
-			$writable,
-			unsafe { CStr::from_ptr($c_name) },
-			$index,
-			$value
-			)
 	};
 }
 
@@ -592,62 +562,50 @@ where
 raw_setter_impl! { |writable, c_name, index, value: &str| {
 	let c_str_in = CString::new(value)?;
 	let c_ptr_in = c_str_in.as_c_str().as_ptr();
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetString in *writable.suite(); writable.handle(), c_name, index as Int, c_ptr_in as CharPtrMut)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &[u8]| {
-	trace_setter!(writable.handle(), c_name, index, str value);
 	suite_fn!(propSetString in *writable.suite(); writable.handle(), c_name, index as Int, value.as_ptr() as CharPtrMut)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &VoidPtr| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetPointer in *writable.suite(); writable.handle(), c_name, index as Int, *value as VoidPtrMut)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &Int| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetInt in *writable.suite(); writable.handle(), c_name, index as Int, *value)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &PointI| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetIntN in *writable.suite(); writable.handle(), c_name, POINT_ELEMENTS,  &value.x as *const Int)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &RangeI| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetIntN in *writable.suite(); writable.handle(), c_name, RANGE_ELEMENTS,  &value.min as *const Int)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &RectI| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetIntN in *writable.suite(); writable.handle(), c_name, RECT_ELEMENTS,  &value.x1 as *const Int)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &Bool| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetInt in *writable.suite(); writable.handle(), c_name, index as Int, if *value { 1 } else { 0 })
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &Double| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetDouble in *writable.suite(); writable.handle(), c_name, index as Int, *value)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &PointD| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetDoubleN in *writable.suite(); writable.handle(), c_name, POINT_ELEMENTS,  &value.x as *const Double)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &RangeD| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetDoubleN in *writable.suite(); writable.handle(), c_name, RANGE_ELEMENTS,  &value.min as *const Double)
 }}
 
 raw_setter_impl! { |writable, c_name, index, value: &RectD| {
-	trace_setter!(writable.handle(), c_name, index, value);
 	suite_fn!(propSetDoubleN in *writable.suite(); writable.handle(), c_name, RECT_ELEMENTS,  &value.x1 as *const Double)
 }}
 
