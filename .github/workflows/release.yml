@@ -52,7 +52,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         id: rust-toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # Adobe PiPL resource staging relies on the pre-1.100 Cargo layout.
+        uses: dtolnay/rust-toolchain@1.99.1
       - name: Rust cache
         id: rust-cache
         uses: actions/cache/restore@v4
@@ -89,6 +90,7 @@ jobs:
         if: ${{ matrix.targets.type == 'windows' }}
         run: |
           just install-deps
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           just deploy
 
       - name: Verify Jianying package (Windows)
@@ -96,7 +98,7 @@ jobs:
         env:
           GYROFLOW_JIANYING_TEST_CORE: ${{ github.workspace }}/target/deploy/gyroflow_ofx.dll
         run: |
-          python -m unittest tests.test_jianying_package tests.test_jianying_protocol tests.test_jianying_source_contract
+          python -m unittest tests.test_windows_release_contract tests.test_jianying_package tests.test_jianying_protocol tests.test_jianying_source_contract
           python scripts/build_jianying_package.py --verify target/GyroflowNiyien-Jianying-windows.zip --openfx-package target/GyroflowNiyien-OpenFX-windows.zip
 
       - name: Check macOS packaging tools and signing
@@ -145,7 +147,7 @@ jobs:
             export CXX=clang++
             export CC_x86_64_unknown_linux_gnu=clang
             export CXX_x86_64_unknown_linux_gnu=clang++
-            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.99.1
             source \$HOME/.cargo/env
             cargo install just
             cd ${{ github.workspace }}
@@ -274,7 +276,6 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       PYTHONPATH: scripts
-      NIYIEN_LENS_DATA_TAG: data-v20260830.1
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust for host compatibility tests
@@ -303,7 +304,6 @@ jobs:
     timeout-minutes: 90
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      NIYIEN_LENS_DATA_TAG: data-v20260830.1
       PYTHONPATH: scripts
     steps:
       - uses: actions/checkout@v4

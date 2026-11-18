@@ -13,6 +13,7 @@ deploy:
     $ErrorActionPreference = 'Stop'
 
     cargo build --profile deploy
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cd "{{TargetDir}}"
     Remove-Item -Recurse -Force gyroflow-niyien-ofx-windows, GyroflowNiyien-OpenFX-windows.zip -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path "gyroflow-niyien-ofx-windows/GyroflowNiyien.ofx.bundle/Contents/Win64" -Force
@@ -24,6 +25,7 @@ deploy:
     cp "{{justfile_directory()}}/../resolve-scripts/Gyroflow NiYien Auto Cut Current Track.lua" "gyroflow-niyien-ofx-windows/ResolveScripts/"
     cp "{{justfile_directory()}}/../resolve-scripts/gyroflow_autocut_common.inc" "gyroflow-niyien-ofx-windows/ResolveScripts/"
     cd gyroflow-niyien-ofx-windows ; 7z a ../GyroflowNiyien-OpenFX-windows.zip .
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [macos]
 deploy:

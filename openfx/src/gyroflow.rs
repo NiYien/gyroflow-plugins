@@ -44,7 +44,7 @@ struct HostInputSizingCacheEntry {
 struct GyroflowPlugin {
     gyroflow_plugin: GyroflowPluginBase,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    cuda_stream_negotiated: bool,
+    cuda_stream_negotiated: AtomicBool,
     // Lock contention here is minimal: written when a fuscript query completes, read once per
     // CreateInstance and once per render (an age comparison, no query).
     host_input_sizing_cache: parking_lot::Mutex<Option<HostInputSizingCacheEntry>>,
@@ -272,7 +272,7 @@ fn prepare_jianying_gpu(stab: &StabilizationManager, buffers: &Buffers) -> Resul
 }
 
 fn update_synchronization_status(plugin: &mut GyroflowPluginBaseInstance, params: &mut dyn GyroflowPluginParams, stab: &StabilizationManager) {
-    let synchronized = {
+    let synchronized = gyroflow_plugin_base::has_active_video_motion(stab) || {
         let gyro = stab.gyro.read();
         let metadata = gyro.file_metadata.read();
         metadata.has_accurate_timestamps || !gyro.get_offsets().is_empty()
@@ -1219,6 +1219,15 @@ struct InstanceData {
     host_input_sizing_stretch_warned: bool,
 }
 
+struct RenderInstanceGuard<'a>(ofx::InstanceDataGuard<'a, InstanceData>);
+
+impl Drop for RenderInstanceGuard<'_> {
+    fn drop(&mut self) {
+        // Buffered writes belong to locked render preparation, not GPU processing.
+        self.0.params.fields.buffer_host_writes = false;
+    }
+}
+
 impl InstanceData {
     fn prepare_jianying(&mut self, manager_cache: &ManagerCache) -> Result<()> {
         let previous_time = self.params.fields.render_time.replace(self.jianying_protocol.time);
@@ -1961,7 +1970,8 @@ fn discover_jianying_project(context: &PluginContext, effect: &mut ImageEffectHa
         #[cfg(target_os = "windows")]
         let _ = context;
         {
-            let instance: &mut InstanceData = effect.get_instance_data()?;
+            let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+            let instance = &mut *instance_guard;
             if !instance.params.project_path.get_value()?.is_empty()
                 || (instance.params.include_project_data.get_value()? && !instance.params.project_data.get_value()?.is_empty()) {
                 instance.jianying_autoload.stop();
@@ -1970,7 +1980,8 @@ fn discover_jianying_project(context: &PluginContext, effect: &mut ImageEffectHa
         }
         let properties: EffectInstance = effect.properties()?;
         let source: Result<String> = RawGetter::get_at(&properties, c"NiYienJianyingSourcePath".as_ptr(), 0);
-        let instance: &mut InstanceData = effect.get_instance_data()?;
+        let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+        let instance = &mut *instance_guard;
         // Only the provider's successful empty response represents a pending source.
         let bootstrap = cfg!(target_os = "macos") && matches!(&source, Ok(path) if path.is_empty())
             && instance.jianying_autoload.needs_source_bootstrap();
@@ -1982,9 +1993,10 @@ fn discover_jianying_project(context: &PluginContext, effect: &mut ImageEffectHa
 }
 
 impl GyroflowPlugin {
-    fn commit_jianying(&mut self, context: &PluginContext, effect: &mut ImageEffectHandle, plan: Option<super::jianying_protocol::Commit>, allow_autoload: bool) -> Result<Int> {
+    fn commit_jianying(&self, context: &PluginContext, effect: &mut ImageEffectHandle, plan: Option<super::jianying_protocol::Commit>, allow_autoload: bool) -> Result<Int> {
         let previous_buffer_mode = {
-            let instance: &mut InstanceData = effect.get_instance_data()?;
+            let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+            let instance = &mut *instance_guard;
             if instance.jianying_protocol.committing { return OK; }
             instance.jianying_protocol.committing = true;
             std::mem::replace(&mut instance.params.fields.buffer_host_writes, false)
@@ -1992,7 +2004,8 @@ impl GyroflowPlugin {
         let result = (|| {
             let autoload_project = if allow_autoload { discover_jianying_project(context, effect)?.project } else { None };
             {
-                let instance: &mut InstanceData = effect.get_instance_data()?;
+                let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+                let instance = &mut *instance_guard;
                 if instance.jianying_protocol.binding_changed()? {
                     instance.params.fields.pending.clear();
                 } else {
@@ -2045,7 +2058,8 @@ impl GyroflowPlugin {
                 }
             }
             {
-                let instance: &mut InstanceData = effect.get_instance_data()?;
+                let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+                let instance = &mut *instance_guard;
                 instance.prepare_jianying(&self.gyroflow_plugin.manager_cache)?;
                 instance.jianying_protocol.finish()?;
                 // UI JSON overlays descriptor values. Publish derived text even if the instance
@@ -2058,16 +2072,21 @@ impl GyroflowPlugin {
             let _ = refresh_plugin_update_notice(effect, context);
             OK
         })();
-        let instance: &mut InstanceData = effect.get_instance_data()?;
+        let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+        let instance = &mut *instance_guard;
         instance.params.fields.buffer_host_writes = previous_buffer_mode;
         instance.jianying_protocol.committing = false;
         result
     }
 }
 
-fn process_parameter_change(this: &mut GyroflowPlugin, _plugin_context: &PluginContext, effect: &mut ImageEffectHandle, name: &str, reason: Change) -> Result<Int> {
+fn process_parameter_change(this: &GyroflowPlugin, _plugin_context: &PluginContext, effect: &mut ImageEffectHandle, name: &str, reason: Change) -> Result<Int> {
                 if name == PLUGIN_UPDATE_GROUP { return OK; }
-                let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                if reason == Change::PluginEdited && (name == "Status" || name == "InstanceId" || name.ends_with("ManuallyEdited")) {
+                    return OK;
+                }
+                let mut instance_data_guard = effect.get_instance_data::<InstanceData>()?;
+                let instance_data = &mut *instance_data_guard;
                 if name == "LoadCurrent" && jianying_macos::enabled(_plugin_context) {
                     log::info!(target: "jianying_ofx", "Mac candidate has no verified automatic source; use Browse");
                     return OK;
@@ -2260,7 +2279,7 @@ fn process_parameter_change(this: &mut GyroflowPlugin, _plugin_context: &PluginC
 
 impl Execute for GyroflowPlugin {
     #[allow(clippy::float_cmp)]
-    fn execute(&mut self, _plugin_context: &PluginContext, action: &mut Action) -> Result<Int> {
+    fn execute(&self, _plugin_context: &PluginContext, action: &mut Action) -> Result<Int> {
         use Action::*;
         let is_jianying = _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro");
         let is_mac_jianying = jianying_macos::enabled(_plugin_context);
@@ -2295,7 +2314,8 @@ impl Execute for GyroflowPlugin {
                     let discovery = discover_jianying_project(_plugin_context, effect)?;
                     if discovery.project.is_some() || discovery.bootstrap { return REPLY_DEFAULT; }
                 }
-                let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                let mut instance_data_guard = effect.get_instance_data::<InstanceData>()?;
+                let instance_data = &mut *instance_data_guard;
                 if is_jianying {
                     let time = in_args.get_time()?;
                     if instance_data.params.project_path.get_value_at_time(time)?.is_empty() {
@@ -2371,19 +2391,11 @@ impl Execute for GyroflowPlugin {
                 // Read-only discovery must still request Sync when an unbound Metal copy returns early.
                 let autoload_pending = is_mac_jianying && discover_jianying_project(_plugin_context, effect)?.project.is_some();
                 let mac_queue = if is_mac_jianying { Some(jianying_macos::render_queue(in_args)?) } else { None };
-                if is_jianying {
-                    let instance: &mut InstanceData = effect.get_instance_data()?;
-                    let host_fps = instance.source_clip.get_frame_rate()?;
-                    if !host_fps.is_finite() || host_fps <= 0.0 { return Err(Error::InvalidValue); }
-                    instance.params.fields.host_fps = host_fps;
-                    instance.jianying_protocol.time = in_args.get_time()?;
-                    instance.params.fields.buffer_host_writes = true;
-                }
                 let result = (|| -> Result<Int> {
                 let _time = std::time::Instant::now();
 
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
-                let host_cuda_stream = if self.cuda_stream_negotiated
+                let host_cuda_stream = if self.cuda_stream_negotiated.load(SeqCst)
                     && in_args.get_cuda_enabled().unwrap_or_default() {
                     let value: std::result::Result<*mut std::ffi::c_void, _> =
                         RawGetter::get_at(in_args, c"OfxImageEffectPropCudaStream".as_ptr(), 0);
@@ -2395,9 +2407,15 @@ impl Execute for GyroflowPlugin {
                 let _host_stream_scope = gyroflow_plugin_base::cuda_native::HostStreamGuard::new(host_cuda_stream);
 
                 let time = in_args.get_time()?;
-                let instance_data: &mut InstanceData = effect.get_instance_data()?;
+                let mut instance_data_guard = RenderInstanceGuard(effect.get_instance_data::<InstanceData>()?);
+                let instance_data = &mut *instance_data_guard.0;
                 let is_jianying = _plugin_context.get_host().get_name().as_deref().ok() == Some("com.lemon.lvpro");
                 if is_jianying {
+                    let host_fps = instance_data.source_clip.get_frame_rate()?;
+                    if !host_fps.is_finite() || host_fps <= 0.0 { return Err(Error::InvalidValue); }
+                    instance_data.params.fields.host_fps = host_fps;
+                    instance_data.jianying_protocol.time = time;
+                    instance_data.params.fields.buffer_host_writes = true;
                     static FIRST: std::sync::Once = std::sync::Once::new();
                     FIRST.call_once(|| log::info!(target: "jianying_ofx", "Render: OpenGL={:?} CUDA={:?} Metal={:?} OpenCL={:?}", in_args.get_opengl_enabled(), in_args.get_cuda_enabled(), in_args.get_metal_enabled(), in_args.get_opencl_enabled()));
                 }
@@ -3129,6 +3147,10 @@ impl Execute for GyroflowPlugin {
                         ))
                     };
 
+                let is_fusion_page = instance_data.is_fusion_page;
+                // Images and the manager are owned by this render. UI edits must not
+                // wait for GPU submission or completion while holding instance state.
+                drop(instance_data_guard);
                 if effect.abort()? { return FAILED; }
 
                 if let Some(buffers) = buffers {
@@ -3162,7 +3184,7 @@ impl Execute for GyroflowPlugin {
                     // process_pixels before the frame is produced. Runs immediately
                     // before process_pixels so passthrough frames (which render no
                     // stabilized pixels) never widen the window.
-                    if !instance_data.is_fusion_page {
+                    if !is_fusion_page {
                         gyroflow_plugin_base::widen_host_trim_for_render(&stab, timestamp_us);
                     }
 
@@ -3202,8 +3224,8 @@ impl Execute for GyroflowPlugin {
                 })();
                 if is_jianying {
                     let pending = {
-                        let instance: &mut InstanceData = effect.get_instance_data()?;
-                        instance.params.fields.buffer_host_writes = false;
+                        let mut instance_guard = effect.get_instance_data::<InstanceData>()?;
+                        let instance = &mut *instance_guard;
                         !instance.params.fields.pending.is_empty()
                     };
                     if pending || autoload_pending {
@@ -3366,7 +3388,7 @@ impl Execute for GyroflowPlugin {
                 let mut instance_id = instance_data.params.get_string(Params::InstanceId).unwrap_or_default();
                 instance_data.plugin.initialize_instance_id(&mut instance_id);
                 if is_jianying { instance_data.plugin.reload_values_from_project = false; }
-                let _ = instance_data.params.set_string(Params::InstanceId, &instance_id);
+                let instance_id_param = instance_data.params.instance_id.clone();
 
                 let props: EffectInstance = effect.properties()?;
                 if matches!(props.get_resolve_page().as_deref(), Ok("Edit") | Ok("Color")) {
@@ -3478,6 +3500,11 @@ impl Execute for GyroflowPlugin {
                 }
 
                 effect.set_instance_data(instance_data)?;
+                // A host may synchronously notify InstanceChanged from this setter.
+                // Publish the complete private state before making the first write.
+                if !is_jianying || instance_id_param.get_value().ok().as_deref() != Some(instance_id.as_str()) {
+                    let _ = instance_id_param.set_value(instance_id);
+                }
                 if is_jianying {
                     self.commit_jianying(_plugin_context, effect, None, !is_mac_jianying)?;
                 }
@@ -3837,7 +3864,7 @@ impl Execute for GyroflowPlugin {
                         &_plugin_context.get_host(), c"OfxImageEffectPropCudaStreamSupported".as_ptr(), 0);
                     if support.as_deref().ok() == Some("true") {
                         RawSetter::set_at(&mut effect_properties, c"OfxImageEffectPropCudaStreamSupported".as_ptr(), 0, "true")?;
-                        self.cuda_stream_negotiated = true;
+                        self.cuda_stream_negotiated.store(true, SeqCst);
                     }
                 }
 
@@ -3901,6 +3928,11 @@ impl Execute for GyroflowPlugin {
             }
 
             Load => {
+                #[cfg(target_os = "windows")]
+                if let Err(error) = super::module_lifetime::retain_for_process() {
+                    log::error!("Cannot retain OpenFX module for background workers: {error}");
+                    return FAILED;
+                }
                 update_notice::available();
                 // Keep playback free of per-frame core/backend logging in this host.
                 let level = if is_jianying { log::LevelFilter::Warn } else { log::LevelFilter::Debug };

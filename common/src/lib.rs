@@ -24,6 +24,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub type PluginResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+pub fn has_active_video_motion(stab: &StabilizationManager) -> bool {
+    let gyro = stab.gyro.read();
+    gyro.optical_correction_applied
+        && !gyro.has_motion()
+        && !gyro.quaternions.is_empty()
+        && gyro.optical_correction.as_ref().is_some_and(|correction| !correction.video_base.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GyroflowLaunchCommand {
     program: String,
@@ -338,7 +346,9 @@ pub enum Params {
 // macro. To stay safe under the Windows loader lock, the constructor only performs cheap atomic
 // registration here; the real file open (`data_dir()` -> `SHGetKnownFolderPath`, `File::create`) is
 // deferred to the first emitted record, which happens at command/render time, outside loader lock.
-// Records are tee'd to `win_dbg_logger` so debug-build DebugView output is preserved unchanged.
+// Retained records are also sent to `win_dbg_logger` for DebugView.
+const IGNORED_LOG_TARGETS: &[&str] = &["mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "ofx"];
+
 struct PluginFileLogger {
     inner: RwLock<Option<Box<dyn log::Log>>>,
     name: std::sync::OnceLock<String>,
@@ -354,8 +364,7 @@ impl PluginFileLogger {
         let mut guard = self.inner.write();
         if self.open_attempted.swap(true, Ordering::AcqRel) { return; }
         let name = self.name.get().map(String::as_str).unwrap_or("plugin");
-        let log_config = [ "mp4parse", "wgpu", "naga", "akaze", "ureq", "rustls", "ofx" ]
-            .into_iter()
+        let log_config = IGNORED_LOG_TARGETS.iter().copied()
             .fold(simplelog::ConfigBuilder::new(), |mut cfg, x| { cfg.add_filter_ignore_str(x); cfg })
             .build();
         let data_path = gyroflow_core::settings::data_dir().join(format!("gyroflow-{name}.log"));
@@ -368,9 +377,14 @@ impl PluginFileLogger {
     }
 }
 impl log::Log for PluginFileLogger {
-    fn enabled(&self, _: &log::Metadata) -> bool { true }
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+            || (metadata.level() <= log::Level::Debug
+                && !IGNORED_LOG_TARGETS.iter().any(|target| metadata.target().starts_with(*target)))
+    }
     fn log(&self, record: &log::Record) {
-        // Tee to the debugger (DebugView) so debug-build behavior is unchanged.
+        if !self.enabled(record.metadata()) { return; }
+        // Filter before debugger formatting, file initialization and the logger lock.
         log::Log::log(&win_dbg_logger::DEBUGGER_LOGGER, record);
         self.ensure_inner();
         let guard = self.inner.read();
@@ -401,13 +415,13 @@ pub struct GyroflowPluginBase {
     // Cache key is specific enough
     pub manager_cache: ManagerCache,
 
-    pub context_initialized: bool,
+    context_initialized: std::sync::Once,
 }
 impl Default for GyroflowPluginBase {
     fn default() -> Self {
         Self {
             manager_cache: Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap())),
-            context_initialized: false,
+            context_initialized: std::sync::Once::new(),
         }
     }
 }
@@ -470,22 +484,21 @@ impl GyroflowPluginBase {
         data.to_string()
     }
 
-    pub fn initialize_gpu_context(&mut self) {
+    pub fn initialize_gpu_context(&self) {
         log::info!("GyroflowPluginBase::initialize_gpu_context");
-        if !self.context_initialized {
+        self.context_initialized.call_once(|| {
             gyroflow_core::gpu::initialize_contexts();
-            self.context_initialized = true;
-        }
+        });
     }
-    pub fn deinitialize_gpu_context(&mut self) {
+    pub fn deinitialize_gpu_context(&self) {
         log::info!("GyroflowPluginBase::deinitialize_gpu_context");
     }
 
-    pub fn initialize_log(&mut self, name: &str) {
+    pub fn initialize_log(&self, name: &str) {
         self.initialize_log_with_level(name, log::LevelFilter::Debug);
     }
 
-    pub fn initialize_log_with_level(&mut self, name: &str, level: log::LevelFilter) {
+    pub fn initialize_log_with_level(&self, name: &str, level: log::LevelFilter) {
         // Install the file logger (idempotent; usually already done by the DLL-load constructor on
         // the Adobe plugin, but the only init point on the OpenFX / frei0r plugins which have no
         // competing global logger).
@@ -1294,7 +1307,6 @@ impl GyroflowPluginBaseInstance {
         macro_rules! cache_key {
             ($typ:expr, $param:expr, $scale:expr) => {
                 if params.is_keyframed($param) {
-                    log::info!("param: {:?} is keyframed, cache_keyframes_every_frame: {}", $param, self.cache_keyframes_every_frame);
                     if self.cache_keyframes_every_frame { // Query every frame
                         for t in 0..num_frames {
                             let time = t as f64;
@@ -1320,7 +1332,6 @@ impl GyroflowPluginBaseInstance {
                         }
                     }
                 } else {
-                    log::info!("param: {:?} NOT keyframed", $param);
                     if let Ok(v) = params.get_f64($param) {
                         mgr.set(&$typ, 0, v / $scale);
                     }
@@ -1764,7 +1775,8 @@ impl GyroflowPluginBaseInstance {
                 }
                 let use_gyroflows_keyframes = params.get_bool(Params::UseGyroflowsKeyframes).unwrap_or_default();
                 self.cache_keyframes(params, use_gyroflows_keyframes, self.num_frames, self.fps.max(1.0));
-                self.has_motion = stab.gyro.read().has_motion();
+                let has_file_motion = stab.gyro.read().has_motion();
+                self.has_motion = has_file_motion || has_active_video_motion(&stab);
                 loaded
             };
 
@@ -2159,7 +2171,6 @@ impl GyroflowPluginBaseInstance {
                 Params::TranslationEnabled | Params::TranslationAuto | Params::TranslationReference |
                 Params::TranslationSmoothness | Params::TranslationAlongAxis => {
 
-                    params.set_string(Params::Status, t!("status.calculating"))?;
                     if !self.ever_changed {
                         // Invalidating a shared manager does not remove this project's measured translation.
                         if let Some((_, stab)) = self.managers.peek_lru() {
@@ -2212,7 +2223,6 @@ impl GyroflowPluginBaseInstance {
                             _ => { }
                         }
                     }
-                    params.set_string(Params::Status, t!("status.ok"))?;
                 },
                 _ => { }
             }
@@ -2998,6 +3008,49 @@ mod tests {
         assert_translation_switch_only(&params);
         translation::update_ui(&mut params, Some(&without));
         assert!(translation::CONTROLS.iter().all(|p| !params.visible[p]));
+    }
+
+    #[test]
+    fn ignored_sdk_logs_skip_formatting_and_file_initialization() {
+        use log::Log as _;
+        struct NotFormatted;
+        impl std::fmt::Display for NotFormatted {
+            fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("ignored diagnostic record was formatted");
+            }
+        }
+        let logger = PluginFileLogger::new();
+        for target in ["ofx::property", "wgpu_core::command", "naga::valid"] {
+            let metadata = log::Metadata::builder().target(target).level(log::Level::Debug).build();
+            assert!(!logger.enabled(&metadata));
+            logger.log(&log::Record::builder().target(target).level(log::Level::Debug)
+                .args(format_args!("{}", NotFormatted)).build());
+        }
+        assert!(!logger.open_attempted.load(std::sync::atomic::Ordering::Acquire));
+        assert!(logger.inner.read().is_none());
+        assert!(logger.enabled(&log::Metadata::builder().target("gyroflow_ofx::gyroflow").level(log::Level::Warn).build()));
+        assert!(logger.enabled(&log::Metadata::builder().target("ofx::property").level(log::Level::Warn).build()));
+    }
+
+    #[test]
+    fn smoothness_edits_invalidate_without_overwriting_sync_status() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let manager = Arc::new(StabilizationManager::default());
+        let mut instance = GyroflowPluginBaseInstance { ever_changed: true, num_frames: 60, fps: 30.0, ..Default::default() };
+        instance.managers.put("local".into(), manager.clone());
+        let cache = Mutex::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let mut params = TestParams::default();
+        params.strings.insert(Params::Status, "not synchronized".into());
+        params.f64s.insert(Params::Smoothness, 35.8);
+        instance.param_changed(&mut params, &cache, Params::Smoothness, true).unwrap();
+        assert_eq!(params.get_string(Params::Status).unwrap(), "not synchronized");
+        assert!(!params.value_writes.contains(&Params::Status));
+        assert!(manager.smoothing_invalidated.load(SeqCst));
+        assert!(manager.zooming_invalidated.load(SeqCst));
+        assert!(manager.undistortion_invalidated.load(SeqCst));
+        let cached = instance.keyframable_params.read();
+        let value = cached.cached_keyframes.value_at_video_timestamp(&KeyframeType::SmoothingParamSmoothness, 0.0).unwrap();
+        assert!((value - 0.358).abs() < 1e-12);
     }
 
     #[test]

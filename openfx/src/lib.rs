@@ -11,6 +11,8 @@ mod jianying_protocol;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod jianying_autoload;
 mod pending_host_values;
+#[cfg(target_os = "windows")]
+mod module_lifetime;
 
 // Report the compiled sampling selection without initializing a host or GPU.
 #[unsafe(no_mangle)]

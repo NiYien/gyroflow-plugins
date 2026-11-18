@@ -6,7 +6,7 @@ resolver = "2"
 version = "3.0.0"
 
 [patch.crates-io]
-ofx = { git = "https://github.com/AdrianEddy/ofx-rs.git", rev = "0b15219" }
+ofx = { path = "vendor/ofx" }
 ofx_sys = { git = "https://github.com/AdrianEddy/ofx-rs.git", rev = "0b15219" }
 
 [profile.deploy]

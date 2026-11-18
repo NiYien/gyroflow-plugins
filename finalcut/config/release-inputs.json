@@ -3,6 +3,5 @@
   "runner": "macos-26",
   "xcode_version": "26.6",
   "xcode_path": "/Applications/Xcode_26.6.app/Contents/Developer",
-  "rust_toolchain": "1.95.0",
-  "lens_data_tag": "data-v20260830.1"
+  "rust_toolchain": "1.95.0"
 }

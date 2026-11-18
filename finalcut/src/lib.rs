@@ -549,7 +549,9 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
         let has_accurate_timestamps = gyro.file_metadata.read().has_accurate_timestamps;
         (has_sync_points, has_accurate_timestamps)
     };
-    validate_project_sync_readiness(&project_json, has_sync_points, has_accurate_timestamps)?;
+    if !gyroflow_plugin_base::has_active_video_motion(&manager) {
+        validate_project_sync_readiness(&project_json, has_sync_points, has_accurate_timestamps)?;
+    }
     Ok(LoadedProject {
         original_translation_parameters: translation_parameters::snapshot(&manager).parameters,
         host_geometry: Default::default(),
