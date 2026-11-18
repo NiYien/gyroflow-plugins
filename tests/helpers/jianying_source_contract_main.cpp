@@ -13,6 +13,9 @@
 #include <stdexcept>
 using namespace jianying_source_contract;
 static void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+static constexpr Layout layout(Abi abi) {
+    return abi == Abi::LibcppArm64 ? Layout{0x130, 0x1b0, 0xf8} : msvc_layout;
+}
 struct Memory {
     std::map<std::uintptr_t, std::vector<unsigned char>> regions;
     std::map<std::uintptr_t, unsigned> counts;
@@ -106,7 +109,7 @@ struct Fixture {
             memory.put<std::uint64_t>(field + 16, value.size()); memory.put<std::uint64_t>(field + 24, long_value ? std::max<std::size_t>(31, value.size()) : 15);
         }
     }
-    Observation inspect(std::uintptr_t address = effect) { return jianying_source_contract::inspect(address, module, {Memory::read, &memory}); }
+    Observation inspect(std::uintptr_t address = effect) { return jianying_source_contract::inspect(address, module, {Memory::read, &memory}, layout(module.abi)); }
 };
 int main() {
     try {

@@ -155,10 +155,7 @@ inline bool matches_type(const Reader& reader, const Module& module, std::uintpt
     return read_type_name(reader, module, name_address, name) && matches_type_name(name, module.abi, role);
 }
 struct Layout { std::size_t message, image, source; };
-inline Layout layout(Abi abi) {
-    // Keep the known relative member layout while validating object roles and stable snapshots.
-    return abi == Abi::LibcppArm64 ? Layout{0x128, 0x1a8, 0xf0} : Layout{0x148, 0x1d0, 0x108};
-}
+inline constexpr Layout msvc_layout{0x148, 0x1d0, 0x108};
 struct Chain {
     std::uintptr_t effect_table = 0, message = 0, image = 0;
     std::uintptr_t message_table = 0, image_table = 0, message_processor = 0, image_processor = 0;
@@ -168,9 +165,8 @@ struct Chain {
             && message_processor == b.message_processor && image_processor == b.image_processor;
     }
 };
-inline Status read_chain(const Reader& reader, const Module& module, std::uintptr_t effect, Chain& chain) {
+inline Status read_chain(const Reader& reader, const Module& module, std::uintptr_t effect, Layout offsets, Chain& chain) {
     std::uintptr_t end = 0;
-    const auto offsets = layout(module.abi);
     if (!safe_add(effect, offsets.image + 7, end)) return Status::AddressOverflow;
     if (!reader.at(effect, 0, chain.effect_table)) return Status::UnreadableEffect;
     if (!matches_type(reader, module, chain.effect_table, Role::Effect)) return Status::EffectTypeMismatch;
@@ -217,16 +213,16 @@ inline bool absolute_source(const std::string& source, Abi abi) {
         && source[1] == ':' && (source[2] == '/' || source[2] == '\\'))
         || (source.size() > 4 && source[0] == '\\' && source[1] == '\\' && source[2] != '\\');
 }
-inline Observation inspect(std::uintptr_t effect, const Module& module, const Reader& reader) {
+inline Observation inspect(std::uintptr_t effect, const Module& module, const Reader& reader, Layout offsets) {
     Observation result;
     if (!effect) { result.status = Status::NullEffect; return result; }
     if (!module.base || module.regions.empty()) { result.status = Status::ModuleUnavailable; return result; }
     Chain first;
-    result.status = read_chain(reader, module, effect, first);
+    result.status = read_chain(reader, module, effect, offsets, first);
     if (result.status != Status::Ready) return result;
     result.processor = first.message_processor;
     std::uintptr_t address = 0;
-    if (!safe_add(result.processor, layout(module.abi).source, address)) { result.status = Status::AddressOverflow; return result; }
+    if (!safe_add(result.processor, offsets.source, address)) { result.status = Status::AddressOverflow; return result; }
     const bool mac = module.abi == Abi::LibcppArm64;
     const std::size_t header_size = mac ? 24 : 32;
     std::array<unsigned char, 32> header{};
@@ -249,7 +245,7 @@ inline Observation inspect(std::uintptr_t effect, const Module& module, const Re
     } else std::memcpy(payload.data(), header.data(), payload.size());
     Chain second;
     std::array<unsigned char, 32> header_after{};
-    if (read_chain(reader, module, effect, second) != Status::Ready || !(first == second)
+    if (read_chain(reader, module, effect, offsets, second) != Status::Ready || !(first == second)
         || !reader.read(address, header_after.data(), header_size) || header != header_after) {
         result.status = Status::ChangedDuringCopy; return result;
     }
@@ -257,7 +253,7 @@ inline Observation inspect(std::uintptr_t effect, const Module& module, const Re
         std::vector<char> payload_after(payload.size());
         Chain final_chain;
         if (!reader.read(payload_address, payload_after.data(), payload_after.size()) || payload != payload_after
-            || read_chain(reader, module, effect, final_chain) != Status::Ready || !(first == final_chain)
+            || read_chain(reader, module, effect, offsets, final_chain) != Status::Ready || !(first == final_chain)
             || !reader.read(address, header_after.data(), header_size) || header != header_after) {
             result.status = Status::ChangedDuringCopy; return result;
         }

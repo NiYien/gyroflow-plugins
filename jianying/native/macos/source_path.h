@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
-#include "../source_path_contract.h"
+#include "source_layout.h"
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <dlfcn.h>
 #include <map>
+#include <memory>
 #include <mutex>
 
 namespace jianying_macos_source_path {
@@ -61,7 +62,31 @@ inline Module inspect_module(std::uintptr_t base) {
     }
     return module.contains(base, sizeof(header)) ? module : Module{};
 }
-inline Module loaded_module(std::uintptr_t address) {
+struct HostModule {
+    Module module;
+    Layout layout;
+};
+inline std::optional<Layout> inspect_layout(const Module& module, const char* path) {
+    // Only inspect already-loaded host code. No private host function is called.
+    void* handle = dlopen(path, RTLD_LAZY | RTLD_NOLOAD | RTLD_FIRST);
+    if (!handle) return std::nullopt;
+    const std::unique_ptr<void, decltype(&dlclose)> library(handle, dlclose);
+    const Reader reader{mach_read};
+    const auto read_code = [&](const char* symbol, arm64::Code& code) {
+        auto* function = dlsym(handle, symbol);
+        const auto address = reinterpret_cast<std::uintptr_t>(function);
+        return function && address % alignof(arm64::Instruction) == 0
+            && module.contains(address, sizeof(code), true) && reader.read(address, code.data(), sizeof(code));
+    };
+    arm64::Code source{}, image{}, message{};
+    if (!read_code("_ZN17TEPluginProcessor20fetchFrameFromEditorERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEEx", source)
+        || !read_code("_ZN25TEOfxhImageEffectInstance8populateENSt3__18functionIFN8veplugin9FrameDataERKNS0_12basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEEdddddEEE", image)
+        || !read_code("_ZN19TEOfxPluginInstance18setMessageCallbackERKNSt3__18functionIFbPKN8veplugin12MessageEventEEEE", message)) {
+        return std::nullopt;
+    }
+    return arm64::discover(source, image, message);
+}
+inline std::shared_ptr<const HostModule> loaded_module(std::uintptr_t address) {
     Dl_info information{};
     if (!dladdr(reinterpret_cast<const void*>(address), &information) || !information.dli_fname || !information.dli_fbase) return {};
     const std::string path(information.dli_fname);
@@ -69,14 +94,18 @@ inline Module loaded_module(std::uintptr_t address) {
     if (path.substr(slash == std::string::npos ? 0 : slash + 1) != "libcccreator.dylib") return {};
     const auto base = reinterpret_cast<std::uintptr_t>(information.dli_fbase);
     static std::mutex mutex;
-    static std::map<std::uintptr_t, Module> cache;
+    static std::map<std::uintptr_t, std::shared_ptr<const HostModule>> cache;
     std::lock_guard<std::mutex> lock(mutex);
     const auto found = cache.find(base);
     if (found != cache.end()) return found->second;
-    const auto module = inspect_module(base);
-    // A failed or incomplete load must remain retryable.
-    if (module.base) cache.emplace(base, module);
-    return module;
+    auto module = inspect_module(base);
+    if (!module.base) return {};
+    const auto layout = inspect_layout(module, information.dli_fname);
+    // Cache the result for this loaded image, including unsupported layouts.
+    std::shared_ptr<const HostModule> result;
+    if (layout) result = std::make_shared<const HostModule>(HostModule{std::move(module), *layout});
+    cache.emplace(base, result);
+    return result;
 }
 } // namespace detail
 inline bool is_pending(const Observation& observation) {
@@ -94,7 +123,7 @@ inline bool module_supported() {
             const auto slash = path.find_last_of('/');
             if (path.substr(slash == std::string::npos ? 0 : slash + 1) != "libcccreator.dylib") continue;
             ++matches;
-            supported = detail::loaded_module(reinterpret_cast<std::uintptr_t>(_dyld_get_image_header(i))).base != 0;
+            supported = bool(detail::loaded_module(reinterpret_cast<std::uintptr_t>(_dyld_get_image_header(i))));
         }
         return matches == 1 && supported;
     } catch (...) { return false; }
@@ -110,7 +139,9 @@ inline Observation inspect_source(const void* effect) {
         std::uintptr_t table = 0;
         const auto address = reinterpret_cast<std::uintptr_t>(effect);
         if (!reader.at(address, 0, table)) return {Status::UnreadableEffect, 0, {}};
-        return jianying_source_contract::inspect(address, detail::loaded_module(table), reader);
+        const auto host = detail::loaded_module(table);
+        if (!host) return {Status::ModuleUnavailable, 0, {}};
+        return jianying_source_contract::inspect(address, host->module, reader, host->layout);
     } catch (...) { return {Status::InternalFailure, 0, {}}; }
 #else
     (void)effect;

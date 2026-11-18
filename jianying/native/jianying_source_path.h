@@ -45,7 +45,7 @@ inline bool copy_source_path(const void* effect, std::string& result) {
     result.clear();
     try {
         const auto observation = jianying_source_contract::inspect(reinterpret_cast<std::uintptr_t>(effect),
-            loaded_module(), {read_local});
+            loaded_module(), {read_local}, jianying_source_contract::msvc_layout);
         if (observation.status != jianying_source_contract::Status::Ready) return false;
         result = observation.source;
         return true;
