@@ -395,6 +395,7 @@ const _: () = {
 };
 
 struct LoadedProject {
+    applied_render_parameters: std::sync::Mutex<Option<GFRenderParameters>>,
     original_translation_parameters: GFTranslationParameters,
     host_geometry: std::sync::Mutex<Option<host_geometry::HostGeometryState>>,
     manager: Arc<StabilizationManager>,
@@ -553,6 +554,7 @@ fn parse_project(project_bytes: &[u8]) -> Result<LoadedProject, String> {
         validate_project_sync_readiness(&project_json, has_sync_points, has_accurate_timestamps)?;
     }
     Ok(LoadedProject {
+        applied_render_parameters: Default::default(),
         original_translation_parameters: translation_parameters::snapshot(&manager).parameters,
         host_geometry: Default::default(),
         manager: Arc::new(manager),
@@ -705,6 +707,14 @@ fn apply_render_parameters(
 ) -> Result<(), String> {
     validate_render_parameters(parameters)?;
 
+    let mut applied = project
+        .applied_render_parameters
+        .lock()
+        .map_err(|_| "Render parameter lock is poisoned")?;
+    if applied.as_ref() == Some(parameters) {
+        return Ok(());
+    }
+
     let manager = &project.manager;
     // FCP normalizes host textures to top-down rows before entering the stabilizer.
     manager.params.write().framebuffer_inverted = false;
@@ -734,6 +744,7 @@ fn apply_render_parameters(
         .params
         .write()
         .calculate_ramped_timestamps(&manager.keyframes.read(), false, false);
+    *applied = Some(*parameters);
     Ok(())
 }
 
@@ -3010,6 +3021,41 @@ mod tests {
                 .undistortion_invalidated
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
+    }
+
+    #[test]
+    fn unchanged_render_parameters_reuse_computed_stabilization() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let project = parse_project(include_bytes!("../tests/fixtures/phase0-valid.gyroflow"))
+            .expect("fixture project");
+        let original = snapshot_project_parameters(&project.manager).unwrap();
+        let changed = GFRenderParameters {
+            smoothness: if original.smoothness == 42.0 { 35.0 } else { 42.0 },
+            ..original
+        };
+        let compute_id = &project.manager.current_compute_id;
+
+        for parameters in [original, changed, original] {
+            let previous = compute_id.load(SeqCst);
+            apply_render_parameters(&project, &parameters).unwrap();
+            let applied = compute_id.load(SeqCst);
+            assert_ne!(
+                applied, previous,
+                "new parameters must invalidate the calculation"
+            );
+            assert_eq!(
+                snapshot_project_parameters(&project.manager).unwrap(),
+                parameters
+            );
+
+            apply_render_parameters(&project, &parameters).unwrap();
+            assert_eq!(
+                compute_id.load(SeqCst),
+                applied,
+                "identical parameters must skip invalidation"
+            );
+        }
     }
 
     #[test]

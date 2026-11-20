@@ -68,13 +68,44 @@ pub(crate) fn apply(project: &LoadedProject, parameters: &GFTranslationParameter
     if manager.gyro.read().optical_translation.is_none() { return Ok(()); }
     let parameters = if parameters.initialized != 0 { *parameters }
         else { project.original_translation_parameters };
+    let mut applied = project
+        .applied_render_parameters
+        .lock()
+        .map_err(|_| "Render parameter lock is poisoned")?;
     let ui = *manager.optical_ui.read();
     let reference = parameters.reference_percent / 100.0;
-    if ui.translation_settings.reference != reference { manager.set_translation_reference(reference); }
-    if ui.translation_settings.smoothness_s != parameters.smoothness_seconds { manager.set_translation_smoothness(parameters.smoothness_seconds); }
-    if ui.translation_settings.auto != (parameters.automatic != 0) { manager.set_translation_auto(parameters.automatic != 0); }
-    if ui.translation_settings.along_axis != (parameters.along_axis != 0) { manager.set_translation_along_axis(parameters.along_axis != 0); }
-    if ui.translation_enabled != (parameters.enabled != 0) { manager.set_translation_stabilization_enabled(parameters.enabled != 0); }
+    let automatic = parameters.automatic != 0;
+    let along_axis = parameters.along_axis != 0;
+    let enabled = parameters.enabled != 0;
+    let reference_changed = ui.translation_settings.reference != reference;
+    let smoothness_changed = ui.translation_settings.smoothness_s != parameters.smoothness_seconds;
+    let automatic_changed = ui.translation_settings.auto != automatic;
+    let along_axis_changed = ui.translation_settings.along_axis != along_axis;
+    let enabled_changed = ui.translation_enabled != enabled;
+    if reference_changed
+        || smoothness_changed
+        || automatic_changed
+        || along_axis_changed
+        || enabled_changed
+    {
+        // The following render-parameter call also recomputes after a translation-only change.
+        *applied = None;
+    }
+    if reference_changed {
+        manager.set_translation_reference(reference);
+    }
+    if smoothness_changed {
+        manager.set_translation_smoothness(parameters.smoothness_seconds);
+    }
+    if automatic_changed {
+        manager.set_translation_auto(automatic);
+    }
+    if along_axis_changed {
+        manager.set_translation_along_axis(along_axis);
+    }
+    if enabled_changed {
+        manager.set_translation_stabilization_enabled(enabled);
+    }
     Ok(())
 }
 
@@ -189,6 +220,37 @@ mod tests {
             }
             assert!(apply(&project, &parameters).is_err());
             assert_eq!(*project.manager.optical_ui.read(), before);
+        }
+    }
+
+    #[test]
+    fn changing_only_translation_recomputes_stabilization_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let project = fixture();
+        let render = super::super::snapshot_project_parameters(&project.manager).unwrap();
+        super::super::apply_render_parameters(&project, &render).unwrap();
+        let mut translation = project.original_translation_parameters;
+        translation.enabled = 0;
+        let compute_id = &project.manager.current_compute_id;
+
+        for translation in [translation, GFTranslationParameters::default()] {
+            apply(&project, &translation).unwrap();
+            let before_render = compute_id.load(SeqCst);
+            super::super::apply_render_parameters(&project, &render).unwrap();
+            let applied = compute_id.load(SeqCst);
+            assert_ne!(
+                applied, before_render,
+                "translation alone must trigger the render recompute"
+            );
+
+            apply(&project, &translation).unwrap();
+            super::super::apply_render_parameters(&project, &render).unwrap();
+            assert_eq!(
+                compute_id.load(SeqCst),
+                applied,
+                "identical translation must skip recomputing"
+            );
         }
     }
 
