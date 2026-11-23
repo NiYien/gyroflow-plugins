@@ -59,7 +59,8 @@ class JianyingSourceContractTests(unittest.TestCase):
             runner = output / ("native-source" + suffix)
             compile_file("jianying_source_native_main.cpp", runner)
             digests = []
-            for revision in (1, 2):
+            revisions = (1, 2, 3) if windows else (1, 2)
+            for revision in revisions:
                 folder = output / str(revision)
                 folder.mkdir()
                 library = folder / ("cccreator.dll" if windows else "libcccreator.dylib")
@@ -68,7 +69,7 @@ class JianyingSourceContractTests(unittest.TestCase):
                 result = subprocess.run([str(runner), str(library)], capture_output=True, text=True, env=environment)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertTrue(json.loads(result.stdout)["compiler_rtti"])
-            self.assertNotEqual(*digests, "The two native library builds must have different whole-file hashes")
+            self.assertEqual(len(set(digests)), len(digests), "The native library builds must have different whole-file hashes")
 
 
 if __name__ == "__main__":

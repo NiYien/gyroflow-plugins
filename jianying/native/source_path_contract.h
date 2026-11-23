@@ -155,7 +155,6 @@ inline bool matches_type(const Reader& reader, const Module& module, std::uintpt
     return read_type_name(reader, module, name_address, name) && matches_type_name(name, module.abi, role);
 }
 struct Layout { std::size_t message, image, source; };
-inline constexpr Layout msvc_layout{0x148, 0x1d0, 0x108};
 struct Chain {
     std::uintptr_t effect_table = 0, message = 0, image = 0;
     std::uintptr_t message_table = 0, image_table = 0, message_processor = 0, image_processor = 0;
@@ -167,7 +166,7 @@ struct Chain {
 };
 inline Status read_chain(const Reader& reader, const Module& module, std::uintptr_t effect, Layout offsets, Chain& chain) {
     std::uintptr_t end = 0;
-    if (!safe_add(effect, offsets.image + 7, end)) return Status::AddressOverflow;
+    if (!safe_add(effect, std::max(offsets.message, offsets.image) + 7, end)) return Status::AddressOverflow;
     if (!reader.at(effect, 0, chain.effect_table)) return Status::UnreadableEffect;
     if (!matches_type(reader, module, chain.effect_table, Role::Effect)) return Status::EffectTypeMismatch;
     if (!reader.at(effect, offsets.message, chain.message) || !reader.at(effect, offsets.image, chain.image)) return Status::UnreadableEffect;

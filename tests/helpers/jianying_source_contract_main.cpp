@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Exercise both compiler ABI profiles in synthetic address spaces without an editor process.
 #include "source_path_contract.h"
+#include "windows_source_layout.h"
 #ifdef __APPLE__
 #include "macos/source_path.h"
 #endif
@@ -14,7 +15,7 @@
 using namespace jianying_source_contract;
 static void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
 static constexpr Layout layout(Abi abi) {
-    return abi == Abi::LibcppArm64 ? Layout{0x130, 0x1b0, 0xf8} : msvc_layout;
+    return abi == Abi::LibcppArm64 ? Layout{0x130, 0x1b0, 0xf8} : Layout{0x148, 0x1d0, 0x108};
 }
 struct Memory {
     std::map<std::uintptr_t, std::vector<unsigned char>> regions;
@@ -196,6 +197,134 @@ int main() {
         std::string rejected = "stale";
         require(!jianying_source_path::copy_source_path(reinterpret_cast<void*>(1), rejected) && rejected.empty(), "Native Windows boundary"); ++cases;
 #endif
+        // Exercise runtime x64 layout discovery directly on synthetic code and archived host patterns.
+        {
+            using namespace jianying_source_path::x64;
+            constexpr std::uintptr_t base = 0x180000000ULL;
+            constexpr std::uintptr_t text = base + 0x1000;
+            constexpr std::uintptr_t rdata = base + 0x4000;
+            auto make_env = [&]() {
+                Memory mem;
+                mem.regions[base].resize(0x8000);
+                Module mod{base, Abi::MsvcX64, {{text, 0x3000, true}, {rdata, 0x4000, false}}};
+                return std::make_pair(std::move(mem), std::move(mod));
+            };
+            auto put_bytes = [](Memory& mem, std::uintptr_t addr, const std::vector<unsigned char>& code) {
+                for (std::size_t i = 0; i < code.size(); ++i) mem.put<unsigned char>(addr + i, code[i]);
+            };
+            auto append_u32 = [](std::vector<unsigned char>& v, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i) v.push_back(static_cast<unsigned char>((value >> (i * 8)) & 0xff));
+            };
+            auto make_fetch_code = [&](std::uint32_t src_off, std::uint32_t id_off, std::int8_t stride, bool include_guard, bool include_third) {
+                std::vector<unsigned char> c;
+                // mov r14, rcx; mov rdi, r8
+                c.insert(c.end(), {0x4c, 0x8b, 0xf1, 0x49, 0x8b, 0xf8});
+                if (include_guard) {
+                    // cmp dword ptr [rax], 0x72756f53 ("Sour"); cmp word ptr [rax+4], 0x6563 ("ce"); jne +0x50
+                    c.insert(c.end(), {0x81, 0x38, 0x53, 0x6f, 0x75, 0x72, 0x66, 0x81, 0x78, 0x04, 0x63, 0x65, 0x75, 0x50});
+                }
+                const std::uintptr_t assign_rva = 0x2800;
+                const auto emit_call_assign = [&](std::uintptr_t fn_rva) {
+                    c.push_back(0xe8);
+                    const auto next_rva = fn_rva + c.size() + 4;
+                    append_u32(c, static_cast<std::uint32_t>(assign_rva - next_rva));
+                };
+                // 1: lea rdx, [rcx + src_off]; lea rcx, [rbp - 0x70]; call assign
+                c.insert(c.end(), {0x48, 0x8d, 0x91}); append_u32(c, src_off);
+                c.insert(c.end(), {0x48, 0x8d, 0x4d, 0x90});
+                emit_call_assign(0x1400);
+                // 2: lea rdx, [r14 + id_off]; lea rcx, [rbp - 0x70 + stride]; call assign
+                c.insert(c.end(), {0x49, 0x8d, 0x96}); append_u32(c, id_off);
+                c.insert(c.end(), {0x48, 0x8d, 0x4d, static_cast<unsigned char>(static_cast<std::int8_t>(-0x70) + stride)});
+                emit_call_assign(0x1400);
+                if (include_third) {
+                    // 3: mov rdx, rdi; lea rcx, [rbp - 0x70 + 2*stride]; call assign
+                    c.insert(c.end(), {0x48, 0x8b, 0xd7, 0x48, 0x8d, 0x4d, static_cast<unsigned char>(static_cast<std::int8_t>(-0x70) + 2 * stride)});
+                    emit_call_assign(0x1400);
+                }
+                c.push_back(0xc3);
+                return c;
+            };
+
+            // Positive: 3-hop call graph (matching 11.9) and direct 1-hop (matching 11.8/11.3) at relocated offsets.
+            for (const std::uint32_t src_off : {0xe8U, 0x108U, 0x120U, 0x1b8U}) {
+                auto [mem, mod] = make_env();
+                // image_vt[2] -> 0x1100 (calls 0x1200) -> 0x1200 (calls 0x1400) -> 0x1400 (fetch)
+                mem.put<std::uintptr_t>(rdata + 0x100 + 16, base + 0x1100);
+                // 0x1100: call 0x1200; ret
+                std::vector<unsigned char> hop1{0xe8}; append_u32(hop1, 0x1200 - 0x1105); hop1.push_back(0xc3);
+                // 0x1200: call 0x1400; ret
+                std::vector<unsigned char> hop2{0xe8}; append_u32(hop2, 0x1400 - 0x1205); hop2.push_back(0xc3);
+                const auto fetch = make_fetch_code(src_off, 0x58, 0x20, true, true);
+                put_bytes(mem, base + 0x1100, hop1);
+                put_bytes(mem, base + 0x1200, hop2);
+                put_bytes(mem, base + 0x1400, fetch);
+                put_bytes(mem, base + 0x2800, {0xc3});
+                const std::vector<FunctionRange> pdata{
+                    {0x1100, static_cast<std::uint32_t>(0x1100 + hop1.size())},
+                    {0x1200, static_cast<std::uint32_t>(0x1200 + hop2.size())},
+                    {0x1400, static_cast<std::uint32_t>(0x1400 + fetch.size())},
+                    {0x2800, 0x2801}
+                };
+                const auto discovered = discover_source_offset({Memory::read, &mem}, mod, pdata, rdata + 0x100);
+                require(discovered && *discovered == src_off, "x64 runtime source offset discovery"); ++cases;
+            }
+
+            // Negative controls: missing guard, wrong stride, only 2 assigns, ambiguous offsets.
+            {
+                auto check_reject = [&](const std::vector<unsigned char>& fetch, const char* msg) {
+                    auto [mem, mod] = make_env();
+                    mem.put<std::uintptr_t>(rdata + 0x100 + 16, base + 0x1400);
+                    put_bytes(mem, base + 0x1400, fetch);
+                    put_bytes(mem, base + 0x2800, {0xc3});
+                    const std::vector<FunctionRange> pdata{{0x1400, static_cast<std::uint32_t>(0x1400 + fetch.size())}, {0x2800, 0x2801}};
+                    require(!discover_source_offset({Memory::read, &mem}, mod, pdata, rdata + 0x100).has_value(), msg); ++cases;
+                };
+                check_reject(make_fetch_code(0x120, 0x58, 0x20, false, true), "Missing Source guard accepted");
+                check_reject(make_fetch_code(0x120, 0x58, 0x18, true, true), "Wrong string stride accepted");
+                check_reject(make_fetch_code(0x120, 0x58, 0x20, true, false), "Two-assign sequence accepted");
+            }
+
+            // Destructor slot discovery: both rbx-based and rdx-clobbered (setne dl) SBO patterns + out-of-line helper.
+            {
+                auto [mem, mod] = make_env();
+                mem.put<std::uintptr_t>(rdata + 0x200, base + 0x1500);
+                // 0x1500 deleting dtor: call 0x1600; ret
+                std::vector<unsigned char> del_dtor{0xe8}; append_u32(del_dtor, 0x1600 - 0x1505); del_dtor.push_back(0xc3);
+                // 0x1600 real dtor:
+                //   mov rdi, rcx
+                //   slot 1 (rdx clobbered by setne dl): mov rcx, [rdi+0x1f8]; mov rax, [rcx]; lea rdx, [rdi+0x1c0]; cmp rcx, rdx; setne dl; call [rax+0x20]
+                //   slot 2 (out-of-line tidy helper at 0x1900): lea rcx, [rdi+0x110]; call 0x1900
+                //   ret
+                std::vector<unsigned char> real_dtor{
+                    0x48, 0x8b, 0xf9,
+                    0x48, 0x8b, 0x8f, 0xf8, 0x01, 0x00, 0x00,
+                    0x48, 0x8b, 0x01,
+                    0x48, 0x8d, 0x97, 0xc0, 0x01, 0x00, 0x00,
+                    0x48, 0x3b, 0xca,
+                    0x0f, 0x95, 0xc2,
+                    0xff, 0x50, 0x20,
+                    0x48, 0x8d, 0x8f, 0x10, 0x01, 0x00, 0x00,
+                    0xe8
+                };
+                append_u32(real_dtor, static_cast<std::uint32_t>(0x1900 - (0x1600 + real_dtor.size() + 4)));
+                real_dtor.push_back(0xc3);
+                // 0x1900 tidy helper: mov rbx, rcx; mov rcx, [rbx+0x38]; mov rax, [rcx]; cmp rcx, rbx; setne dl; call [rax+0x20]; ret
+                const std::vector<unsigned char> tidy{
+                    0x48, 0x8b, 0xd9, 0x48, 0x8b, 0x4b, 0x38, 0x48, 0x8b, 0x01, 0x48, 0x3b, 0xcb, 0x0f, 0x95, 0xc2, 0xff, 0x50, 0x20, 0xc3
+                };
+                put_bytes(mem, base + 0x1500, del_dtor);
+                put_bytes(mem, base + 0x1600, real_dtor);
+                put_bytes(mem, base + 0x1900, tidy);
+                const std::vector<FunctionRange> pdata{
+                    {0x1500, static_cast<std::uint32_t>(0x1500 + del_dtor.size())},
+                    {0x1600, static_cast<std::uint32_t>(0x1600 + real_dtor.size())},
+                    {0x1900, static_cast<std::uint32_t>(0x1900 + tidy.size())}
+                };
+                const auto slots = discover_effect_function_slots({Memory::read, &mem}, mod, pdata, rdata + 0x200);
+                require(slots.size() == 2 && slots[0] == 0x148 && slots[1] == 0x1f8, "x64 destructor slot discovery"); ++cases;
+            }
+        }
         std::cout << "{\"passed\":true,\"cases\":" << cases << ",\"abi_profiles\":[\"libcpp-arm64\",\"msvc-x64\"],\"real_editor_loaded\":false}\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
