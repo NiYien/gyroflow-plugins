@@ -266,6 +266,17 @@ fn prepare_jianying_gpu(stab: &StabilizationManager, buffers: &Buffers) -> Resul
             return Err(Error::InvalidValue);
         };
         *GPU_LIST.write() = devices.iter().map(|device| device.list_name.clone()).collect();
+        static LOGGED_DEVICE: std::sync::Once = std::sync::Once::new();
+        LOGGED_DEVICE.call_once(|| {
+            log::info!(
+                target: "jianying_ofx",
+                "Selected WGPU device: list_name={} vendor={} type={:?} raw_index={}",
+                device.list_name,
+                device.vendor,
+                device.device_type,
+                device.raw_index
+            );
+        });
         stabilization.set_device(device.raw_index as isize);
     }
     Ok(())
@@ -3214,7 +3225,15 @@ impl Execute for GyroflowPlugin {
                             OK
                         },
                         Err(e) => {
-                            log::warn!("Failed to render: {e:?}");
+                            if is_jianying {
+                                log::error!(
+                                    target: "jianying_ofx",
+                                    "Jianying render failed: {e:?} (wgpu={:?})",
+                                    wgpu::WgpuWrapper::get_info()
+                                );
+                            } else {
+                                log::warn!("Failed to render: {e:?}");
+                            }
                             FAILED
                         }
                     }

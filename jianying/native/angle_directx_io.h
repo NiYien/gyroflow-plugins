@@ -42,6 +42,7 @@ struct AngleDirectX {
             throw std::runtime_error("Cannot query ANGLE D3D11 device");
         device=reinterpret_cast<ID3D11Device*>(d3dDevice);
         device->GetImmediateContext(context.GetAddressOf());
+        if(!context) throw std::runtime_error("Cannot query ANGLE D3D11 immediate context");
         const int attrs[]={0x3033,1,0x3040,0x40,0x3024,8,0x3023,8,0x3022,8,0x3021,8,0x303A,1,0x3038};
         int count=0;
         if(!choose(display,attrs,&config,1,&count) || !count) throw std::runtime_error("No EGL RGBA pbuffer config");
@@ -57,6 +58,7 @@ struct AngleD3DTexture {
     bool bound=false;
     int width,height;
     AngleD3DTexture(AngleDirectX& d,AngleIO& g,int w,int h):dx(d),gl(g),width(w),height(h) {
+        if(w<=0 || h<=0) throw std::runtime_error("Invalid D3D11 texture dimensions");
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width=w;desc.Height=h;desc.MipLevels=1;desc.ArraySize=1;
         desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;
@@ -68,11 +70,16 @@ struct AngleD3DTexture {
         surface=dx.createSurface(dx.display,0x33A3,texture.Get(),dx.config,attrs);
         if(!surface) throw std::runtime_error("D3D11 EGL pbuffer creation failed: "+std::to_string(dx.getError()));
         gl.genTextures(1,&glTexture);
+        if(!glTexture) {
+            dx.destroySurface(dx.display,surface);
+            surface=nullptr;
+            throw std::runtime_error("D3D11 GL texture allocation failed");
+        }
     }
-    ~AngleD3DTexture() {
-        if(bound) dx.releaseImage(dx.display,surface,0x3084);
-        if(glTexture) gl.deleteTextures(1,&glTexture);
-        if(surface) dx.destroySurface(dx.display,surface);
+    ~AngleD3DTexture() noexcept {
+        if(bound && dx.releaseImage && dx.display && surface) dx.releaseImage(dx.display,surface,0x3084);
+        if(glTexture && gl.deleteTextures) gl.deleteTextures(1,&glTexture);
+        if(surface && dx.destroySurface && dx.display) dx.destroySurface(dx.display,surface);
     }
     void bind() {
         gl.bindTexture(0x0DE1,glTexture);

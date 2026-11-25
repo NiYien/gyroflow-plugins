@@ -76,6 +76,7 @@ static bool load_texture_view(TextureView& view,OfxImageClipHandle clip,double t
 }
 
 static OfxStatus get_image(OfxImageClipHandle clip, OfxTime time, const OfxRectD* region, OfxPropertySetHandle* result) {
+    if(!result) return kOfxStatErrBadHandle;
     if(texture_frame) {
         TextureView* view=nullptr;
         if(clip==texture_frame->output_clip) view=&texture_frame->output;
@@ -89,19 +90,21 @@ static OfxStatus get_image(OfxImageClipHandle clip, OfxTime time, const OfxRectD
                 } else texture_frame->gl->read(view->texture,view->width(),view->height(),view->bytes);
             }
             catch(const std::exception& e) { report_error(e.what());return kOfxStatFailed; }
+            catch(...) { report_error("Unknown exception in get_image");return kOfxStatFailed; }
         }
         if(!view) return kOfxStatErrBadHandle;
         *result=view->handle();
         return kOfxStatOK;
     }
-    return image->clipGetImage(clip, time, region, result);
+    return image ? image->clipGetImage(clip, time, region, result) : kOfxStatErrMissingHostFeature;
 }
 
 static OfxStatus release_image(OfxPropertySetHandle p) {
-    return texture_view(p) ? kOfxStatOK : image->clipReleaseImage(p);
+    return texture_view(p) ? kOfxStatOK : (image ? image->clipReleaseImage(p) : kOfxStatErrMissingHostFeature);
 }
 
 static const void* fetch_suite(OfxPropertySetHandle h, const char* name, int version) {
+    if (!host || !name) return nullptr;
     const void* suite = host->fetchSuite(h, name, version);
     if (!std::strcmp(name, kOfxImageEffectSuite) && version == 1 && suite) return &image_proxy;
     if (!std::strcmp(name, kOfxPropertySuite) && version == 1 && suite) return &property_proxy;
@@ -109,57 +112,75 @@ static const void* fetch_suite(OfxPropertySetHandle h, const char* name, int ver
 }
 
 static OfxStatus get_int(OfxPropertySetHandle p,const char* key,int index,int* value) {
+    if(!key || !value) return kOfxStatErrBadHandle;
     if(texture_frame && !std::strcmp(key,"NiYienImageEffectPropD3D11Enabled")) { *value=texture_frame->directx ? 1 : 0;return 0; }
     if(texture_frame && !std::strcmp(key,kOfxImageEffectPropOpenGLEnabled)) { *value=0;return 0; }
     if(auto* v=texture_view(p)) if(!std::strcmp(key,kOfxImagePropRowBytes)) { *value=v->width()*4;return 0; }
-    return prop->propGetInt(real_property_set(p),key,index,value);
+    return prop ? prop->propGetInt(real_property_set(p),key,index,value) : kOfxStatErrMissingHostFeature;
 }
-static OfxStatus get_int_n(OfxPropertySetHandle p,const char* key,int count,int* value) { return prop->propGetIntN(real_property_set(p),key,count,value); }
-static OfxStatus get_double(OfxPropertySetHandle p,const char* key,int index,double* value) { return prop->propGetDouble(real_property_set(p),key,index,value); }
-static OfxStatus get_double_n(OfxPropertySetHandle p,const char* key,int count,double* value) { return prop->propGetDoubleN(real_property_set(p),key,count,value); }
+static OfxStatus get_int_n(OfxPropertySetHandle p,const char* key,int count,int* value) { return prop ? prop->propGetIntN(real_property_set(p),key,count,value) : kOfxStatErrMissingHostFeature; }
+static OfxStatus get_double(OfxPropertySetHandle p,const char* key,int index,double* value) { return prop ? prop->propGetDouble(real_property_set(p),key,index,value) : kOfxStatErrMissingHostFeature; }
+static OfxStatus get_double_n(OfxPropertySetHandle p,const char* key,int count,double* value) { return prop ? prop->propGetDoubleN(real_property_set(p),key,count,value) : kOfxStatErrMissingHostFeature; }
 static OfxStatus get_string(OfxPropertySetHandle p,const char* key,int index,const char** value) {
-    if (!std::strcmp(key,"NiYienJianyingSourcePath") && index == 0 && frame_instance) {
-        OfxPropertySetHandle effect_properties = nullptr;
-        auto effect = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(frame_instance));
-        if (image->getPropertySet(effect,&effect_properties) == kOfxStatOK && p == effect_properties) {
-            static thread_local std::string source_path;
-            source_path = jianying_source_path::copy_source_path(frame_instance);
-            if (source_path.empty()) return kOfxStatErrUnknown;
-            *value = source_path.c_str();
-            return kOfxStatOK;
+    if(!key || !value) return kOfxStatErrBadHandle;
+    try {
+        if (!std::strcmp(key,"NiYienJianyingSourcePath") && index == 0 && frame_instance && image) {
+            OfxPropertySetHandle effect_properties = nullptr;
+            auto effect = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(frame_instance));
+            if (image->getPropertySet(effect,&effect_properties) == kOfxStatOK && p == effect_properties) {
+                static thread_local std::string source_path;
+                source_path = jianying_source_path::copy_source_path(frame_instance);
+                if (source_path.empty()) return kOfxStatErrUnknown;
+                *value = source_path.c_str();
+                return kOfxStatOK;
+            }
         }
+        if(texture_view(p)) {
+            if(!std::strcmp(key,kOfxImageEffectPropPixelDepth)) { *value=kOfxBitDepthByte;return 0; }
+            if(!std::strcmp(key,kOfxImageEffectPropComponents)) { *value=kOfxImageComponentRGBA;return 0; }
+        }
+        return prop ? prop->propGetString(real_property_set(p),key,index,value) : kOfxStatErrMissingHostFeature;
+    } catch(const std::exception& e) {
+        report_error(e.what());
+        return kOfxStatFailed;
+    } catch(...) {
+        report_error("Unknown exception in get_string");
+        return kOfxStatFailed;
     }
-    if(texture_view(p)) {
-        if(!std::strcmp(key,kOfxImageEffectPropPixelDepth)) { *value=kOfxBitDepthByte;return 0; }
-        if(!std::strcmp(key,kOfxImageEffectPropComponents)) { *value=kOfxImageComponentRGBA;return 0; }
-    }
-    return prop->propGetString(real_property_set(p),key,index,value);
 }
 static OfxStatus get_pointer(OfxPropertySetHandle p,const char* key,int index,void** value) {
-    if(auto* v=texture_view(p)) if(v->directx) {
+    if(!key || !value) return kOfxStatErrBadHandle;
+    if(auto* v=texture_view(p)) if(v->directx && texture_frame && texture_frame->directx) {
         if(!std::strcmp(key,"NiYienImagePropD3D11Texture")) { *value=v->directx->texture.Get();return 0; }
         if(!std::strcmp(key,"NiYienImagePropD3D11Device")) { *value=texture_frame->directx->device.Get();return 0; }
         if(!std::strcmp(key,"NiYienImagePropD3D11DeviceContext")) { *value=texture_frame->directx->context.Get();return 0; }
     }
     if(auto* v=texture_view(p)) if(!std::strcmp(key,kOfxImagePropData)) { *value=v->bytes.data();return 0; }
-    return prop->propGetPointer(real_property_set(p),key,index,value);
+    return prop ? prop->propGetPointer(real_property_set(p),key,index,value) : kOfxStatErrMissingHostFeature;
 }
 
 static void set_host(OfxHost* h) {
-    host = h;
-    prop = static_cast<const OfxPropertySuiteV1*>(h->fetchSuite(h->host, kOfxPropertySuite, 1));
-    param = static_cast<const OfxParameterSuiteV1*>(h->fetchSuite(h->host, kOfxParameterSuite, 1));
-    image = static_cast<const OfxImageEffectSuiteV1*>(h->fetchSuite(h->host, kOfxImageEffectSuite, 1));
-    gpu_suite=static_cast<const OfxImageEffectOpenGLRenderSuiteV1*>(h->fetchSuite(h->host,kOfxOpenGLRenderSuite,1));
-    if (prop) {
-        property_proxy=*prop;
-        property_proxy.propGetInt=get_int; property_proxy.propGetIntN=get_int_n;
-        property_proxy.propGetDouble=get_double; property_proxy.propGetDoubleN=get_double_n;
-        property_proxy.propGetString=get_string; property_proxy.propGetPointer=get_pointer;
+    if (!h || !inner) return;
+    try {
+        host = h;
+        prop = static_cast<const OfxPropertySuiteV1*>(h->fetchSuite(h->host, kOfxPropertySuite, 1));
+        param = static_cast<const OfxParameterSuiteV1*>(h->fetchSuite(h->host, kOfxParameterSuite, 1));
+        image = static_cast<const OfxImageEffectSuiteV1*>(h->fetchSuite(h->host, kOfxImageEffectSuite, 1));
+        gpu_suite=static_cast<const OfxImageEffectOpenGLRenderSuiteV1*>(h->fetchSuite(h->host,kOfxOpenGLRenderSuite,1));
+        if (prop) {
+            property_proxy=*prop;
+            property_proxy.propGetInt=get_int; property_proxy.propGetIntN=get_int_n;
+            property_proxy.propGetDouble=get_double; property_proxy.propGetDoubleN=get_double_n;
+            property_proxy.propGetString=get_string; property_proxy.propGetPointer=get_pointer;
+        }
+        if (image) { image_proxy = *image; image_proxy.clipGetImage = get_image; image_proxy.clipReleaseImage = release_image; }
+        forwarded_host = *h; forwarded_host.fetchSuite = fetch_suite;
+        inner->setHost(&forwarded_host);
+    } catch(const std::exception& e) {
+        report_error(e.what());
+    } catch(...) {
+        report_error("Unknown exception in set_host");
     }
-    if (image) { image_proxy = *image; image_proxy.clipGetImage = get_image; image_proxy.clipReleaseImage = release_image; }
-    forwarded_host = *h; forwarded_host.fetchSuite = fetch_suite;
-    inner->setHost(&forwarded_host);
 }
 
 static OfxStatus texture_render(OfxImageEffectHandle effect,OfxPropertySetHandle in,double time) {
@@ -175,19 +196,30 @@ static OfxStatus texture_render(OfxImageEffectHandle effect,OfxPropertySetHandle
         gl.getError();
         // Preserve transparent pixels outside any core output region while reusing the allocation.
         const char* directx_setting=std::getenv("NIYIEN_OFX_DIRECTX");
-        if(!(directx_setting && !std::strcmp(directx_setting,"0"))) {
-            frame.directx=std::make_unique<AngleDirectX>();
-            frame.output.directx=std::make_unique<AngleD3DTexture>(*frame.directx,gl,frame.output.width(),frame.output.height());
-            frame.output.directx->clear();
+        const bool directx_disabled = directx_setting && !std::strcmp(directx_setting,"0");
+        const bool directx_forced = directx_setting && !std::strcmp(directx_setting,"1");
+        if(!directx_disabled) {
+            try {
+                frame.directx=std::make_unique<AngleDirectX>();
+                frame.output.directx=std::make_unique<AngleD3DTexture>(*frame.directx,gl,frame.output.width(),frame.output.height());
+                frame.output.directx->clear();
+            } catch(const std::exception& e) {
+                if(directx_forced) throw;
+                report_error((std::string("DirectX11 bridge unavailable, falling back to ANGLE CPU readback: ") + e.what()).c_str());
+                frame.output.directx.reset();
+                frame.directx.reset();
+                frame.output.bytes.assign(static_cast<size_t>(frame.output.width())*frame.output.height()*4,0);
+            }
         } else frame.output.bytes.assign(static_cast<size_t>(frame.output.width())*frame.output.height()*4,0);
         texture_frame=&frame;
         status=inner->mainEntry(kOfxImageEffectActionRender,effect,in,nullptr);
         texture_frame=nullptr;
         if(status==kOfxStatOK) {
-            if(frame.directx) frame.output.directx->copy_to(frame.output_framebuffer);
+            if(frame.directx && frame.output.directx) frame.output.directx->copy_to(frame.output_framebuffer);
             else gl.write_framebuffer(frame.output_framebuffer,frame.output.width(),frame.output.height(),frame.output.bytes);
         }
     } catch(const std::exception& e) { report_error(e.what());status=kOfxStatFailed; }
+      catch(...) { report_error("Unknown exception in texture_render");status=kOfxStatFailed; }
     texture_frame=nullptr;
     if(frame.source.texture_handle) gpu_suite->clipFreeTexture(frame.source.texture_handle);
     if(frame.output.texture_handle) gpu_suite->clipFreeTexture(frame.output.texture_handle);
@@ -197,59 +229,82 @@ static OfxStatus texture_render(OfxImageEffectHandle effect,OfxPropertySetHandle
 }
 
 static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in, OfxPropertySetHandle out) {
-    if (!inner || !image || !prop || !param) return kOfxStatErrMissingHostFeature;
-    auto effect = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(handle));
-    frame_instance = handle;
-    if(!std::strcmp(action,"OfxActionOpenGLContextAttached") || !std::strcmp(action,"OfxActionOpenGLContextDetached") || !std::strcmp(action,"kOfxActionOpenGLContextDetached")) return kOfxStatOK;
-    bool render = !std::strcmp(action,kOfxImageEffectActionRender);
-    int host_gl=0;
-    double time=0;
-    if(render) {
-        prop->propGetDouble(in,kOfxPropTime,0,&time);
-        prop->propGetInt(in,kOfxImageEffectPropOpenGLEnabled,0,&host_gl);
-    }
-    OfxStatus status = render && host_gl ? texture_render(effect,in,time) : inner->mainEntry(action,handle,in,out);
-    if (!std::strcmp(action,kOfxActionDescribe) && status == kOfxStatOK) {
-        OfxPropertySetHandle props = nullptr; image->getPropertySet(effect,&props);
-        for (auto key : {kOfxPropLabel,kOfxPropShortLabel,kOfxPropLongLabel}) prop->propSetString(props,key,0,"Gyroflow");
-        prop->propSetString(props,kOfxImageEffectPluginPropGrouping,0,"NiYien");
-        const char* depth[] = {kOfxBitDepthByte}; prop->propSetStringN(props,kOfxImageEffectPropSupportedPixelDepths,1,depth);
-        for (auto key : {"OfxImageEffectPropOpenGLRenderSupported","OfxImageEffectPropOpenCLRenderSupported","OfxImageEffectPropCudaRenderSupported","OfxImageEffectPropMetalRenderSupported","OfxImageEffectPropAngleRenderSupported"}) prop->propSetString(props,key,0,"false");
-        // Jianying prefers desktop OpenGL over ANGLE when both are advertised.
-        prop->propSetString(props,"OfxImageEffectPropAngleRenderSupported",0,"true");
-    }
-    if (!std::strcmp(action,kOfxImageEffectActionDescribeInContext) && status == kOfxStatOK) {
-        // Keep the serialized parameter identity for existing drafts; rendering always stabilizes.
-        OfxParamSetHandle params; OfxPropertySetHandle p;
-        image->getParamSet(effect,&params);
-        if (param->paramDefine(params,kOfxParamTypeChoice,"DiagnosticMode",&p) == kOfxStatOK) {
-            prop->propSetString(p,kOfxPropLabel,0,"Diagnostic mode");
-            prop->propSetString(p,kOfxParamPropHint,0,"Internal rendering diagnostics.");
-            prop->propSetInt(p,kOfxParamPropDefault,0,0);
-            prop->propSetInt(p,kOfxParamPropAnimates,0,0);
-            prop->propSetInt(p,kOfxParamPropSecret,0,1);
-            const char* choices[] = {"0 - Stabilize","1 - Source copy","2 - Color pattern","3 - Source opaque","4 - Batch sweep (2.5s each)"}; prop->propSetStringN(p,kOfxParamPropChoiceOption,5,choices);
-            OfxParamHandle page; OfxPropertySetHandle page_props;
-            if (param->paramGetHandle(params,"Main",&page,&page_props) == kOfxStatOK) { int count=0; prop->propGetDimension(page_props,kOfxParamPropPageChild,&count); prop->propSetString(page_props,kOfxParamPropPageChild,count,"DiagnosticMode"); }
+    if (!action || !inner || !image || !prop || !param) return kOfxStatErrMissingHostFeature;
+    try {
+        auto effect = reinterpret_cast<OfxImageEffectHandle>(const_cast<void*>(handle));
+        frame_instance = handle;
+        if(!std::strcmp(action,"OfxActionOpenGLContextAttached") || !std::strcmp(action,"OfxActionOpenGLContextDetached") || !std::strcmp(action,"kOfxActionOpenGLContextDetached")) return kOfxStatOK;
+        bool render = !std::strcmp(action,kOfxImageEffectActionRender);
+        int host_gl=0;
+        double time=0;
+        if(render) {
+            prop->propGetDouble(in,kOfxPropTime,0,&time);
+            prop->propGetInt(in,kOfxImageEffectPropOpenGLEnabled,0,&host_gl);
         }
+        OfxStatus status = render && host_gl ? texture_render(effect,in,time) : inner->mainEntry(action,handle,in,out);
+        if (!std::strcmp(action,kOfxActionDescribe) && status == kOfxStatOK) {
+            OfxPropertySetHandle props = nullptr; image->getPropertySet(effect,&props);
+            for (auto key : {kOfxPropLabel,kOfxPropShortLabel,kOfxPropLongLabel}) prop->propSetString(props,key,0,"Gyroflow");
+            prop->propSetString(props,kOfxImageEffectPluginPropGrouping,0,"NiYien");
+            const char* depth[] = {kOfxBitDepthByte}; prop->propSetStringN(props,kOfxImageEffectPropSupportedPixelDepths,1,depth);
+            for (auto key : {"OfxImageEffectPropOpenGLRenderSupported","OfxImageEffectPropOpenCLRenderSupported","OfxImageEffectPropCudaRenderSupported","OfxImageEffectPropMetalRenderSupported","OfxImageEffectPropAngleRenderSupported"}) prop->propSetString(props,key,0,"false");
+            // Jianying prefers desktop OpenGL over ANGLE when both are advertised.
+            prop->propSetString(props,"OfxImageEffectPropAngleRenderSupported",0,"true");
+        }
+        if (!std::strcmp(action,kOfxImageEffectActionDescribeInContext) && status == kOfxStatOK) {
+            // Keep the serialized parameter identity for existing drafts; rendering always stabilizes.
+            OfxParamSetHandle params; OfxPropertySetHandle p;
+            image->getParamSet(effect,&params);
+            if (param->paramDefine(params,kOfxParamTypeChoice,"DiagnosticMode",&p) == kOfxStatOK) {
+                prop->propSetString(p,kOfxPropLabel,0,"Diagnostic mode");
+                prop->propSetString(p,kOfxParamPropHint,0,"Internal rendering diagnostics.");
+                prop->propSetInt(p,kOfxParamPropDefault,0,0);
+                prop->propSetInt(p,kOfxParamPropAnimates,0,0);
+                prop->propSetInt(p,kOfxParamPropSecret,0,1);
+                const char* choices[] = {"0 - Stabilize","1 - Source copy","2 - Color pattern","3 - Source opaque","4 - Batch sweep (2.5s each)"}; prop->propSetStringN(p,kOfxParamPropChoiceOption,5,choices);
+                OfxParamHandle page; OfxPropertySetHandle page_props;
+                if (param->paramGetHandle(params,"Main",&page,&page_props) == kOfxStatOK) { int count=0; prop->propGetDimension(page_props,kOfxParamPropPageChild,&count); prop->propSetString(page_props,kOfxParamPropPageChild,count,"DiagnosticMode"); }
+            }
+        }
+        return status;
+    } catch(const std::exception& e) {
+        report_error(e.what());
+        return kOfxStatFailed;
+    } catch(...) {
+        report_error("Unknown exception in entry");
+        return kOfxStatFailed;
     }
-    return status;
 }
 
 static OfxPlugin plugin = {kOfxImageEffectPluginApi,1,"xyz.NiYien.gyroflow",1,11,set_host,entry};
 extern "C" __declspec(dllexport) int OfxGetNumberOfPlugins() { return 1; }
 extern "C" __declspec(dllexport) OfxPlugin* OfxGetPlugin(int index) {
     if (index != 0) return nullptr;
-    static std::once_flag once;
-    std::call_once(once, [] {
-        HMODULE own = nullptr; wchar_t path[32768]{};
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(&OfxGetPlugin),&own);
-        GetModuleFileNameW(own,path,32768);
-        auto binary_dir = fs::path(path).parent_path();
-        HMODULE dll = LoadLibraryW((binary_dir / L"gyroflow_ofx.dll").c_str());
-        if (!dll) { report_error("Cannot load gyroflow_ofx.dll");return; }
-        auto get = reinterpret_cast<OfxPlugin*(*)(int)>(GetProcAddress(dll,"OfxGetPlugin"));
-        if (get) inner = get(0);
-    });
-    return inner ? &plugin : nullptr;
+    try {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            HMODULE own = nullptr; wchar_t path[32768]{};
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(&OfxGetPlugin),&own) || !own) {
+                report_error("Cannot resolve Jianying wrapper module handle");
+                return;
+            }
+            const DWORD path_len = GetModuleFileNameW(own,path,32768);
+            if (!path_len || path_len >= 32768) {
+                report_error("Cannot resolve Jianying wrapper path");
+                return;
+            }
+            auto binary_dir = fs::path(path).parent_path();
+            HMODULE dll = LoadLibraryW((binary_dir / L"gyroflow_ofx.dll").c_str());
+            if (!dll) { report_error("Cannot load gyroflow_ofx.dll");return; }
+            auto get = reinterpret_cast<OfxPlugin*(*)(int)>(GetProcAddress(dll,"OfxGetPlugin"));
+            if (get) inner = get(0);
+        });
+        return inner ? &plugin : nullptr;
+    } catch(const std::exception& e) {
+        report_error(e.what());
+        return nullptr;
+    } catch(...) {
+        report_error("Unknown exception in OfxGetPlugin");
+        return nullptr;
+    }
 }
